@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    environment:
+      POSTGRES_USER: f1user
+      POSTGRES_PASSWORD: f1pass
+      POSTGRES_DB: f1db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U f1user -d f1db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      TIMESCALE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: dev-secret-key-not-for-production
+      FASTF1_CACHE_DIR: /tmp/fastf1_cache
+      ENVIRONMENT: development
+    volumes:
+      - ../../backend:/app/backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      TIMESCALE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: dev-secret-key-not-for-production
+      FASTF1_CACHE_DIR: /tmp/fastf1_cache
+      ENVIRONMENT: development
+    volumes:
+      - ../../backend:/app/backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
