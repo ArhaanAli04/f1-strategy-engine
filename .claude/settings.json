@@ -1,0 +1,79 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "description": "Auto-lint Python files after Claude writes them",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [[ \"$CLAUDE_TOOL_OUTPUT_FILE\" == *.py ]]; then cd backend && ruff check \"$CLAUDE_TOOL_OUTPUT_FILE\" --fix --quiet && ruff format \"$CLAUDE_TOOL_OUTPUT_FILE\" --quiet && echo \"[hook] lint passed: $CLAUDE_TOOL_OUTPUT_FILE\"; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "description": "Warn when writing to migrations/versions/ — remind to review before applying",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [[ \"$CLAUDE_TOOL_OUTPUT_FILE\" == *migrations/versions/* ]]; then echo \"[MIGRATION WRITTEN] Review this file carefully before running make migrate. Check for DROP TABLE, DROP COLUMN, or nullable issues.\"; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "description": "Remind to update CLAUDE.md Current Project Phase when day is complete",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [[ \"$CLAUDE_TOOL_OUTPUT_FILE\" == *CLAUDE.md ]]; then echo \"[CLAUDE.md updated] Good — phase tracker is current.\"; fi'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "description": "Block destructive database commands without explicit confirmation",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cmd=\"$CLAUDE_TOOL_INPUT_COMMAND\"; if echo \"$cmd\" | grep -qiE \"DROP TABLE|DROP DATABASE|DELETE FROM .* WHERE 1|TRUNCATE|alembic downgrade base\"; then echo \"[BLOCKED] Destructive DB command detected. You must explicitly confirm this in your next message before Claude proceeds.\"; exit 1; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "description": "Block accidental rm -rf on source directories",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cmd=\"$CLAUDE_TOOL_INPUT_COMMAND\"; if echo \"$cmd\" | grep -qE \"rm -rf (backend|web|mobile|desktop|infra|migrations)\"; then echo \"[BLOCKED] Attempted rm -rf on a source directory. This is not allowed.\"; exit 1; fi'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "description": "Warn before kubectl delete or helm uninstall in production",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'cmd=\"$CLAUDE_TOOL_INPUT_COMMAND\"; if echo \"$cmd\" | grep -qE \"kubectl delete|helm uninstall|helm delete\"; then echo \"[WARNING] Kubernetes destructive command. Confirm this is intentional and targeting the correct namespace.\"; fi'"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "description": "Print orientation reminder at the start of every session",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"\\n=== F1 Strategy Engine — Session Start ===\"; echo \"1. Read CLAUDE.md in full\"; echo \"2. Check git log --oneline -10\"; echo \"3. Check Current Project Phase in CLAUDE.md\"; echo \"4. Then begin the day tasks\"; echo \"=========================================\\n\"'"
+          }
+        ]
+      }
+    ]
+  }
+}
