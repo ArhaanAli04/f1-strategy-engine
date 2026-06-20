@@ -263,11 +263,14 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    [1 / 2 / 3 / 4 / 5 / 6 / 7 / 8]
-Day:      [1–40]
-Status:   [what was last completed]
-Next:     [what today's session should build]
-Blockers: [anything broken or incomplete from last session]
+Phase:    1
+Day:      1
+Status:   Full directory skeleton, pyproject.toml, .env.example, Makefile,
+          backend/main.py (health endpoint only), backend/workers/celery_app.py,
+          Dockerfile.backend, Dockerfile.worker, docker-compose.yml — all built
+          and verified. docker compose up confirmed all 4 services healthy.
+Next:     Day 2 — core/ config, database session, Redis client, FastAPI app shell
+Blockers: none
 ```
 
 ---
