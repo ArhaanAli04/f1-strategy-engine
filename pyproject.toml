@@ -31,6 +31,8 @@ dependencies = [
     "shap>=0.45.0",
     "umap-learn>=0.5.6",
     "joblib>=1.4.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,7 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.10.0",
     "types-redis>=4.6.0",
+    "types-passlib>=1.7.4",
     "pre-commit>=3.7.0",
 ]
 
