@@ -264,12 +264,18 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    1
-Day:      1
-Status:   Full directory skeleton, pyproject.toml, .env.example, Makefile,
-          backend/main.py (health endpoint only), backend/workers/celery_app.py,
-          Dockerfile.backend, Dockerfile.worker, docker-compose.yml — all built
-          and verified. docker compose up confirmed all 4 services healthy.
-Next:     Day 2 — core/ config, database session, Redis client, FastAPI app shell
+Day:      2
+Status:   core/ fully implemented: config.py (6 pydantic-settings classes, lru_cache
+          singletons), database.py (lazy async engine, AsyncSession, Base, get_db),
+          redis_client.py (connection pool, get_redis, CRUD helpers), exceptions.py
+          (F1StrategyError hierarchy + FastAPI handlers), security.py (JWT via
+          python-jose, bcrypt via passlib, get_current_user, require_role),
+          middleware.py (CORS, RequestID, Timing+Prometheus). main.py expanded with
+          lifespan, Prometheus at /metrics, structured /health (200/503). ruff +
+          mypy --strict clean. uvicorn starts; /docs 200, /metrics 200, /health
+          returns correct JSON. Added python-jose, passlib, types-passlib to deps.
+Next:     Day 3 — SQLAlchemy models (Race, Driver, LapData, StrategyPrediction) +
+          first Alembic migration
 Blockers: none
 ```
 
