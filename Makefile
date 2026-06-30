@@ -1,4 +1,4 @@
-.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed ingest
+.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest
 
 install:
 	pip install -e ".[dev]"
@@ -34,6 +34,9 @@ train:
 	python backend/scripts/train_models.py
 
 seed:
+	python backend/scripts/seed_circuits.py
+
+seed-circuits:
 	python backend/scripts/seed_circuits.py
 
 ingest:
