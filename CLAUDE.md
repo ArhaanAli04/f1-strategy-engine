@@ -191,6 +191,17 @@ and opponent reactions are random. A deterministic model gives false confidence.
 Monte Carlo with 1000 simulations returns a probability distribution over outcomes
 which is the honest representation of uncertainty.
 
+**Why is lap_data not yet a TimescaleDB hypertable?**
+TimescaleDB requires every unique constraint on a hypertable to include the partition
+column (created_at). The current schema has `sector_times.lap_data_id → lap_data.id`
+backed by a single-column unique constraint on `lap_data.id` — which TimescaleDB
+forbids. A future migration (before any production data load) must first add a
+`lap_data_created_at TIMESTAMPTZ NOT NULL` column to `sector_times` and change the
+FK to a composite reference: `(lap_data_id, lap_data_created_at) → lap_data(id, created_at)`.
+Once that schema change lands, a follow-up migration can call `create_hypertable`.
+Until then, `lap_data` is a regular indexed Postgres table. The TimescaleDB extension
+is already installed (migration b2e4f6a8c0d1).
+
 ---
 
 ## ML Model Registry
