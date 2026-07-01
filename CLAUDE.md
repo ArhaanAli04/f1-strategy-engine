@@ -275,14 +275,11 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    1
-Day:      3
-Status:   All 14 SQLAlchemy models written across race.py, driver.py, telemetry.py,
-          strategy.py, user.py. Alembic configured (async-aware env.py). Initial
-          schema migration applied to live Postgres — 14 tables verified, 
-          alembic check clean. TimescaleDB extension installed; lap_data hypertable 
-          conversion deferred (see architecture decisions — requires composite FK 
-          on sector_times first). 24 circuits seeded via scripts/seed_circuits.py.
-Next:     Day 4 — Pydantic schemas for API request/response
+Day:      4
+Status:   8 Pydantic schema files, 35 exported types. EmailStr added with
+          email-validator dependency. ruff + mypy --strict clean across
+          41 source files. alembic check clean. All schemas JSON-schema valid.
+Next:     Day 5 — FastF1 integration and historical data ingestion script
 Blockers: none
 ```
 
