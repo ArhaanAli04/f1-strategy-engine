@@ -60,6 +60,7 @@ Read CLAUDE.md first to orient yourself on the full stack and conventions.
 Today is Day [X]. We are in Phase [Y].
 Last session we completed: [one sentence].
 Today's goal: [one sentence].
+No need to plan things on your own for day [X], I will provide the exact day [X] spec myself.
 ```
 
 ## File Locations
