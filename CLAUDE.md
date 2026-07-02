@@ -274,12 +274,16 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    1
-Day:      4
-Status:   8 Pydantic schema files, 35 exported types. EmailStr added with
-          email-validator dependency. ruff + mypy --strict clean across
-          41 source files. alembic check clean. All schemas JSON-schema valid.
-Next:     Day 5 — FastF1 integration and historical data ingestion script
+Phase:    2
+Day:      5
+Status:  FastF1 integration complete. ingest_historical.py with --all-rounds 
+          flag (cross-platform), backfill_tire_data.py with linear regression.
+          Two new migrations: unique constraints on lap_data/tire_stints, 
+          compound column widened String(10)→String(20). Full 2025 season 
+          ingested: 26,689 lap_data rows, 1,295 tire_stints, all 24 rounds 
+          verified. Miami/Singapore circuit mapping fixed after count diff caught 
+          missing rounds. Makefile ingest-season now shell-agnostic via --all-rounds.
+Next:     Day 6 — Live session ingestor, Celery workers, WebSocket consumer
 Blockers: none
 ```
 
