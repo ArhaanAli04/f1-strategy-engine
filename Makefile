@@ -1,4 +1,4 @@
-.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest
+.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest ingest-season backfill-tire-data
 
 install:
 	pip install -e ".[dev]"
@@ -40,4 +40,10 @@ seed-circuits:
 	python backend/scripts/seed_circuits.py
 
 ingest:
-	python backend/scripts/ingest_historical.py --season $(SEASON)
+	python backend/scripts/ingest_historical.py --season $(SEASON) --round $(ROUND) --session-type $(SESSION_TYPE)
+
+ingest-season:
+	python backend/scripts/ingest_historical.py --season $(SEASON) --all-rounds --session-type R
+
+backfill-tire-data:
+	python backend/scripts/backfill_tire_data.py $(if $(SEASON),--season $(SEASON),)
