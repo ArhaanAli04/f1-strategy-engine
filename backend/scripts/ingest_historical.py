@@ -11,12 +11,10 @@ import os
 import subprocess
 import sys
 import uuid
-from datetime import date
 from typing import Any, cast
 
 import fastf1
 import pandas as pd
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,54 +22,21 @@ from tqdm import tqdm
 
 from backend.core.config import get_ml_settings
 from backend.core.database import get_engine
-from backend.models.driver import Driver
-from backend.models.race import Circuit, Race
-from backend.models.race import Session as SessionModel
 from backend.models.telemetry import LapData, TireStint
+from backend.scripts._ingest_common import (
+    RoundSkippedError,
+    get_or_create_circuit,
+    get_or_create_drivers,
+    get_or_create_race,
+    get_or_create_session,
+    or_default,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 _BATCH_SIZE = 1000
 _VALID_SESSION_TYPES = ("R", "Q", "FP1", "FP2", "FP3")
-
-# Maps FastF1's Event.Location to the exact circuit names seeded in
-# scripts/seed_circuits.py (Day 3, 2024-season calendar — unchanged for 2025).
-_LOCATION_TO_CIRCUIT_NAME: dict[str, str] = {
-    "Sakhir": "Bahrain International Circuit",
-    "Jeddah": "Jeddah Corniche Circuit",
-    "Melbourne": "Albert Park Circuit",
-    "Suzuka": "Suzuka Circuit",
-    "Shanghai": "Shanghai International Circuit",
-    "Miami": "Miami International Autodrome",
-    "Miami Gardens": "Miami International Autodrome",
-    "Imola": "Autodromo Enzo e Dino Ferrari",
-    "Monaco": "Circuit de Monaco",
-    "Barcelona": "Circuit de Barcelona-Catalunya",
-    "Montréal": "Circuit Gilles Villeneuve",
-    "Montreal": "Circuit Gilles Villeneuve",
-    "Spielberg": "Red Bull Ring",
-    "Silverstone": "Silverstone Circuit",
-    "Budapest": "Hungaroring",
-    "Spa-Francorchamps": "Circuit de Spa-Francorchamps",
-    "Zandvoort": "Circuit Zandvoort",
-    "Monza": "Autodromo Nazionale Monza",
-    "Baku": "Baku City Circuit",
-    "Singapore": "Marina Bay Street Circuit",
-    "Marina Bay": "Marina Bay Street Circuit",
-    "Austin": "Circuit of the Americas",
-    "Mexico City": "Autodromo Hermanos Rodriguez",
-    "São Paulo": "Autodromo Jose Carlos Pace",
-    "Sao Paulo": "Autodromo Jose Carlos Pace",
-    "Las Vegas": "Las Vegas Strip Circuit",
-    "Lusail": "Lusail International Circuit",
-    "Yas Island": "Yas Marina Circuit",
-    "Abu Dhabi": "Yas Marina Circuit",
-}
-
-
-class RoundSkippedError(Exception):
-    """Raised when a round cannot be ingested for a known, non-crash reason."""
 
 
 def _parse_args() -> argparse.Namespace:
@@ -117,112 +82,10 @@ def _load_session(season: int, round_number: int, session_type: str) -> fastf1.c
     return session
 
 
-async def _get_or_create_circuit(db: AsyncSession, location: str) -> Circuit:
-    circuit_name = _LOCATION_TO_CIRCUIT_NAME.get(location)
-    if circuit_name is None:
-        raise RoundSkippedError(f"No known circuit mapping for FastF1 location '{location}'")
-
-    result = await db.execute(select(Circuit).where(Circuit.name == circuit_name))
-    circuit = result.scalar_one_or_none()
-    if circuit is None:
-        raise RoundSkippedError(
-            f"Circuit '{circuit_name}' not found — run `make seed-circuits` first"
-        )
-
-    return circuit
-
-
-async def _get_or_create_race(
-    db: AsyncSession, season: int, round_number: int, circuit_id: uuid.UUID, race_date: date
-) -> Race:
-    result = await db.execute(
-        select(Race).where(Race.season == season, Race.round_number == round_number)
-    )
-    race = result.scalar_one_or_none()
-    if race is None:
-        race = Race(
-            id=uuid.uuid4(),
-            season=season,
-            round_number=round_number,
-            circuit_id=circuit_id,
-            race_date=race_date,
-            status="completed",
-        )
-        db.add(race)
-        await db.flush()
-    return race
-
-
-async def _get_or_create_session(
-    db: AsyncSession, race_id: uuid.UUID, session_type: str, session_date: date
-) -> SessionModel:
-    result = await db.execute(
-        select(SessionModel).where(
-            SessionModel.race_id == race_id, SessionModel.session_type == session_type
-        )
-    )
-    session_row = result.scalar_one_or_none()
-    if session_row is None:
-        session_row = SessionModel(
-            id=uuid.uuid4(),
-            race_id=race_id,
-            session_type=session_type,
-            session_date=session_date,
-        )
-        db.add(session_row)
-        await db.flush()
-    return session_row
-
-
-async def _get_or_create_drivers(
-    db: AsyncSession, fastf1_session: fastf1.core.Session
-) -> dict[str, uuid.UUID]:
-    """Map FastF1 driver codes to Driver.id, creating new Driver rows as needed."""
-    code_to_id: dict[str, uuid.UUID] = {}
-
-    result = await db.execute(select(Driver.code, Driver.id))
-    existing: dict[str, uuid.UUID] = {row.code: row.id for row in result}
-
-    for driver_number in fastf1_session.drivers:
-        try:
-            info = fastf1_session.get_driver(driver_number)
-        except Exception as exc:  # noqa: BLE001 — per-driver skip, logged below
-            logger.warning("Skipping unresolvable driver number %s: %s", driver_number, exc)
-            continue
-
-        code = info.get("Abbreviation")
-        if not code:
-            logger.warning("Skipping driver number %s with no Abbreviation", driver_number)
-            continue
-
-        if code in existing:
-            code_to_id[code] = existing[code]
-            continue
-
-        driver = Driver(
-            id=uuid.uuid4(),
-            code=code,
-            full_name=_or_default(info.get("FullName"), code),
-            nationality=_or_default(info.get("CountryCode"), "UNK"),
-        )
-        db.add(driver)
-        await db.flush()
-        existing[code] = driver.id
-        code_to_id[code] = driver.id
-
-    return code_to_id
-
-
 def _lap_time_to_seconds(value: pd.Timedelta) -> float | None:
     if pd.isna(value):
         return None
     return float(value.total_seconds())
-
-
-def _or_default(value: object, default: str) -> str:
-    if value is None or (not isinstance(value, str) and pd.isna(value)):
-        return default
-    return str(value)
 
 
 async def _upsert_lap_data(
@@ -251,7 +114,7 @@ async def _upsert_lap_data(
                     "driver_id": driver_id,
                     "lap_number": int(lap["LapNumber"]),
                     "lap_time_seconds": _lap_time_to_seconds(lap["LapTime"]),
-                    "compound": _or_default(lap["Compound"], "UNKNOWN"),
+                    "compound": or_default(lap["Compound"], "UNKNOWN"),
                     "tyre_age_laps": (int(lap["TyreLife"]) if not pd.isna(lap["TyreLife"]) else 0),
                     "is_valid": (
                         bool(lap["IsAccurate"]) if not pd.isna(lap["IsAccurate"]) else False
@@ -334,15 +197,15 @@ async def ingest(season: int, round_number: int, session_type: str) -> None:
     )
 
     async with session_factory() as db:
-        circuit = await _get_or_create_circuit(db, fastf1_session.event["Location"])
-        race = await _get_or_create_race(
+        circuit = await get_or_create_circuit(db, fastf1_session.event["Location"])
+        race = await get_or_create_race(
             db,
             season=season,
             round_number=round_number,
             circuit_id=circuit.id,
             race_date=fastf1_session.event["EventDate"].date(),
         )
-        session_row = await _get_or_create_session(
+        session_row = await get_or_create_session(
             db,
             race_id=race.id,
             session_type=session_type,
@@ -350,7 +213,7 @@ async def ingest(season: int, round_number: int, session_type: str) -> None:
         )
         await db.commit()
 
-        driver_code_to_id = await _get_or_create_drivers(db, fastf1_session)
+        driver_code_to_id = await get_or_create_drivers(db, fastf1_session)
         await db.commit()
 
         laps = fastf1_session.laps

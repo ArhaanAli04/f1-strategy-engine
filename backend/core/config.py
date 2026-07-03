@@ -40,6 +40,17 @@ class MLSettings(BaseSettings):
     model_config = _ENV
 
     fastf1_cache_dir: str = "/tmp/fastf1_cache"  # noqa: S108
+    model_cache_dir: str = "/tmp/f1_models"  # noqa: S108
+
+
+class LiveTimingSettings(BaseSettings):
+    model_config = _ENV
+
+    # F1's live timing feed requires an F1TV Access/Pro/Premium subscription
+    # and a one-time interactive browser auth (see fastf1.internals.f1auth).
+    # Default to unauthenticated (partial/best-effort data) until a
+    # subscription token is set up; flip this once one is.
+    f1tv_authenticated: bool = False
 
 
 class AppSettings(BaseSettings):
@@ -48,6 +59,9 @@ class AppSettings(BaseSettings):
     sentry_dsn: str = ""
     environment: str = "development"
     fcm_server_key: str = ""
+    # firebase-admin's messaging API requires a service-account JSON
+    # (Google retired the legacy FCM_SERVER_KEY HTTP API in June 2024).
+    firebase_credentials_path: str = ""
 
 
 @lru_cache
@@ -73,6 +87,11 @@ def get_aws_settings() -> AWSSettings:
 @lru_cache
 def get_ml_settings() -> MLSettings:
     return MLSettings()
+
+
+@lru_cache
+def get_live_timing_settings() -> LiveTimingSettings:
+    return LiveTimingSettings()
 
 
 @lru_cache

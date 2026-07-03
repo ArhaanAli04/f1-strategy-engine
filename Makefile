@@ -1,4 +1,4 @@
-.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest ingest-season backfill-tire-data
+.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest ingest-season backfill-tire-data ingest-live
 
 install:
 	pip install -e ".[dev]"
@@ -47,3 +47,6 @@ ingest-season:
 
 backfill-tire-data:
 	python backend/scripts/backfill_tire_data.py $(if $(SEASON),--season $(SEASON),)
+
+ingest-live:
+	python backend/scripts/ingest_live_session.py --season $(SEASON) $(if $(ROUND),--round $(ROUND) --session-type $(SESSION_TYPE),--poll)
