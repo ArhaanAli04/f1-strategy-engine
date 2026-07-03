@@ -275,16 +275,17 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    2
-Day:      5
-Status:  FastF1 integration complete. ingest_historical.py with --all-rounds 
-          flag (cross-platform), backfill_tire_data.py with linear regression.
-          Two new migrations: unique constraints on lap_data/tire_stints, 
-          compound column widened String(10)→String(20). Full 2025 season 
-          ingested: 26,689 lap_data rows, 1,295 tire_stints, all 24 rounds 
-          verified. Miami/Singapore circuit mapping fixed after count diff caught 
-          missing rounds. Makefile ingest-season now shell-agnostic via --all-rounds.
-Next:     Day 6 — Live session ingestor, Celery workers, WebSocket consumer
-Blockers: none
+Day:      6
+Status:  celery_app.py rewritten with 3 queues. telemetry_worker, 
+          prediction_worker, alert_worker written. Dockerfile.worker 
+          PYTHONPATH fixed. ingest_live_session.py with custom SignalR 
+          client, CarData Redis SETEX, APScheduler race detection. 
+          conftest.py + integration test for mock lap → StrategyPrediction 
+          verified. Fixed cross-loop asyncio engine.dispose() bug in all 3 
+          workers. ruff + mypy --strict clean (53 files). Docker build clean.
+Next:     Day 7 — ML model training (tire degradation, pit predictor, 
+          safety car). Remember to ingest 2018-2024 seasons first.
+Blockers: AWS S3 not set up yet (needed for model uploads on Day 7)
 ```
 
 ---
