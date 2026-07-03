@@ -298,3 +298,72 @@ Blockers: none
 5. Then and only then begin implementing the day's tasks
 
 Never assume file contents from memory. Always read the actual file before editing it.
+
+
+## External Services & Credentials Checklist
+
+Track which external services have been set up and which are pending.
+Update this list as each service is configured.
+
+| Service | Purpose | Status | Needed By |
+|---|---|---|---|
+| Firebase / FCM | Push notifications (mobile + web) | ⬜ Not set up | Day 31 |
+| F1TV Subscription | Authenticated live timing feed | ⬜ Not set up | Live testing |
+| AWS S3 (f1-strategy-models) | ML model storage | ⬜ Not set up | Day 7 |
+| AWS IAM credentials | S3 read/write access | ⬜ Not set up | Day 7 |
+| Supabase (production DB) | Cloud PostgreSQL + TimescaleDB | ⬜ Not set up | Day 23 |
+| Upstash Redis (production) | Cloud Redis cache + broker | ⬜ Not set up | Day 23 |
+| Kubernetes cluster (EKS/GKE) | Production container orchestration | ⬜ Not set up | Day 22 |
+| Sentry | Exception tracking + performance | ⬜ Not set up | Day 12 |
+| Vercel | Web frontend deployment | ⬜ Not set up | Day 33 |
+| GitHub Secrets | CD pipeline credentials | ⬜ Not set up | Day 19 |
+
+### Setup Notes
+
+**Firebase FCM:**
+- console.firebase.google.com → New project → Cloud Messaging
+- Project Settings → Service Accounts → Generate new private key → save JSON
+- Add path to .env: FIREBASE_CREDENTIALS_PATH=/path/to/firebase-credentials.json
+- Never commit the JSON file — add it to .gitignore
+
+**F1TV Auth:**
+- Requires active F1TV subscription
+- Run get_auth_token() once to cache OAuth token locally
+- ingest_live_session.py defaults to no_auth=True until this is configured
+
+**AWS S3:**
+- Create bucket: f1-strategy-models (private, versioning on, AES-256)
+- IAM user with s3:GetObject, s3:PutObject on that bucket only
+- Add to .env: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION=ap-south-1
+
+**Sentry:**
+- sentry.io → New Project → Python → FastAPI
+- Add DSN to .env: SENTRY_DSN=https://...
+
+**GitHub Secrets (add before Day 19):**
+- AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+- DATABASE_URL (production Supabase)
+- REDIS_URL (production Upstash)
+- SECRET_KEY (fresh 64-char random string for production)
+- SENTRY_DSN
+- KUBECONFIG (base64-encoded kubectl config)
+
+## Deferred Schema Changes
+
+Schema additions that were intentionally deferred from their discovery day
+to avoid out-of-scope migrations. Add these on the specified day.
+
+| Column | Table | Purpose | Add On |
+|---|---|---|---|
+| fcm_token | users | Device token for FCM push notifications | Day 10 |
+
+### Notes
+
+**users.fcm_token (Day 10):**
+- Discovered on Day 6 when alert_worker.py found no device token column on User
+- FCM dispatch is currently a structured no-op — matching and Celery dispatch
+  work correctly, but _send_fcm logs and returns early since no token exists
+- On Day 10 (user auth endpoints): add migration for users.fcm_token VARCHAR(255)
+  nullable, update User model, update UserResponse schema to include it,
+  add PUT /auth/fcm-token endpoint that mobile/web clients call after
+  requesting push permission
