@@ -368,3 +368,17 @@ to avoid out-of-scope migrations. Add these on the specified day.
   nullable, update User model, update UserResponse schema to include it,
   add PUT /auth/fcm-token endpoint that mobile/web clients call after
   requesting push permission
+
+
+## Data Quality Notes
+
+**Historical ingestion coverage (2018-2024 training corpus):**
+- Total: ~139,764 lap records across 7 seasons
+- Missing circuits due to FastF1 location name mismatches:
+  Le Castellet (French GP 2018-2021), Yas Marina (Abu Dhabi 2018),
+  Portimão (Portuguese GP 2021), Istanbul Park (Turkish GP 2020-2021),
+  Mugello (Tuscany GP 2020), Nürburgring (Eifel GP 2020)
+- Decision: not fixing — missing circuits are either off-calendar or 
+  represented by more recent season data. 139k laps is sufficient 
+  training corpus for all 7 ML models.
+- 2025 holdout set: 26,689 laps, all 24 rounds complete
