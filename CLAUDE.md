@@ -275,17 +275,17 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    2
-Day:      6
-Status:  celery_app.py rewritten with 3 queues. telemetry_worker, 
-          prediction_worker, alert_worker written. Dockerfile.worker 
-          PYTHONPATH fixed. ingest_live_session.py with custom SignalR 
-          client, CarData Redis SETEX, APScheduler race detection. 
-          conftest.py + integration test for mock lap → StrategyPrediction 
-          verified. Fixed cross-loop asyncio engine.dispose() bug in all 3 
-          workers. ruff + mypy --strict clean (53 files). Docker build clean.
-Next:     Day 7 — ML model training (tire degradation, pit predictor, 
-          safety car). Remember to ingest 2018-2024 seasons first.
-Blockers: AWS S3 not set up yet (needed for model uploads on Day 7)
+Day:      7
+Status:   All 7 ML models trained and uploaded to S3 (version 20260708-105022).
+          tire_deg_soft/medium/hard/inter promoted on first run.
+          tire_deg_wet trained on 319 laps, CV-only promotion (no 2025 wet races).
+          pit_predictor fixed (is_valid filter bug — positive rate 0.03%→2.76%,
+          cv_auc 0.577→0.992, holdout_mae 0.101→0.034).
+          safety_car_model fit on 24 circuits from real TrackStatus SC/VSC events.
+          Backfill ran across all 166,453 laps for position + track_status columns.
+          track_temp/air_temp deferred (see deferred schema changes).
+Next:     Day 8 — Monte Carlo race simulation service
+Blockers: None
 ```
 
 ---
