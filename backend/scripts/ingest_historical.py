@@ -119,6 +119,10 @@ async def _upsert_lap_data(
                     "is_valid": (
                         bool(lap["IsAccurate"]) if not pd.isna(lap["IsAccurate"]) else False
                     ),
+                    "position": (int(lap["Position"]) if not pd.isna(lap["Position"]) else None),
+                    "track_status": (
+                        str(lap["TrackStatus"]) if not pd.isna(lap["TrackStatus"]) else None
+                    ),
                     "sector1_seconds": _lap_time_to_seconds(lap["Sector1Time"]),
                     "sector2_seconds": _lap_time_to_seconds(lap["Sector2Time"]),
                     "sector3_seconds": _lap_time_to_seconds(lap["Sector3Time"]),

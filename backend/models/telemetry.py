@@ -36,6 +36,10 @@ class LapData(Base):
     compound: Mapped[str] = mapped_column(String(20), nullable=False)
     tyre_age_laps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Raw FastF1 TrackStatus code(s) active during this lap, e.g. "1", "24"
+    # (multiple simultaneous flags are concatenated by FastF1). 4=SC, 6/7=VSC.
+    track_status: Mapped[str | None] = mapped_column(String(10), nullable=True)
     sector1_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sector2_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sector3_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
