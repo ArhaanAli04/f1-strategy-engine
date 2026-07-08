@@ -357,6 +357,7 @@ to avoid out-of-scope migrations. Add these on the specified day.
 | Column | Table | Purpose | Add On |
 |---|---|---|---|
 | fcm_token | users | Device token for FCM push notifications | Day 10 |
+| track_temp, air_temp | lap_data | Weather features for tire_deg_model | TBD |
 
 ### Notes
 
@@ -368,6 +369,34 @@ to avoid out-of-scope migrations. Add these on the specified day.
   nullable, update User model, update UserResponse schema to include it,
   add PUT /auth/fcm-token endpoint that mobile/web clients call after
   requesting push permission
+
+**lap_data.track_temp / air_temp (TBD):**
+- Discovered on Day 7: the original tire_deg_model spec called for track_temp
+  and air_temp features, but ingest_historical.py loads FastF1 sessions with
+  weather=False, so no weather data was ever ingested and no weather table exists.
+- Unlike position/track_status (which FastF1's Laps dataframe already carries
+  at zero extra cost), weather requires a separate FastF1 API call
+  (session.load(weather=True)) plus a time-based join of weather samples onto
+  laps — a real re-ingestion cost, not a free backfill.
+- Decision on Day 7: ship tire_deg_model.py without these two features rather
+  than block all 5 tire degradation models on a weather re-ingestion.
+- When this lands: add track_temp/air_temp (Float, nullable) to lap_data,
+  extend ingest_historical.py and a backfill script to populate them (same
+  pattern as backfill_position_track_status.py), add both to
+  tire_deg_model.FEATURE_COLUMNS, and retrain all 5 compound models.
+
+## Deferred Test Coverage
+
+Per pre-commit.md convention, `backend/tests/unit/` collecting 0 tests
+(pytest exit code 5) is the expected, accepted result before Day 14 —
+CLAUDE.md's unit-test coverage rule applies starting Day 14, not to
+services written earlier.
+
+| Test File | Covers | Add On |
+|---|---|---|
+| tests/unit/test_tire_deg_model.py | backend/services/ml/tire_deg_model.py | Day 14 |
+| tests/unit/test_pit_predictor.py | backend/services/ml/pit_predictor.py | Day 14 |
+| tests/unit/test_safety_car_model.py | backend/services/ml/safety_car_model.py | Day 14 |
 
 
 ## Data Quality Notes
