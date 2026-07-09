@@ -225,12 +225,18 @@ newer :latest tag every 60 seconds during a live session.
 ## Redis Cache Key Schema
 
 ```
-f1:{season}:{round}:car:{driver_num}:latest          TTL: 8s    (live telemetry)
-f1:{season}:{round}:strategy:{driver_id}             TTL: 30s   (pit predictions)
-f1:{season}:{round}:gaps                             TTL: 8s    (all driver gaps)
-f1:driver:{driver_id}:fingerprint                    TTL: 3600s (style profile)
-f1:race:{race_id}:detail                             TTL: 86400s (race metadata)
-f1:circuit:{circuit_id}:detail                       TTL: infinity (static data)
+f1:{season}:{round}:car:{driver_num}:latest                  TTL: 8s       (live telemetry per car)
+f1:{season}:{round}:gaps                                     TTL: 8s       (all driver gaps)
+f1:{season}:{round}:strategy:{driver_id}:pit_window          TTL: 30s      (optimal pit window prediction)
+f1:{season}:{round}:strategy:{driver_id}:undercut:{target}   TTL: 30s      (undercut score vs target driver)
+f1:{season}:{round}:strategy:{driver_id}:overcut:{target}    TTL: 30s      (overcut score vs target driver)
+f1:{season}:{round}:strategy:competitors                     TTL: 30s      (all drivers predicted pit windows)
+f1:{season}:{round}:telemetry:{driver_id}:history:{last_n}   TTL: 15s      (lap history sector data)
+f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driver_id → car_number mapping)
+f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile)
+f1:race:{race_id}:detail                                     TTL: 86400s   (race metadata)
+f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
+f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
@@ -282,7 +288,7 @@ Status:   race_simulator.py (Monte Carlo 1000 sims, Numba JIT confirmed
           cache_service.py (Redis wrapper, Prometheus counters, @cacheable 
           decorator). All verified with smoke tests. ruff+mypy clean.
 Next:     Day 9 — Strategy service, telemetry service, alert service 
-          (Phase 3 begins))
+          (Phase 3 begins)
 Blockers: None
 ```
 
@@ -356,6 +362,21 @@ to avoid out-of-scope migrations. Add these on the specified day.
 |---|---|---|---|
 | fcm_token | users | Device token for FCM push notifications | Day 10 |
 | track_temp, air_temp | lap_data | Weather features for tire_deg_model | TBD |
+
+
+## Deferred Wiring & Integration Gaps
+
+These are not schema changes but known integration gaps to fix on future days.
+
+- **prediction_worker → strategy_service:** undercut_score/overcut_score in 
+  StrategyPrediction hardcoded 0.0. prediction_worker.py needs to call 
+  strategy_service.get_undercut_score() to populate real scores. Without this, 
+  evaluate_threats never fires real alerts.
+
+- **S3 model path mismatch:** prediction_worker.py and strategy_service.py download 
+  from production/latest/ prefix, but train_models.py writes to production/ directly. 
+  Will surface as ModelNotFoundError on first full-stack test. Fix in train_models.py 
+  or both workers.
 
 ### Notes
 
