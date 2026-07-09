@@ -385,6 +385,34 @@ to avoid out-of-scope migrations. Add these on the specified day.
   pattern as backfill_position_track_status.py), add both to
   tire_deg_model.FEATURE_COLUMNS, and retrain all 5 compound models.
 
+## Deferred Telemetry Features
+
+Raw high-frequency telemetry (100ms Throttle/Brake/Speed channels from FastF1) was
+never ingested — Day 5's ingest_historical.py deliberately skips these channels to
+avoid tens of millions of rows (only lap/sector/stint-level aggregates are stored).
+
+| Feature | Original Spec Source | Purpose | Add On |
+|---|---|---|---|
+| braking_consistency | 100ms Brake channel, std of brake points per corner | driver_style.py fingerprinting | TBD |
+| throttle_application_smoothness | 100ms Throttle channel | driver_style.py fingerprinting | TBD |
+
+### Notes
+
+**driver_style.py braking/throttle features (Day 8):**
+- Discovered on Day 8: the original driver_style.py spec called for
+  braking_consistency and throttle_application_smoothness, both computable only
+  from 100ms Throttle/Brake telemetry that Day 5 never ingested.
+- Decision on Day 8: ship driver_style.py with 4 lap/stint-level proxies instead —
+  sector_time_variance, tyre_management_index, lap_time_consistency,
+  stint_length_tendency (all derivable from lap_data/tire_stints already stored).
+  The PCA(4) -> KMeans(5) -> UMAP(2D) pipeline itself is unchanged from spec, just
+  fed these 4 features instead of the original 4.
+- When this lands: ingest_live_session.py / ingest_historical.py would need a new
+  high-frequency telemetry table (partitioned/hypertable — this is exactly the
+  volume TimescaleDB was chosen for), a backfill script for historical sessions,
+  and driver_style.py's FEATURE_COLUMNS would gain the 2 original features
+  alongside (not instead of) the 4 current proxies.
+
 ## Deferred Test Coverage
 
 Per pre-commit.md convention, `backend/tests/unit/` collecting 0 tests
