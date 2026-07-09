@@ -274,13 +274,16 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    1
-Day:      4
-Status:   8 Pydantic schema files, 35 exported types. EmailStr added with
-          email-validator dependency. ruff + mypy --strict clean across
-          41 source files. alembic check clean. All schemas JSON-schema valid.
-Next:     Day 5 — FastF1 integration and historical data ingestion script
-Blockers: none
+Phase:    2
+Day:      8
+Status:   race_simulator.py (Monte Carlo 1000 sims, Numba JIT confirmed 
+          10x speedup), driver_style.py (4 proxy features, KMeans+UMAP), 
+          explainability.py (SHAP TreeExplainer, top-5 contributions), 
+          cache_service.py (Redis wrapper, Prometheus counters, @cacheable 
+          decorator). All verified with smoke tests. ruff+mypy clean.
+Next:     Day 9 — Strategy service, telemetry service, alert service 
+          (Phase 3 begins))
+Blockers: None
 ```
 
 ---
@@ -294,3 +297,143 @@ Blockers: none
 5. Then and only then begin implementing the day's tasks
 
 Never assume file contents from memory. Always read the actual file before editing it.
+
+
+## External Services & Credentials Checklist
+
+Track which external services have been set up and which are pending.
+Update this list as each service is configured.
+
+| Service | Purpose | Status | Needed By |
+|---|---|---|---|
+| Firebase / FCM | Push notifications (mobile + web) | ⬜ Not set up | Day 31 |
+| F1TV Subscription | Authenticated live timing feed | ⬜ Not set up | Live testing |
+| AWS S3 (f1-strategy-models) | ML model storage | ✅ Not set up | Day 7 |
+| AWS IAM credentials | S3 read/write access | ✅ Not set up | Day 7 |
+| Supabase (production DB) | Cloud PostgreSQL + TimescaleDB | ⬜ Not set up | Day 23 |
+| Upstash Redis (production) | Cloud Redis cache + broker | ⬜ Not set up | Day 23 |
+| Kubernetes cluster (EKS/GKE) | Production container orchestration | ⬜ Not set up | Day 22 |
+| Sentry | Exception tracking + performance | ⬜ Not set up | Day 12 |
+| Vercel | Web frontend deployment | ⬜ Not set up | Day 33 |
+| GitHub Secrets | CD pipeline credentials | ⬜ Not set up | Day 19 |
+
+### Setup Notes
+
+**Firebase FCM:**
+- console.firebase.google.com → New project → Cloud Messaging
+- Project Settings → Service Accounts → Generate new private key → save JSON
+- Add path to .env: FIREBASE_CREDENTIALS_PATH=/path/to/firebase-credentials.json
+- Never commit the JSON file — add it to .gitignore
+
+**F1TV Auth:**
+- Requires active F1TV subscription
+- Run get_auth_token() once to cache OAuth token locally
+- ingest_live_session.py defaults to no_auth=True until this is configured
+
+**AWS S3:**
+- Create bucket: f1-strategy-models (private, versioning on, AES-256)
+- IAM user with s3:GetObject, s3:PutObject on that bucket only
+- Add to .env: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION=ap-south-1
+
+**Sentry:**
+- sentry.io → New Project → Python → FastAPI
+- Add DSN to .env: SENTRY_DSN=https://...
+
+**GitHub Secrets (add before Day 19):**
+- AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+- DATABASE_URL (production Supabase)
+- REDIS_URL (production Upstash)
+- SECRET_KEY (fresh 64-char random string for production)
+- SENTRY_DSN
+- KUBECONFIG (base64-encoded kubectl config)
+
+## Deferred Schema Changes
+
+Schema additions that were intentionally deferred from their discovery day
+to avoid out-of-scope migrations. Add these on the specified day.
+
+| Column | Table | Purpose | Add On |
+|---|---|---|---|
+| fcm_token | users | Device token for FCM push notifications | Day 10 |
+| track_temp, air_temp | lap_data | Weather features for tire_deg_model | TBD |
+
+### Notes
+
+**users.fcm_token (Day 10):**
+- Discovered on Day 6 when alert_worker.py found no device token column on User
+- FCM dispatch is currently a structured no-op — matching and Celery dispatch
+  work correctly, but _send_fcm logs and returns early since no token exists
+- On Day 10 (user auth endpoints): add migration for users.fcm_token VARCHAR(255)
+  nullable, update User model, update UserResponse schema to include it,
+  add PUT /auth/fcm-token endpoint that mobile/web clients call after
+  requesting push permission
+
+**lap_data.track_temp / air_temp (TBD):**
+- Discovered on Day 7: the original tire_deg_model spec called for track_temp
+  and air_temp features, but ingest_historical.py loads FastF1 sessions with
+  weather=False, so no weather data was ever ingested and no weather table exists.
+- Unlike position/track_status (which FastF1's Laps dataframe already carries
+  at zero extra cost), weather requires a separate FastF1 API call
+  (session.load(weather=True)) plus a time-based join of weather samples onto
+  laps — a real re-ingestion cost, not a free backfill.
+- Decision on Day 7: ship tire_deg_model.py without these two features rather
+  than block all 5 tire degradation models on a weather re-ingestion.
+- When this lands: add track_temp/air_temp (Float, nullable) to lap_data,
+  extend ingest_historical.py and a backfill script to populate them (same
+  pattern as backfill_position_track_status.py), add both to
+  tire_deg_model.FEATURE_COLUMNS, and retrain all 5 compound models.
+
+## Deferred Telemetry Features
+
+Raw high-frequency telemetry (100ms Throttle/Brake/Speed channels from FastF1) was
+never ingested — Day 5's ingest_historical.py deliberately skips these channels to
+avoid tens of millions of rows (only lap/sector/stint-level aggregates are stored).
+
+| Feature | Original Spec Source | Purpose | Add On |
+|---|---|---|---|
+| braking_consistency | 100ms Brake channel, std of brake points per corner | driver_style.py fingerprinting | TBD |
+| throttle_application_smoothness | 100ms Throttle channel | driver_style.py fingerprinting | TBD |
+
+### Notes
+
+**driver_style.py braking/throttle features (Day 8):**
+- Discovered on Day 8: the original driver_style.py spec called for
+  braking_consistency and throttle_application_smoothness, both computable only
+  from 100ms Throttle/Brake telemetry that Day 5 never ingested.
+- Decision on Day 8: ship driver_style.py with 4 lap/stint-level proxies instead —
+  sector_time_variance, tyre_management_index, lap_time_consistency,
+  stint_length_tendency (all derivable from lap_data/tire_stints already stored).
+  The PCA(4) -> KMeans(5) -> UMAP(2D) pipeline itself is unchanged from spec, just
+  fed these 4 features instead of the original 4.
+- When this lands: ingest_live_session.py / ingest_historical.py would need a new
+  high-frequency telemetry table (partitioned/hypertable — this is exactly the
+  volume TimescaleDB was chosen for), a backfill script for historical sessions,
+  and driver_style.py's FEATURE_COLUMNS would gain the 2 original features
+  alongside (not instead of) the 4 current proxies.
+
+## Deferred Test Coverage
+
+Per pre-commit.md convention, `backend/tests/unit/` collecting 0 tests
+(pytest exit code 5) is the expected, accepted result before Day 14 —
+CLAUDE.md's unit-test coverage rule applies starting Day 14, not to
+services written earlier.
+
+| Test File | Covers | Add On |
+|---|---|---|
+| tests/unit/test_tire_deg_model.py | backend/services/ml/tire_deg_model.py | Day 14 |
+| tests/unit/test_pit_predictor.py | backend/services/ml/pit_predictor.py | Day 14 |
+| tests/unit/test_safety_car_model.py | backend/services/ml/safety_car_model.py | Day 14 |
+
+
+## Data Quality Notes
+
+**Historical ingestion coverage (2018-2024 training corpus):**
+- Total: ~139,764 lap records across 7 seasons
+- Missing circuits due to FastF1 location name mismatches:
+  Le Castellet (French GP 2018-2021), Yas Marina (Abu Dhabi 2018),
+  Portimão (Portuguese GP 2021), Istanbul Park (Turkish GP 2020-2021),
+  Mugello (Tuscany GP 2020), Nürburgring (Eifel GP 2020)
+- Decision: not fixing — missing circuits are either off-calendar or 
+  represented by more recent season data. 139k laps is sufficient 
+  training corpus for all 7 ML models.
+- 2025 holdout set: 26,689 laps, all 24 rounds complete

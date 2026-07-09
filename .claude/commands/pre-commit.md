@@ -37,14 +37,18 @@ cd backend && alembic check
 docker build -f infra/docker/Dockerfile.backend -t f1-backend:test . --no-cache
 ```
 
-## After all checks pass
+## STOP HERE — hand control back to the user
 
-```bash
-git add -p          # review changes interactively before staging
-git status          # confirm staged files look correct
-git commit -m "Day X: [clear description of what was built]"
-git push origin feature/day-XX-description
-```
+Once all checks above pass, produce a clean summary table of what passed
+and report it to the user. Do NOT run any git commands.
+
+The following steps are reserved for the user every single day without exception:
+- `git add .`
+- `git commit -m "..."`
+- `git push origin feature/day-XX-description`
+
+These are intentionally manual steps. Do not run them even if all checks pass.
+Do not suggest running them. Just report that all checks passed and stop.
 
 ## If mypy fails
 

@@ -22,11 +22,12 @@ WORKDIR /app
 
 COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH"
-# workers.celery_app resolves to /app/backend/workers/celery_app.py
-ENV PYTHONPATH=/app/backend
+# backend.workers.celery_app resolves to /app/backend/workers/celery_app.py
+ENV PYTHONPATH=/app
 
 COPY backend/ ./backend/
 
 USER f1
 
-CMD ["celery", "-A", "workers.celery_app", "worker", "--loglevel=info"]
+CMD ["celery", "-A", "backend.workers.celery_app", "worker", "--loglevel=info", \
+     "-Q", "telemetry_queue,prediction_queue,alert_queue"]
