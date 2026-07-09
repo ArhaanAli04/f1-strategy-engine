@@ -280,15 +280,18 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    2
-Day:      8
-Status:   race_simulator.py (Monte Carlo 1000 sims, Numba JIT confirmed 
-          10x speedup), driver_style.py (4 proxy features, KMeans+UMAP), 
-          explainability.py (SHAP TreeExplainer, top-5 contributions), 
-          cache_service.py (Redis wrapper, Prometheus counters, @cacheable 
-          decorator). All verified with smoke tests. ruff+mypy clean.
-Next:     Day 9 — Strategy service, telemetry service, alert service 
-          (Phase 3 begins)
+Phase:    3
+Day:      9
+Status:   strategy_service.py (pit window, undercut/overcut scores, 
+          competitor strategy prediction, all @cacheable). 
+          telemetry_service.py (live lap from Redis, lap history with 
+          time_bucket→date_trunc fallback, session gaps, normalize). 
+          alert_service.py (evaluate_threats reads DB directly, 
+          dispatch_alert writes DB + Redis pub/sub, no FCM duplication).
+          ingest_live_session.py updated with driver_id→car_number Redis write.
+          Known gap: evaluate_threats fires 0.0 scores until prediction_worker 
+          calls strategy_service (wired on a future day).
+Next:     Day 10 — User auth service + REST API endpoints Part 1
 Blockers: None
 ```
 
