@@ -300,6 +300,19 @@ def run_live_ingestor(
         get_redis_settings().redis_url, decode_responses=True
     )
 
+    # telemetry_service.get_live_lap needs the reverse of this map (driver_id ->
+    # car_number) to resolve the f1:{season}:{round}:car:{car_number}:latest key
+    # from an API-facing driver_id — persist it here since car_number_to_driver_id
+    # itself only lives in this process's memory. TTL matches max_duration: the
+    # mapping is only valid for as long as this ingestor session runs.
+    car_number_ttl = int(max_duration.total_seconds())
+    for car_number, mapped_driver_id in car_number_to_driver_id.items():
+        redis_client.setex(
+            f"f1:{season}:{round_number}:driver:{mapped_driver_id}:car_number",
+            car_number_ttl,
+            car_number,
+        )
+
     ingestor = F1SignalRIngestor(
         season=season,
         round_number=round_number,
