@@ -282,16 +282,15 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    3
-Day:      9
-Status:   strategy_service.py (pit window, undercut/overcut scores, 
-          competitor strategy prediction, all @cacheable). 
-          telemetry_service.py (live lap from Redis, lap history with 
-          time_bucket→date_trunc fallback, session gaps, normalize). 
-          alert_service.py (evaluate_threats reads DB directly, 
-          dispatch_alert writes DB + Redis pub/sub, no FCM duplication).
-          ingest_live_session.py updated with driver_id→car_number Redis write.
-          Known gap: evaluate_threats fires 0.0 scores until prediction_worker 
-          calls strategy_service (wired on a future day).
+Day:      9 (improvement pass between Day 9 and Day 10)
+Status:   Weather features improvement pass complete. Added track_temp/air_temp 
+          to lap_data (migration + 166,453 row backfill, 100% coverage). 
+          Live weather wired in ingest_live_session.py (Redis TTL 60s). 
+          strategy_service._resolve_weather() reads live weather with DB fallback.
+          race_simulator.RaceSimulationInput now weather-aware.
+          tire_deg_model retrained — holdout MAE regressed 30-40%, promotion 
+          guard refused replacement. Previous production models retained.
+          Infrastructure committed, model finding documented in CLAUDE.md
 Next:     Day 10 — User auth service + REST API endpoints Part 1
 Blockers: None
 ```
