@@ -233,6 +233,7 @@ f1:{season}:{round}:strategy:{driver_id}:overcut:{target}    TTL: 30s      (over
 f1:{season}:{round}:strategy:competitors                     TTL: 30s      (all drivers predicted pit windows)
 f1:{season}:{round}:telemetry:{driver_id}:history:{last_n}   TTL: 15s      (lap history sector data)
 f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driver_id → car_number mapping)
+f1:{season}:{round}:weather:latest                            TTL: 60s      (live track_temp/air_temp, written by ingest_live_session.py's WeatherData handler)
 f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile)
 f1:race:{race_id}:detail                                     TTL: 86400s   (race metadata)
 f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
@@ -364,7 +365,6 @@ to avoid out-of-scope migrations. Add these on the specified day.
 | Column | Table | Purpose | Add On |
 |---|---|---|---|
 | fcm_token | users | Device token for FCM push notifications | Day 10 |
-| track_temp, air_temp | lap_data | Weather features for tire_deg_model | TBD |
 
 
 ## Deferred Wiring & Integration Gaps
@@ -381,6 +381,24 @@ These are not schema changes but known integration gaps to fix on future days.
   Will surface as ModelNotFoundError on first full-stack test. Fix in train_models.py 
   or both workers.
 
+- **prediction_worker.py tire_deg feature vector shape:** `_run_inference()` builds
+  `features = [[tyre_age_laps, lap_number]]` — 2 values — against
+  tire_deg_model.FEATURE_COLUMNS, which now has 8 columns (lap_number,
+  compound_encoded, tyre_age_laps, fuel_adjusted_time, circuit_id_encoded,
+  driver_id_encoded, track_temp, air_temp) after the weather-features pass. This
+  predates that pass — it was already a 2-vs-6 mismatch before track_temp/air_temp
+  existed — so it is not a new regression, just a pre-existing bug whose correct
+  target shape changed. Needs the same real feature construction strategy_service.py's
+  `_project_stint_delta`/`_resolve_weather` already use when this gets fixed
+  alongside the undercut_score/overcut_score wiring above.
+
+- **WeatherData live stream:** now wired (was previously subscribed but discarded).
+  ingest_live_session.py parses AirTemp/TrackTemp from the WeatherData topic and
+  writes them to f1:{season}:{round}:weather:latest (see Redis Cache Key Schema).
+  Weather features are active in both training (train_models.py / tire_deg_model.py)
+  and live inference (strategy_service.py's _resolve_weather, with a circuit+compound
+  DB-average fallback when the live key is absent).
+
 ### Notes
 
 **users.fcm_token (Day 10):**
@@ -391,21 +409,6 @@ These are not schema changes but known integration gaps to fix on future days.
   nullable, update User model, update UserResponse schema to include it,
   add PUT /auth/fcm-token endpoint that mobile/web clients call after
   requesting push permission
-
-**lap_data.track_temp / air_temp (TBD):**
-- Discovered on Day 7: the original tire_deg_model spec called for track_temp
-  and air_temp features, but ingest_historical.py loads FastF1 sessions with
-  weather=False, so no weather data was ever ingested and no weather table exists.
-- Unlike position/track_status (which FastF1's Laps dataframe already carries
-  at zero extra cost), weather requires a separate FastF1 API call
-  (session.load(weather=True)) plus a time-based join of weather samples onto
-  laps — a real re-ingestion cost, not a free backfill.
-- Decision on Day 7: ship tire_deg_model.py without these two features rather
-  than block all 5 tire degradation models on a weather re-ingestion.
-- When this lands: add track_temp/air_temp (Float, nullable) to lap_data,
-  extend ingest_historical.py and a backfill script to populate them (same
-  pattern as backfill_position_track_status.py), add both to
-  tire_deg_model.FEATURE_COLUMNS, and retrain all 5 compound models.
 
 ## Deferred Telemetry Features
 
@@ -461,3 +464,14 @@ services written earlier.
   represented by more recent season data. 139k laps is sufficient 
   training corpus for all 7 ML models.
 - 2025 holdout set: 26,689 laps, all 24 rounds complete
+
+**Weather features (track_temp, air_temp) training result (2026-07-11):**
+Weather features (track_temp, air_temp) added to tire_deg_model feature
+set but regressed holdout MAE by 30-40% across all compounds
+(SOFT: 0.644→0.909, MEDIUM: 0.504→0.665, HARD: 0.521→0.696).
+Promotion guard correctly refused to replace production models.
+Hypothesis: circuit_id_encoded already captures average temperature
+signal implicitly; explicit temperature adds race-specific noise that
+doesn't generalize across seasons. Revisit when 2+ additional holdout
+seasons available, or try temperature deviation from circuit historical
+mean as engineered feature instead of raw temperature.

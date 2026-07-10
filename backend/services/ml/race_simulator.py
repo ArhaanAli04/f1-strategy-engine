@@ -91,6 +91,13 @@ class RaceSimulationInput:
     current_lap: int
     total_laps: int
     wet_track: bool
+    # Held constant for the whole simulated remainder of the race — same
+    # rationale as strategy_service.py's _project_stint_delta: weather drift
+    # over a race's remaining laps is a second-order effect next to tyre wear.
+    # Caller-supplied (e.g. via strategy_service._resolve_weather), same
+    # contract as circuit_id_encoded/compound_encoded above.
+    track_temp: float
+    air_temp: float
     drivers: list[DriverRaceState] = field(default_factory=list)
 
 
@@ -179,7 +186,7 @@ def _tire_deg_predictions(
     """Batch tire_deg predictions (delta + life remaining) for every (sim, driver) pair.
 
     Args:
-        race_state: The simulation's static race context.
+        race_state: The simulation's static race context (also supplies track_temp/air_temp).
         compound_groups: compound -> array of driver column indices with that compound.
         tire_deg_pipelines: Fitted tire_deg pipelines, keyed by compound.
         lap_number: Lap being predicted for.
@@ -215,6 +222,8 @@ def _tire_deg_predictions(
         circuit_id_encoded_arr = np.full(
             tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.int64
         )
+        track_temp_arr = np.full(tyre_age_flat.shape[0], race_state.track_temp)
+        air_temp_arr = np.full(tyre_age_flat.shape[0], race_state.air_temp)
 
         features = np.column_stack(
             [
@@ -224,6 +233,8 @@ def _tire_deg_predictions(
                 fuel_adjusted_time_arr,
                 circuit_id_encoded_arr.astype(np.float64),
                 driver_id_encoded_flat.astype(np.float64),
+                track_temp_arr,
+                air_temp_arr,
             ]
         )
         predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
@@ -236,6 +247,8 @@ def _tire_deg_predictions(
             fuel_adjusted_time_arr,
             circuit_id_encoded_arr,
             driver_id_encoded_flat,
+            track_temp_arr,
+            air_temp_arr,
         )
         predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
 

@@ -35,10 +35,20 @@ they're used rather than silently papered over:
   this (like prediction_worker.py) will 404 until that's reconciled. Not
   fixed here since it's a pre-existing Day 6/7 inconsistency, not something
   introduced today.
+- track_temp/air_temp: tire_deg pipelines now require these two features
+  (see tire_deg_model.FEATURE_COLUMNS). _resolve_weather() prefers the live
+  f1:{season}:{round}:weather:latest Redis key (written by
+  ingest_live_session.py); when it's absent (pre-race, or a historical
+  session with no live ingestor ever run) it falls back to a live DB query
+  averaging lap_data.track_temp/air_temp for the same circuit+compound —
+  the closest inference-time equivalent of add_engineered_features's
+  training-time group-mean imputation, since the fitted pipeline itself
+  has no memory of the training data's per-circuit averages.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import uuid
@@ -211,6 +221,58 @@ async def _cumulative_race_time(
     return float((await db.execute(query)).scalar_one() or 0.0)
 
 
+def _weather_key(season: int, round_number: int) -> str:
+    return f"f1:{season}:{round_number}:weather:latest"
+
+
+async def _resolve_weather(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int,
+    round_number: int,
+    circuit_id: uuid.UUID,
+    compound: str,
+) -> tuple[float, float]:
+    """Current track_temp/air_temp for a tire_deg inference feature vector.
+
+    Prefers the live f1:{season}:{round}:weather:latest key (written by
+    ingest_live_session.py's WeatherData handler). Falls back to a DB average
+    over the same circuit+compound when that key is absent (pre-race, or a
+    historical session with no live ingestor run) — see module docstring.
+
+    Args:
+        client: Redis client.
+        db: Async DB session.
+        season, round_number: Race weekend identifiers.
+        circuit_id: Circuit to average over on fallback.
+        compound: Compound to average over on fallback.
+    Returns:
+        (track_temp, air_temp) in Celsius.
+    """
+    raw = await client.get(_weather_key(season, round_number))
+    if raw is not None:
+        parsed = json.loads(raw)
+        return float(parsed["track_temp"]), float(parsed["air_temp"])
+
+    query = (
+        select(func.avg(LapData.track_temp), func.avg(LapData.air_temp))
+        .join(SessionModel, LapData.session_id == SessionModel.id)
+        .join(Race, SessionModel.race_id == Race.id)
+        .where(
+            Race.circuit_id == circuit_id,
+            LapData.compound == compound,
+            LapData.track_temp.is_not(None),
+        )
+    )
+    avg_track_temp, avg_air_temp = (await db.execute(query)).one()
+    return (
+        float(avg_track_temp)
+        if avg_track_temp is not None
+        else tire_deg_model.DEFAULT_TRACK_TEMP_C,
+        float(avg_air_temp) if avg_air_temp is not None else tire_deg_model.DEFAULT_AIR_TEMP_C,
+    )
+
+
 # --- tire_deg projection ---
 
 
@@ -223,6 +285,8 @@ def _project_stint_delta(
     n_laps: int,
     start_tyre_age: int,
     total_laps: int,
+    track_temp: float,
+    air_temp: float,
 ) -> float:
     """Sum of tire_deg-predicted lap_time_delta over n_laps starting at start_lap.
 
@@ -234,6 +298,9 @@ def _project_stint_delta(
         n_laps: Number of laps to project.
         start_tyre_age: Tyre age at start_lap.
         total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        track_temp, air_temp: Held constant across the projected stint (see
+            _resolve_weather) — short-term weather drift over a stint's length
+            is a second-order effect next to tyre wear.
     Returns:
         Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0.
     """
@@ -253,6 +320,8 @@ def _project_stint_delta(
             fuel_adjusted_time,
             np.full(n_laps, float(circuit_code)),
             np.full(n_laps, float(driver_code)),
+            np.full(n_laps, track_temp),
+            np.full(n_laps, air_temp),
         ]
     )
     result: float = float(pipeline.predict(features).sum())
@@ -269,6 +338,8 @@ def _sampled_stint_delta(
     n_laps: int,
     start_tyre_age: int,
     total_laps: int,
+    track_temp: float,
+    air_temp: float,
 ) -> float:
     """One Monte Carlo draw of a stint's total time delta.
 
@@ -292,6 +363,8 @@ def _sampled_stint_delta(
         n_laps,
         start_tyre_age,
         total_laps,
+        track_temp,
+        air_temp,
     )
     noise = float(rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps)))
     return deterministic + noise
@@ -350,6 +423,16 @@ async def get_optimal_pit_window(
             f"No tire degradation model loaded for compound {state['compound']}"
         )
 
+    current_track_temp, current_air_temp = await _resolve_weather(
+        client, db, season, round_number, state["circuit_id"], state["compound"]
+    )
+    candidate_weather = {
+        candidate_compound: await _resolve_weather(
+            client, db, season, round_number, state["circuit_id"], candidate_compound
+        )
+        for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS
+    }
+
     candidates: list[dict[str, Any]] = []
     max_pit_lap = min(state["lap_number"] + PIT_WINDOW_LOOKAHEAD_LAPS, state["total_laps"])
     for pit_lap in range(state["lap_number"] + 1, max_pit_lap + 1):
@@ -363,6 +446,8 @@ async def get_optimal_pit_window(
             laps_on_current,
             state["tyre_age_laps"],
             state["total_laps"],
+            current_track_temp,
+            current_air_temp,
         )
 
         best_stint2_delta: float | None = None
@@ -371,6 +456,7 @@ async def get_optimal_pit_window(
             if pipeline is None:
                 continue
             laps_remaining = state["total_laps"] - pit_lap
+            candidate_track_temp, candidate_air_temp = candidate_weather[candidate_compound]
             delta = _project_stint_delta(
                 pipeline,
                 _COMPOUND_ENCODING[candidate_compound],
@@ -380,6 +466,8 @@ async def get_optimal_pit_window(
                 laps_remaining,
                 0,
                 state["total_laps"],
+                candidate_track_temp,
+                candidate_air_temp,
             )
             if best_stint2_delta is None or delta < best_stint2_delta:
                 best_stint2_delta = delta
@@ -402,7 +490,10 @@ async def get_optimal_pit_window(
 
 
 async def _undercut_overcut_probability(
+    client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
+    season: int,
+    round_number: int,
     session_id: uuid.UUID,
     pitting_now_driver_id: uuid.UUID,
     pitting_next_lap_driver_id: uuid.UUID,
@@ -417,7 +508,9 @@ async def _undercut_overcut_probability(
     prediction into a probability that pitting_now_driver_id ends up ahead.
 
     Args:
+        client: Redis client, for _resolve_weather.
         db: Async DB session.
+        season, round_number: Race weekend identifiers, for _resolve_weather.
         session_id: Session to evaluate.
         pitting_now_driver_id: Driver assumed to pit this lap.
         pitting_next_lap_driver_id: Driver assumed to pit next lap.
@@ -451,6 +544,13 @@ async def _undercut_overcut_probability(
     now_compound_encoded = _COMPOUND_ENCODING.get(now_state["compound"], default_compound_code)
     next_compound_encoded = _COMPOUND_ENCODING.get(next_state["compound"], default_compound_code)
 
+    now_track_temp, now_air_temp = await _resolve_weather(
+        client, db, season, round_number, now_state["circuit_id"], now_state["compound"]
+    )
+    next_track_temp, next_air_temp = await _resolve_weather(
+        client, db, season, round_number, next_state["circuit_id"], next_state["compound"]
+    )
+
     rng = np.random.default_rng()
     wins = 0
     gap_samples = np.empty(UNDERCUT_MONTE_CARLO_SIMS)
@@ -465,6 +565,8 @@ async def _undercut_overcut_probability(
             UNDERCUT_PROJECTION_LAPS,
             0,
             now_state["total_laps"],
+            now_track_temp,
+            now_air_temp,
         )
         stay_out_delta = _sampled_stint_delta(
             rng,
@@ -476,6 +578,8 @@ async def _undercut_overcut_probability(
             1,
             next_state["tyre_age_laps"],
             next_state["total_laps"],
+            next_track_temp,
+            next_air_temp,
         )
         fresh_delta = PIT_STOP_SECONDS + _sampled_stint_delta(
             rng,
@@ -487,6 +591,8 @@ async def _undercut_overcut_probability(
             UNDERCUT_PROJECTION_LAPS - 1,
             0,
             next_state["total_laps"],
+            next_track_temp,
+            next_air_temp,
         )
         next_delta = stay_out_delta + fresh_delta
 
@@ -536,7 +642,9 @@ async def get_undercut_score(
     Returns:
         See _undercut_overcut_probability, plus target_driver_id.
     """
-    result = await _undercut_overcut_probability(db, session_id, driver_id, target_driver_id)
+    result = await _undercut_overcut_probability(
+        client, db, season, round_number, session_id, driver_id, target_driver_id
+    )
     return {"target_driver_id": str(target_driver_id), **result}
 
 
@@ -574,7 +682,9 @@ async def get_overcut_score(
         Dict with target_driver_id, probability_stay_out_retains_position,
         projected_gap_seconds (driver_id's perspective), n_laps_projected.
     """
-    result = await _undercut_overcut_probability(db, session_id, target_driver_id, driver_id)
+    result = await _undercut_overcut_probability(
+        client, db, season, round_number, session_id, target_driver_id, driver_id
+    )
     return {
         "target_driver_id": str(target_driver_id),
         "probability_stay_out_retains_position": 1.0 - result["probability_pit_now_gains_position"],
@@ -599,12 +709,14 @@ def _first_pit_lap_over_threshold(
     gap_to_behind: float,
     safety_car_probability: float,
     total_laps: int,
+    track_temp: float,
+    air_temp: float,
 ) -> tuple[int, float]:
     """Roll pit_predictor forward lap-by-lap until it crosses pit_predictor.ALERT_THRESHOLD.
 
-    gap_to_ahead/behind and safety_car_probability are held constant at the
-    caller-supplied values — see module docstring for why (no forward gap/SC
-    model is available at this call site without importing another service).
+    gap_to_ahead/behind, safety_car_probability, and track_temp/air_temp are held
+    constant at the caller-supplied values — see module docstring for why no
+    forward gap/SC model is available here, and _resolve_weather for weather.
 
     Args: see pit_predictor.FEATURE_COLUMNS for feature semantics.
     Returns:
@@ -628,6 +740,8 @@ def _first_pit_lap_over_threshold(
                     np.array([0.0]),
                     np.array([circuit_code]),
                     np.array([driver_code]),
+                    np.array([track_temp]),
+                    np.array([air_temp]),
                 )[0]
             )
         fuel_load_est = max(
@@ -714,6 +828,9 @@ async def get_competitor_predicted_strategy(
     for lap in latest_laps:
         compound_encoded = _COMPOUND_ENCODING.get(lap.compound, _COMPOUND_ENCODING["MEDIUM"])
         tire_deg_pipeline = _pipeline_for_compound(models, lap.compound)
+        track_temp, air_temp = await _resolve_weather(
+            client, db, season, round_number, circuit_id, lap.compound
+        )
         predicted_lap, probability = _first_pit_lap_over_threshold(
             pit_model,
             tire_deg_pipeline,
@@ -727,6 +844,8 @@ async def get_competitor_predicted_strategy(
             pit_predictor.MAX_GAP_SECONDS,
             0.0,
             total_laps,
+            track_temp,
+            air_temp,
         )
         results.append(
             {
