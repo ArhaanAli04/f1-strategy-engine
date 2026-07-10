@@ -43,6 +43,8 @@ class LapData(Base):
     sector1_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sector2_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sector3_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    track_temp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    air_temp: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

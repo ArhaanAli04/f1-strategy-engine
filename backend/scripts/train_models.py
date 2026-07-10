@@ -84,6 +84,8 @@ async def _fetch_laps() -> pd.DataFrame:
             LapData.tyre_age_laps,
             LapData.position,
             LapData.track_status,
+            LapData.track_temp,
+            LapData.air_temp,
             LapData.is_valid,
             Race.season,
             Circuit.name.label("circuit_name"),
@@ -111,6 +113,8 @@ async def _fetch_laps() -> pd.DataFrame:
             "tyre_age_laps",
             "position",
             "track_status",
+            "track_temp",
+            "air_temp",
             "is_valid",
             "season",
             "circuit_name",
@@ -261,7 +265,8 @@ def _add_predicted_life_remaining(
 
     Args:
         df: Must include compound, lap_number, compound_encoded, tyre_age_laps,
-            fuel_adjusted_time, circuit_id_encoded, driver_id_encoded.
+            fuel_adjusted_time, circuit_id_encoded, driver_id_encoded, track_temp,
+            air_temp.
         tire_deg_results: Fitted tire degradation results, keyed by compound.
     Returns:
         Series aligned to df.index with the estimated laps remaining.
@@ -284,6 +289,8 @@ def _add_predicted_life_remaining(
             group["fuel_adjusted_time"].to_numpy(),
             group["circuit_id_encoded"].to_numpy(),
             group["driver_id_encoded"].to_numpy(),
+            group["track_temp"].to_numpy(),
+            group["air_temp"].to_numpy(),
         )
         out.loc[group.index] = life
     return out

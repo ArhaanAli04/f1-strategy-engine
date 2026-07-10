@@ -1,10 +1,8 @@
 """XGBoost tire degradation regression — one model per compound.
 
 Predicts, for a given lap, the lap time delta from that driver's session
-median lap time as a function of tyre age, fuel-adjusted pace, and
-circuit/driver context. track_temp/air_temp were part of the original Day 7
-spec but are not yet ingested (see CLAUDE.md Deferred Schema Changes) — this
-model is trained without them until a follow-up backfill lands.
+median lap time as a function of tyre age, fuel-adjusted pace, track/air
+temperature, and circuit/driver context.
 """
 
 from __future__ import annotations
@@ -29,8 +27,18 @@ FEATURE_COLUMNS = [
     "fuel_adjusted_time",
     "circuit_id_encoded",
     "driver_id_encoded",
+    "track_temp",
+    "air_temp",
 ]
 TARGET_COLUMN = "lap_time_delta"
+
+# Fallback used only if a (compound, circuit) group has zero non-null weather
+# readings — i.e. add_engineered_features's own group-mean imputation has
+# nothing to fall back on. Should not occur post-backfill (see CLAUDE.md Data
+# Quality Notes), but StandardScaler cannot tolerate a remaining NaN, so a
+# last-resort constant is cheaper than letting training crash on it.
+DEFAULT_TRACK_TEMP_C = 35.0
+DEFAULT_AIR_TEMP_C = 25.0
 
 # F1 cars start a race with ~110kg of fuel and burn roughly linearly to ~0kg
 # by the finish; FastF1 does not publish real fuel load, so this is an
@@ -51,14 +59,44 @@ class TireDegTrainResult:
     n_samples: int
 
 
+def _impute_weather(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill missing track_temp/air_temp with the (compound, circuit) group mean.
+
+    Some laps have NULL track_temp/air_temp — sessions where the weather
+    backfill found no weather_data at all (see
+    scripts/backfill_weather_data.py). Rows are never dropped for this, since
+    that would remove too much training data; instead each NaN is imputed
+    from other laps in the same compound+circuit context, which is the
+    closest available proxy for "what the track was like." Any group that is
+    itself entirely NaN (no compound+circuit combination ever observed
+    weather) falls back to a fixed constant, since StandardScaler cannot
+    tolerate a NaN reaching it.
+
+    Args:
+        df: Laps frame; must include compound, circuit_id_encoded, track_temp, air_temp.
+    Returns:
+        Copy of df with track_temp/air_temp NaN-free.
+    """
+    df = df.copy()
+    for col, default in (
+        ("track_temp", DEFAULT_TRACK_TEMP_C),
+        ("air_temp", DEFAULT_AIR_TEMP_C),
+    ):
+        group_mean = df.groupby(["compound", "circuit_id_encoded"])[col].transform("mean")
+        df[col] = df[col].fillna(group_mean).fillna(default)
+    return df
+
+
 def add_engineered_features(laps: pd.DataFrame) -> pd.DataFrame:
-    """Add fuel_adjusted_time and lap_time_delta columns to a raw laps frame.
+    """Add fuel_adjusted_time, lap_time_delta, and imputed weather columns to a raw laps frame.
 
     Args:
         laps: One row per lap; must include session_id, driver_id, lap_number,
-            lap_time_seconds, and laps_in_session (max lap_number in that session).
+            lap_time_seconds, laps_in_session (max lap_number in that session),
+            compound, circuit_id_encoded, track_temp, air_temp.
     Returns:
-        Copy of laps with fuel_adjusted_time and lap_time_delta added.
+        Copy of laps with fuel_adjusted_time and lap_time_delta added, and
+        track_temp/air_temp NaN-imputed (see _impute_weather).
     """
     df = laps.copy()
     fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - df["lap_number"] / df["laps_in_session"])
@@ -67,6 +105,7 @@ def add_engineered_features(laps: pd.DataFrame) -> pd.DataFrame:
     )
     session_median = df.groupby(["session_id", "driver_id"])["lap_time_seconds"].transform("median")
     df["lap_time_delta"] = df["lap_time_seconds"] - session_median
+    df = _impute_weather(df)
     return df
 
 
@@ -148,18 +187,22 @@ def predict_life_remaining_batch(
     fuel_adjusted_time: npt.NDArray[np.float64],
     circuit_id_encoded: npt.NDArray[np.int64],
     driver_id_encoded: npt.NDArray[np.int64],
+    track_temp: npt.NDArray[np.float64],
+    air_temp: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.int64]:
     """Estimate laps remaining before predicted degradation crosses the threshold.
 
     For each input lap, simulates tyre_age_laps + 0..MAX_LOOKAHEAD_LAPS-1 (lap_number
     advancing in step) in a single batched predict() call, holding fuel_adjusted_time
-    fixed at its current-lap value since pace beyond the next few laps is dominated
-    by tyre wear, not the small residual fuel effect.
+    and track_temp/air_temp fixed at their current-lap values — pace beyond the next
+    few laps is dominated by tyre wear, not the small residual fuel effect or short-term
+    weather drift.
 
     Args:
         pipeline: Fitted tire degradation pipeline for the relevant compound.
         lap_number, compound_encoded, tyre_age_laps, fuel_adjusted_time,
-            circuit_id_encoded, driver_id_encoded: 1D arrays, one entry per lap.
+            circuit_id_encoded, driver_id_encoded, track_temp, air_temp: 1D arrays,
+            one entry per lap.
     Returns:
         1D int array, same length as inputs: estimated laps remaining until predicted
         lap_time_delta >= DEGRADATION_THRESHOLD_SECONDS, capped at MAX_LOOKAHEAD_LAPS.
@@ -178,6 +221,8 @@ def predict_life_remaining_batch(
             np.repeat(fuel_adjusted_time, MAX_LOOKAHEAD_LAPS),
             np.repeat(circuit_id_encoded, MAX_LOOKAHEAD_LAPS),
             np.repeat(driver_id_encoded, MAX_LOOKAHEAD_LAPS),
+            np.repeat(track_temp, MAX_LOOKAHEAD_LAPS),
+            np.repeat(air_temp, MAX_LOOKAHEAD_LAPS),
         ],
         axis=1,
     ).astype(float)
