@@ -6,8 +6,11 @@ import sentry_sdk
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import text
 
+from backend.apis.v1 import api_v1_router
 from backend.core.config import get_app_settings
 from backend.core.database import get_engine
 from backend.core.exceptions import (
@@ -16,6 +19,7 @@ from backend.core.exceptions import (
     unhandled_error_handler,
 )
 from backend.core.middleware import RequestIDMiddleware, TimingMiddleware, register_cors
+from backend.core.rate_limit import limiter
 from backend.core.redis_client import _get_pool
 
 logger = logging.getLogger(__name__)
@@ -67,12 +71,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# --- rate limiting (per-route @limiter.limit decorators — see core/rate_limit.py) ---
+app.state.limiter = limiter
+
 # --- middleware (outermost first) ---
 register_cors(app, allowed_origins=["*"])
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(TimingMiddleware)
 
 # --- exception handlers ---
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_exception_handler(F1StrategyError, f1_strategy_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, unhandled_error_handler)
 
@@ -80,8 +88,7 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 Instrumentator().instrument(app).expose(app)
 
 # --- API routers ---
-# Day 3+: auth, races, drivers, telemetry, strategy, alerts routers registered here
-# e.g. app.include_router(api_v1_router, prefix="/api/v1")
+app.include_router(api_v1_router, prefix="/api/v1")
 
 
 @app.get("/health", tags=["ops"])

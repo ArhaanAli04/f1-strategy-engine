@@ -34,6 +34,11 @@ class ModelNotLoadedError(F1StrategyError):
     error_code = "MODEL_NOT_LOADED"
 
 
+class ConflictError(F1StrategyError):
+    status_code = status.HTTP_409_CONFLICT
+    error_code = "CONFLICT"
+
+
 class AuthenticationError(F1StrategyError):
     status_code = status.HTTP_401_UNAUTHORIZED
     error_code = "AUTHENTICATION_FAILED"

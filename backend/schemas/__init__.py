@@ -1,6 +1,7 @@
 from backend.schemas.alert_schema import AlertCreate, AlertResponse, AlertType
 from backend.schemas.common import APIVersion, ErrorResponse, HealthResponse, PaginatedResponse
 from backend.schemas.driver_schema import (
+    DriverAnalysisResponse,
     DriverContractResponse,
     DriverListResponse,
     DriverResponse,
@@ -33,6 +34,9 @@ from backend.schemas.telemetry_schema import (
     TireStintResponse,
 )
 from backend.schemas.user_schema import (
+    FCMTokenUpdate,
+    LoginResponse,
+    RefreshTokenRequest,
     SubscriptionCreate,
     SubscriptionResponse,
     TokenResponse,
@@ -52,6 +56,7 @@ __all__ = [
     "HealthResponse",
     "PaginatedResponse",
     # driver
+    "DriverAnalysisResponse",
     "DriverContractResponse",
     "DriverListResponse",
     "DriverResponse",
@@ -79,6 +84,9 @@ __all__ = [
     "TelemetryStreamMessage",
     "TireStintResponse",
     # user
+    "FCMTokenUpdate",
+    "LoginResponse",
+    "RefreshTokenRequest",
     "SubscriptionCreate",
     "SubscriptionResponse",
     "TokenResponse",

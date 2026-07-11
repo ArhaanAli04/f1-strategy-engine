@@ -37,7 +37,7 @@ _COMPOUND_TO_MODEL_SUFFIX = {
     "INTERMEDIATE": "inter",
     "WET": "wet",
 }
-_MODEL_VERSION_TAG = "latest"
+_MODEL_VERSION_TAG = "production"
 
 _model_cache: dict[str, Any] = {}
 _session_factory: async_sessionmaker[AsyncSession] | None = None
