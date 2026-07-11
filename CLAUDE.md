@@ -283,16 +283,17 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    3
-Day:      9 (improvement pass between Day 9 and Day 10)
-Status:   Weather features improvement pass complete. Added track_temp/air_temp 
-          to lap_data (migration + 166,453 row backfill, 100% coverage). 
-          Live weather wired in ingest_live_session.py (Redis TTL 60s). 
-          strategy_service._resolve_weather() reads live weather with DB fallback.
-          race_simulator.RaceSimulationInput now weather-aware.
-          tire_deg_model retrained — holdout MAE regressed 30-40%, promotion 
-          guard refused replacement. Previous production models retained.
-          Infrastructure committed, model finding documented in CLAUDE.md
-Next:     Day 10 — User auth service + REST API endpoints Part 1
+Day:      10
+Status:   User auth service (register, login, JWT, refresh tokens via Redis 
+          single-session, logout invalidation confirmed). fcm_token migration 
+          applied. REST API Part 1: auth (6 endpoints), races (4 endpoints), 
+          drivers (3 endpoints), all rate-limited via slowapi per-route decorators 
+          (60/min auth, 10/min unauth, Redis-backed, verified to 429 boundary).
+          Fixed pre-existing: S3 latest→production path, libgomp1 missing from 
+          Docker, passlib→direct bcrypt incompatibility.
+          Known gap: teams/driver_contracts tables empty — no ingestion script 
+          populates them.
+Next:     Day 11 — Strategy/telemetry/alert API endpoints + WebSocket
 Blockers: None
 ```
 
