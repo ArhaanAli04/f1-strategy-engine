@@ -218,7 +218,7 @@ is already installed (migration b2e4f6a8c0d1).
 
 Models are loaded lazily on first request and cached in memory per worker process.
 New model versions are uploaded to S3 with a version tag. Workers check S3 for a
-newer :latest tag every 60 seconds during a live session.
+newer :production tag every 60 seconds during a live session.
 
 ---
 
@@ -234,7 +234,8 @@ f1:{season}:{round}:strategy:competitors                     TTL: 30s      (all 
 f1:{season}:{round}:telemetry:{driver_id}:history:{last_n}   TTL: 15s      (lap history sector data)
 f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driver_id → car_number mapping)
 f1:{season}:{round}:weather:latest                            TTL: 60s      (live track_temp/air_temp, written by ingest_live_session.py's WeatherData handler)
-f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile)
+f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile — season-level archetype/cluster/UMAP; written as a side effect of the population fit below, see driver_service.get_driver_analysis)
+f1:driver_style:fit:{season}                                  TTL: 3600s    (cached population-level PCA(4)->KMeans(5)->UMAP(2D) fit for driver_service.py's driver-style analysis endpoint — avoids refitting for every driver requested in the same season, see services/driver_service.py)
 f1:race:{race_id}:detail                                     TTL: 86400s   (race metadata)
 f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
@@ -356,6 +357,64 @@ Update this list as each service is configured.
 - SENTRY_DSN
 - KUBECONFIG (base64-encoded kubectl config)
 
+
+## Development Tooling Notes
+
+### libgomp1 — required in Docker final stage for LightGBM
+
+`python:3.11-slim` strips system libraries including `libgomp1`, which 
+LightGBM requires at import time (`dlopen` on OpenMP runtime). Both 
+`Dockerfile.backend` and `Dockerfile.worker` final stages must include:
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Without this, any import of `lightgbm` (including transitively via 
+`pit_predictor.py`) raises `OSError: libgomp.so.1: cannot open shared 
+object file`. Added in Day 10 Checkpoint A.
+
+### bcrypt — use directly, not via passlib
+
+`passlib 1.7.4` is unmaintained and incompatible with `bcrypt>=4.1` 
+(raises `ValueError` on its internal self-test instead of the old 
+silent behavior passlib expects). Every `hash_password`/`verify_password` 
+call crashes at runtime.
+
+Fix applied Day 10: removed passlib from pyproject.toml, rewrote 
+`core/security.py` to call `bcrypt.hashpw()` and `bcrypt.checkpw()` 
+directly. `bcrypt>=4.0.0` is now a direct dependency.
+
+### slowapi rate limiting — use per-route decorators, not middleware
+
+SlowAPIMiddleware's default_limits cannot do dynamic per-request limits —
+the request object is None in that code path (verified in slowapi 0.1.10 
+source: _check_request_limit with in_middleware=True). Dynamic auth-vs-ip 
+limits require the per-route @limiter.limit(callable) decorator pattern, 
+which correctly binds the request object. All rate-limited routes must have 
+request: Request as a parameter.
+
+### Alembic — always run from host, never inside Docker
+
+`alembic.ini` lives at the repo root and `DATABASE_URL` in `.env` points
+to `localhost:5432` (Docker's exposed port). The container does not have
+`alembic.ini` or the root `pyproject.toml` copied in, so running alembic
+inside the container fails with "No script_location key found".
+
+Always run migrations from the host venv with Docker postgres running:
+
+```bash
+# Generate a new migration
+.venv/Scripts/python.exe -m alembic revision --autogenerate -m "description"
+
+# Apply migrations
+.venv/Scripts/python.exe -m alembic upgrade head
+
+# Check for schema drift
+.venv/Scripts/python.exe -m alembic check
+```
+
 ## Deferred Schema Changes
 
 Schema additions that were intentionally deferred from their discovery day
@@ -363,7 +422,7 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 | Column | Table | Purpose | Add On |
 |---|---|---|---|
-| fcm_token | users | Device token for FCM push notifications | Day 10 |
+| fcm_token | users | Device token for FCM push notifications |✅ Done Day 10 |
 
 
 ## Deferred Wiring & Integration Gaps
@@ -374,11 +433,6 @@ These are not schema changes but known integration gaps to fix on future days.
   StrategyPrediction hardcoded 0.0. prediction_worker.py needs to call 
   strategy_service.get_undercut_score() to populate real scores. Without this, 
   evaluate_threats never fires real alerts.
-
-- **S3 model path mismatch:** prediction_worker.py and strategy_service.py download 
-  from production/latest/ prefix, but train_models.py writes to production/ directly. 
-  Will surface as ModelNotFoundError on first full-stack test. Fix in train_models.py 
-  or both workers.
 
 - **prediction_worker.py tire_deg feature vector shape:** `_run_inference()` builds
   `features = [[tyre_age_laps, lap_number]]` — 2 values — against
@@ -398,16 +452,22 @@ These are not schema changes but known integration gaps to fix on future days.
   and live inference (strategy_service.py's _resolve_weather, with a circuit+compound
   DB-average fallback when the live key is absent).
 
+-  teams and driver_contracts tables are empty — no ingestion script 
+populates them. Need a seed_teams.py script that:
+    - Seeds current teams (McLaren, Ferrari, Red Bull, etc.)
+    - Seeds driver_contracts linking current drivers to their teams
+    - Can use FastF1's session.get_driver() data or a hardcoded 
+    current-season roster
+Add alongside a future ingestion improvement pass.
+
 ### Notes
 
-**users.fcm_token (Day 10):**
-- Discovered on Day 6 when alert_worker.py found no device token column on User
-- FCM dispatch is currently a structured no-op — matching and Celery dispatch
-  work correctly, but _send_fcm logs and returns early since no token exists
-- On Day 10 (user auth endpoints): add migration for users.fcm_token VARCHAR(255)
-  nullable, update User model, update UserResponse schema to include it,
-  add PUT /auth/fcm-token endpoint that mobile/web clients call after
-  requesting push permission
+**users.fcm_token (✅ completed Day 10):**
+- Migration added: `20260711_add_fcm_token_to_users.py`
+- User model updated with `fcm_token: Mapped[str | None]`
+- `PUT /auth/fcm-token` endpoint added for mobile clients
+- Note: fcm_token intentionally NOT included in UserResponse —
+  no need to echo device token back in every user payload
 
 ## Deferred Telemetry Features
 

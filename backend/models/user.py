@@ -33,6 +33,7 @@ class User(Base):
     )
     # free, pro, team
     subscription_tier: Mapped[str] = mapped_column(String(20), nullable=False, default="free")
+    fcm_token: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     alerts: Mapped[list["Alert"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

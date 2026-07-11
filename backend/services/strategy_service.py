@@ -29,12 +29,6 @@ they're used rather than silently papered over:
   forward gap/SC model would need telemetry_service (forbidden import) or
   the full race_simulator.py multi-driver simulation, which is out of scope
   for a per-competitor pit-lap estimate.
-- Model S3 tag: downloads use the "latest" tag, matching prediction_worker.py's
-  existing convention exactly. train_models.py currently only ever writes to
-  a timestamped tag and conditionally to "production" — never "latest" — so
-  this (like prediction_worker.py) will 404 until that's reconciled. Not
-  fixed here since it's a pre-existing Day 6/7 inconsistency, not something
-  introduced today.
 - track_temp/air_temp: tire_deg pipelines now require these two features
   (see tire_deg_model.FEATURE_COLUMNS). _resolve_weather() prefers the live
   f1:{season}:{round}:weather:latest Redis key (written by
@@ -92,7 +86,7 @@ _COMPOUND_TO_MODEL_SUFFIX = {
     "INTERMEDIATE": "inter",
     "WET": "wet",
 }
-_MODEL_VERSION_TAG = "latest"
+_MODEL_VERSION_TAG = "production"
 _COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
 
 PIT_WINDOW_LOOKAHEAD_LAPS = 15
