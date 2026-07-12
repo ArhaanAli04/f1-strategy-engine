@@ -106,6 +106,13 @@ class DriverPositionDistribution:
     driver_id: str
     position_probabilities: dict[int, float]
     mean_position: float
+    # Sourced from the same cumulative_time array simulate_race already
+    # computes for ranking — captured before it goes out of scope, not a
+    # second pass. Needed because callers (e.g. the /strategy/simulate
+    # endpoint) report an actual predicted finish time, not just position.
+    mean_finish_time_seconds: float
+    finish_time_p5_seconds: float
+    finish_time_p95_seconds: float
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,7 @@ def _seed_numba_rng(seed: int) -> None:
 def _tire_deg_predictions(
     race_state: RaceSimulationInput,
     compound_groups: dict[str, npt.NDArray[np.intp]],
+    compound_encoded_by_driver: npt.NDArray[np.int64],
     tire_deg_pipelines: dict[str, Any],
     lap_number: int,
     tyre_age: npt.NDArray[np.int64],
@@ -188,6 +196,10 @@ def _tire_deg_predictions(
     Args:
         race_state: The simulation's static race context (also supplies track_temp/air_temp).
         compound_groups: compound -> array of driver column indices with that compound.
+        compound_encoded_by_driver: (n_drivers,) current encoded compound per driver.
+            Mutable across laps (unlike race_state.drivers[i].compound_encoded, which is
+            each driver's *starting* value) — see simulate_race's forced_pit_laps, which
+            is the only thing that ever changes it after lap 1.
         tire_deg_pipelines: Fitted tire_deg pipelines, keyed by compound.
         lap_number: Lap being predicted for.
         tyre_age: (n_sims, n_drivers) current tyre age.
@@ -212,10 +224,7 @@ def _tire_deg_predictions(
         group_tyre_age = tyre_age[:, idx]
         flat_shape = group_tyre_age.shape
         tyre_age_flat = group_tyre_age.ravel().astype(np.int64)
-        compound_encoded_flat = np.tile(
-            np.array([race_state.drivers[i].compound_encoded for i in idx], dtype=np.int64),
-            n_sims,
-        )
+        compound_encoded_flat = np.tile(compound_encoded_by_driver[idx], n_sims)
         driver_id_encoded_flat = np.tile(driver_id_encoded[idx], n_sims)
         lap_number_arr = np.full(tyre_age_flat.shape[0], lap_number, dtype=np.int64)
         fuel_adjusted_time_arr = np.full(tyre_age_flat.shape[0], fuel_adjusted_time)
@@ -336,6 +345,7 @@ def simulate_race(
     sc_model: safety_car_model.SafetyCarModel,
     n_simulations: int = N_SIMULATIONS,
     rng_seed: int | None = None,
+    forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None,
 ) -> RaceSimulationResult:
     """Monte Carlo race outcome simulation from the current lap to the chequered flag.
 
@@ -348,8 +358,19 @@ def simulate_race(
         n_simulations: Number of Monte Carlo simulations to run.
         rng_seed: Optional seed for reproducibility (seeds both the Python-level RNG
             used for safety car sampling and the Numba-level RNG used for lap noise).
+        forced_pit_laps: Optional what-if override, driver_id -> {lap_number:
+            (compound_name, compound_encoded)}. On a forced lap, that driver pits
+            regardless of the model's own decision — bypassing MIN_LAPS_BETWEEN_PITS
+            too, since an explicit what-if lap should be honored even if
+            unrealistically soon — and their compound switches to the given one
+            from the following lap onward (pipeline selection and the encoded
+            feature both change; the pre-existing "compound unchanged after any
+            pit" simplification still applies to every other, non-forced driver).
+            None or empty: every driver's pit timing and compound stay fully
+            model-driven/static, identical to before this parameter existed.
     Returns:
-        RaceSimulationResult with a finishing-position probability distribution per driver.
+        RaceSimulationResult with a finishing-position probability distribution
+        and finish-time distribution per driver.
     """
     n_drivers = len(race_state.drivers)
     if n_drivers == 0:
@@ -369,12 +390,23 @@ def simulate_race(
     )
     driver_id_encoded = np.array([d.driver_id_encoded for d in race_state.drivers], dtype=np.int64)
 
-    compound_groups: dict[str, npt.NDArray[np.intp]] = {
-        compound: np.array([i for i, d in enumerate(race_state.drivers) if d.compound == compound])
-        for compound in {d.compound for d in race_state.drivers}
-    }
+    driver_index_by_id = {d.driver_id: i for i, d in enumerate(race_state.drivers)}
+    # Mutable per-lap state — unlike everything else derived from race_state
+    # above, these two can change mid-race via forced_pit_laps (see docstring).
+    current_compounds = [d.compound for d in race_state.drivers]
+    compound_encoded_by_driver = np.array(
+        [d.compound_encoded for d in race_state.drivers], dtype=np.int64
+    )
 
     for lap_number in range(race_state.current_lap + 1, race_state.total_laps + 1):
+        # Rebuilt every lap (not once) so a forced compound change is picked up
+        # for pipeline selection from the following lap onward. O(n_drivers),
+        # negligible next to the O(n_sims x n_drivers) work below.
+        compound_groups: dict[str, npt.NDArray[np.intp]] = {
+            compound: np.array([i for i, c in enumerate(current_compounds) if c == compound])
+            for compound in set(current_compounds)
+        }
+
         fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
             1 - lap_number / race_state.total_laps
         )
@@ -385,6 +417,7 @@ def simulate_race(
         predicted_delta, predicted_life_remaining = _tire_deg_predictions(
             race_state,
             compound_groups,
+            compound_encoded_by_driver,
             tire_deg_pipelines,
             lap_number,
             tyre_age,
@@ -416,6 +449,12 @@ def simulate_race(
             tyre_age >= MIN_LAPS_BETWEEN_PITS
         )
 
+        if forced_pit_laps:
+            for forced_driver_id, schedule in forced_pit_laps.items():
+                idx = driver_index_by_id.get(forced_driver_id)
+                if idx is not None and lap_number in schedule:
+                    pit_flags[:, idx] = True
+
         _advance_lap(
             cumulative_time,
             tyre_age,
@@ -427,6 +466,17 @@ def simulate_race(
             SC_LAP_TIME_SECONDS,
         )
 
+        if forced_pit_laps:
+            for forced_driver_id, schedule in forced_pit_laps.items():
+                idx = driver_index_by_id.get(forced_driver_id)
+                if idx is None:
+                    continue
+                forced = schedule.get(lap_number)
+                if forced is not None:
+                    new_compound, new_compound_encoded = forced
+                    current_compounds[idx] = new_compound
+                    compound_encoded_by_driver[idx] = new_compound_encoded
+
     order = np.argsort(cumulative_time, axis=1)
     finishing_positions = np.argsort(order, axis=1) + 1
 
@@ -434,11 +484,15 @@ def simulate_race(
     for i, driver in enumerate(race_state.drivers):
         counts = np.bincount(finishing_positions[:, i], minlength=n_drivers + 1)[1 : n_drivers + 1]
         probabilities = counts / n_simulations
+        driver_times = cumulative_time[:, i]
         distributions.append(
             DriverPositionDistribution(
                 driver_id=driver.driver_id,
                 position_probabilities={p + 1: float(probabilities[p]) for p in range(n_drivers)},
                 mean_position=float(np.mean(finishing_positions[:, i])),
+                mean_finish_time_seconds=float(np.mean(driver_times)),
+                finish_time_p5_seconds=float(np.percentile(driver_times, 5)),
+                finish_time_p95_seconds=float(np.percentile(driver_times, 95)),
             )
         )
 
