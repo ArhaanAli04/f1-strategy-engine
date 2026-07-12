@@ -289,18 +289,18 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    3
-Day:      10
-Status:   User auth service (register, login, JWT, refresh tokens via Redis 
-          single-session, logout invalidation confirmed). fcm_token migration 
-          applied. REST API Part 1: auth (6 endpoints), races (4 endpoints), 
-          drivers (3 endpoints), all rate-limited via slowapi per-route decorators 
-          (60/min auth, 10/min unauth, Redis-backed, verified to 429 boundary).
-          Fixed pre-existing: S3 latest→production path, libgomp1 missing from 
-          Docker, passlib→direct bcrypt incompatibility.
-          Known gap: teams/driver_contracts tables empty — no ingestion script 
-          populates them.
-Next:     Day 11 — Strategy/telemetry/alert API endpoints + WebSocket
-Blockers: None
+Day:      11
+Status:   Full REST API layer complete. telemetry.py (3 routes + WebSocket 
+          with JWT auth, pub/sub broadcast on lap completion, LapCompletedEvent 
+          with telemetry from Redis). strategy.py (pit-window with SHAP, 
+          undercut, overview, Monte Carlo simulation via Celery 202+poll). 
+          alerts.py (history, read-marking, subscription CRUD). 
+          prediction_worker.py 8-column feature array fixed — first real 
+          end-to-end prediction pipeline verified. read_at migration applied. 
+          82 files ruff+mypy clean. All endpoints verified through Swagger UI.
+Next:     Day 12 — Monitoring stack (Sentry, Prometheus alerts, health checks)
+Blockers: model_version assertion in integration test still says "latest" 
+          (should be "production") — fix on Day 14
 ```
 
 ---
