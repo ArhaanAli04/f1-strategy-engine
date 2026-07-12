@@ -60,7 +60,14 @@ class TireStintResponse(BaseModel):
 
 
 class LiveTelemetryEvent(BaseModel):
-    """Single 100 ms telemetry sample pushed over WebSocket."""
+    """Single 100 ms telemetry sample.
+
+    Still unwired — see CLAUDE.md's "Deferred Telemetry Features": raw
+    high-frequency Throttle/Brake/Speed channels were never ingested (Day 5
+    deliberately skipped them). Kept here for when that lands; the WS
+    endpoint broadcasts LapCompletedEvent instead (see below), which is built
+    from data this codebase actually has.
+    """
 
     driver_id: uuid.UUID
     session_id: uuid.UUID
@@ -72,9 +79,64 @@ class LiveTelemetryEvent(BaseModel):
     drs: bool
 
 
+class LapCompletedEvent(BaseModel):
+    """WebSocket payload broadcast on /ws/telemetry/{session_id} when a new lap is ingested.
+
+    Lap-summary fields come from the just-persisted LapData row. The
+    speed_kmh/throttle_pct/brake/gear/drs fields are best-effort: read from
+    the live f1:{season}:{round}:car:{car_number}:latest CarData cache at
+    broadcast time (see telemetry_service._decode_car_channels) and are None
+    if that key has expired or no live ingestor is running for this session.
+    """
+
+    driver_id: uuid.UUID
+    session_id: uuid.UUID
+    lap_number: int
+    lap_time_seconds: float | None
+    compound: str
+    sector1_seconds: float | None
+    sector2_seconds: float | None
+    sector3_seconds: float | None
+    speed_kmh: float | None = None
+    throttle_pct: float | None = None
+    brake: bool | None = None
+    gear: int | None = None
+    drs: bool | None = None
+
+
 class TelemetryStreamMessage(BaseModel):
-    """Envelope wrapping a LiveTelemetryEvent on the WebSocket stream."""
+    """Envelope wrapping a LapCompletedEvent on the WebSocket stream."""
 
     event: str
     session_id: uuid.UUID
-    data: LiveTelemetryEvent
+    data: LapCompletedEvent
+
+
+class LiveTelemetryResponse(BaseModel):
+    """GET /telemetry/{session_id}/{driver_id}/live — raw normalized CarData sample."""
+
+    session_id: uuid.UUID
+    driver_id: uuid.UUID
+    data: dict[str, Any]
+
+
+class LapHistoryBucket(BaseModel):
+    bucket: str
+    avg_sector1_seconds: float | None
+    avg_sector2_seconds: float | None
+    avg_sector3_seconds: float | None
+    avg_lap_time_seconds: float | None
+    lap_count: int
+
+
+class DriverGap(BaseModel):
+    driver_id: uuid.UUID
+    lap_number: int
+    position: int
+    gap_to_ahead_seconds: float
+    gap_to_behind_seconds: float
+
+
+class SessionGapsResponse(BaseModel):
+    session_id: uuid.UUID
+    gaps: list[DriverGap]

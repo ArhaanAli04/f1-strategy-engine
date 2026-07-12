@@ -62,8 +62,15 @@ from backend.core.exceptions import ModelNotLoadedError, NotFoundError
 from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.models.telemetry import LapData
+from backend.schemas.strategy_schema import (
+    CompetitorStrategyEntry,
+    FeatureContributionResponse,
+    PitWindowResponse,
+    StrategyOverviewResponse,
+    UndercutThreatResponse,
+)
 from backend.services.cache_service import cacheable
-from backend.services.ml import pit_predictor, tire_deg_model
+from backend.services.ml import explainability, pit_predictor, tire_deg_model
 from backend.services.ml.race_simulator import LAP_TIME_NOISE_STD_SECONDS, PIT_STOP_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -157,6 +164,34 @@ def _stable_code(value: str, modulus: int = 1000) -> int:
 
 
 # --- Shared DB helpers ---
+
+
+async def resolve_season_round(db: AsyncSession, session_id: uuid.UUID) -> tuple[int, int]:
+    """Resolve a session's (season, round_number) via its parent race.
+
+    Public (no leading underscore) since the API route needs it to bridge a
+    session_id-only path into the (season, round_number)-keyed cache functions
+    below — same duplicated-pattern rationale as telemetry_service.py's
+    identical helper (both resolve the same thing, from different services,
+    since services must not import each other).
+
+    Args:
+        db: Async DB session.
+        session_id: Session to resolve.
+    Returns:
+        (season, round_number).
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    query = (
+        select(Race.season, Race.round_number)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    row = (await db.execute(query)).one_or_none()
+    if row is None:
+        raise NotFoundError(f"Session {session_id} not found")
+    return int(row[0]), int(row[1])
 
 
 async def _current_state(
@@ -403,6 +438,13 @@ async def get_optimal_pit_window(
     Returns:
         Up to 3 dicts (pit_lap, window_start, window_end, projected_total_delta_seconds),
         ascending by projected_total_delta_seconds (lower = better).
+    Raises:
+        NotFoundError: No lap_data exists yet for this driver/session (via
+            _current_state) — the API layer surfaces this as an HTTP 404,
+            which is correct semantics here, not a gap to paper over with a
+            null-fields response.
+        ModelNotLoadedError: No tire degradation model loaded for the
+            driver's current compound.
     """
     models = _load_models()
     state = await _current_state(db, session_id, driver_id)
@@ -478,6 +520,98 @@ async def get_optimal_pit_window(
 
     candidates.sort(key=lambda c: c["projected_total_delta_seconds"])
     return candidates[:3]
+
+
+async def get_pit_window_with_explanation(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int,
+    round_number: int,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+) -> list[PitWindowResponse]:
+    """Optimal pit window candidates plus a SHAP explanation for the top recommendation.
+
+    Calls the cached get_optimal_pit_window for the ranked candidates, then
+    reconstructs the single-row 8-feature tire_deg vector for the top
+    candidate's pit lap and runs SHAP (services/ml/explainability.py) against
+    that compound's pipeline. The explanation itself is computed fresh every
+    call, not cached — a single TreeExplainer call on one row is cheap
+    relative to get_optimal_pit_window's own candidate search, which IS cached.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to get_optimal_pit_window).
+        db: Async DB session.
+        season, round_number: Race weekend identifiers.
+        session_id: Session to evaluate.
+        driver_id: Driver to plan a pit window for.
+    Returns:
+        Up to 3 PitWindowResponse, ascending by projected_total_delta_seconds;
+        only the first (recommended) candidate carries shap_explanation —
+        empty list if get_optimal_pit_window itself returns no candidates.
+    Raises:
+        NotFoundError: No lap_data exists yet for this driver/session — HTTP
+            404 at the API layer (see get_optimal_pit_window's docstring).
+        ModelNotLoadedError: No tire degradation model loaded for the
+            driver's current compound.
+    """
+    candidates = await get_optimal_pit_window(
+        client, db, season, round_number, session_id, driver_id
+    )
+    responses = [PitWindowResponse(**candidate) for candidate in candidates]
+    if not responses:
+        return responses
+
+    state = await _current_state(db, session_id, driver_id)
+    models = _load_models()
+    pipeline = _pipeline_for_compound(models, state["compound"])
+    if pipeline is None:
+        return responses
+
+    top_pit_lap = candidates[0]["pit_lap"]
+    compound_encoded = _COMPOUND_ENCODING.get(state["compound"], _COMPOUND_ENCODING["MEDIUM"])
+    driver_code = _stable_code(str(driver_id))
+    circuit_code = _stable_code(str(state["circuit_id"]))
+    track_temp, air_temp = await _resolve_weather(
+        client, db, season, round_number, state["circuit_id"], state["compound"]
+    )
+    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
+        1 - top_pit_lap / max(state["total_laps"], 1)
+    )
+    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
+        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    )
+    features = np.array(
+        [
+            [
+                top_pit_lap,
+                compound_encoded,
+                state["tyre_age_laps"] + (top_pit_lap - state["lap_number"]),
+                fuel_adjusted_time,
+                circuit_code,
+                driver_code,
+                track_temp,
+                air_temp,
+            ]
+        ]
+    )
+    [contributions] = explainability.explain_prediction(
+        pipeline, tire_deg_model.FEATURE_COLUMNS, features
+    )
+    responses[0] = responses[0].model_copy(
+        update={
+            "shap_explanation": [
+                FeatureContributionResponse(
+                    feature_name=c.feature_name,
+                    value=c.value,
+                    contribution=c.contribution,
+                    direction=c.direction,
+                )
+                for c in contributions
+            ]
+        }
+    )
+    return responses
 
 
 # --- get_undercut_score / get_overcut_score ---
@@ -634,12 +768,21 @@ async def get_undercut_score(
         driver_id: The driver considering an undercut.
         target_driver_id: The rival being undercut.
     Returns:
-        See _undercut_overcut_probability, plus target_driver_id.
+        See _undercut_overcut_probability, plus target_driver_id and
+        recommended_action ("PIT NOW" if probability_pit_now_gains_position
+        >= 0.5, else "STAY OUT").
     """
     result = await _undercut_overcut_probability(
         client, db, season, round_number, session_id, driver_id, target_driver_id
     )
-    return {"target_driver_id": str(target_driver_id), **result}
+    recommended_action = (
+        "PIT NOW" if result["probability_pit_now_gains_position"] >= 0.5 else "STAY OUT"
+    )
+    return {
+        "target_driver_id": str(target_driver_id),
+        "recommended_action": recommended_action,
+        **result,
+    }
 
 
 def _key_overcut(
@@ -849,3 +992,76 @@ async def get_competitor_predicted_strategy(
             }
         )
     return results
+
+
+# --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---
+
+
+async def get_pit_window_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+) -> list[PitWindowResponse]:
+    """Resolve season/round for a session, then delegate to get_pit_window_with_explanation.
+
+    Args: see get_pit_window_with_explanation — season/round_number are
+        resolved here rather than caller-supplied.
+    Returns:
+        See get_pit_window_with_explanation.
+    Raises:
+        NotFoundError: No session, or no lap_data yet for this driver/session.
+        ModelNotLoadedError: No tire degradation model loaded for the compound.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    return await get_pit_window_with_explanation(
+        client, db, season, round_number, session_id, driver_id
+    )
+
+
+async def get_undercut_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    target_driver_id: uuid.UUID,
+) -> UndercutThreatResponse:
+    """Resolve season/round for a session, then delegate to get_undercut_score.
+
+    Args: see get_undercut_score — season/round_number are resolved here
+        rather than caller-supplied.
+    Returns:
+        UndercutThreatResponse wrapping get_undercut_score's result.
+    Raises:
+        NotFoundError: No session, or no lap_data yet for either driver.
+        ModelNotLoadedError: Required tire degradation model not loaded.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    result = await get_undercut_score(
+        client, db, season, round_number, session_id, driver_id, target_driver_id
+    )
+    return UndercutThreatResponse.model_validate(result)
+
+
+async def get_strategy_overview_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> StrategyOverviewResponse:
+    """Resolve season/round for a session, then delegate to get_competitor_predicted_strategy.
+
+    Args: see get_competitor_predicted_strategy — season/round_number are
+        resolved here rather than caller-supplied.
+    Returns:
+        StrategyOverviewResponse — every driver's predicted strategy, for the
+        team strategy wall view.
+    Raises:
+        NotFoundError: No session with this ID exists.
+        ModelNotLoadedError: pit_predictor model not loaded.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    drivers = await get_competitor_predicted_strategy(client, db, season, round_number, session_id)
+    return StrategyOverviewResponse(
+        session_id=session_id,
+        drivers=[CompetitorStrategyEntry.model_validate(d) for d in drivers],
+    )

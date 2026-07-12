@@ -6,10 +6,12 @@ of calling strategy_service.get_undercut_score — CLAUDE.md forbids services/
 importing other services/ modules, so cross-service data flows through the DB
 (populated by a worker) rather than a direct import. "For all driver pairs"
 is interpreted as track-position-adjacent pairs (trailing driver vs. the car
-immediately ahead), matching schemas/strategy_schema.py's UndercutThreatResponse
-shape (driver_ahead + threat_score) and how undercuts actually work in racing —
-you only realistically threaten the car directly ahead of you, not arbitrary
-pairs.
+immediately ahead) — the only pairing that matches how undercuts actually
+work in racing (you only realistically threaten the car directly ahead of
+you, not arbitrary pairs). Note this module's own pairing convention predates
+and is independent of schemas/strategy_schema.py's UndercutThreatResponse
+(driver_id considering the undercut + target_driver_id being undercut), which
+strategy_service.get_undercut_score/get_undercut_for_session use instead.
 
 Known limitation: prediction_worker.py currently hardcodes undercut_score to
 0.0 (see its _run_inference docstring — a Day 6/7 placeholder pending the
@@ -39,10 +41,12 @@ import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.exceptions import NotFoundError
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.models.user import Alert, Subscription
-from backend.schemas.alert_schema import AlertCreate, AlertType
+from backend.schemas.alert_schema import AlertCreate, AlertResponse, AlertType
+from backend.schemas.user_schema import SubscriptionCreate, SubscriptionResponse
 
 logger = logging.getLogger(__name__)
 
@@ -214,3 +218,117 @@ async def dispatch_alert(
         await redis_client.publish(channel, json.dumps(alert_payload))
 
     return created
+
+
+# --- GET/PUT /alerts and /alerts/subscriptions ---
+
+
+async def get_user_alerts(
+    db: AsyncSession, user_id: uuid.UUID, unread: bool = False
+) -> list[AlertResponse]:
+    """List a user's alert history, newest first.
+
+    Args:
+        db: Async DB session.
+        user_id: User whose alerts to list.
+        unread: If True, only rows with read_at IS NULL (see the
+            20260712_add_read_at_to_alerts migration — distinct from
+            delivered_at, which tracks push/WS delivery, not user
+            acknowledgement). If False, all alerts regardless of read state.
+    Returns:
+        AlertResponse rows ordered by triggered_at descending.
+    """
+    filters = [Alert.user_id == user_id]
+    if unread:
+        filters.append(Alert.read_at.is_(None))
+    query = select(Alert).where(*filters).order_by(Alert.triggered_at.desc())
+    rows = (await db.execute(query)).scalars().all()
+    return [AlertResponse.model_validate(r) for r in rows]
+
+
+async def mark_alert_read(
+    db: AsyncSession, user_id: uuid.UUID, alert_id: uuid.UUID
+) -> AlertResponse:
+    """Mark one of a user's own alerts as read.
+
+    Args:
+        db: Async DB session.
+        user_id: User performing the action — scopes the lookup so a user
+            can only mark their own alerts read, not anyone else's.
+        alert_id: Alert to mark read.
+    Returns:
+        The updated AlertResponse.
+    Raises:
+        NotFoundError: No alert with this ID exists for this user.
+    """
+    query = select(Alert).where(Alert.id == alert_id, Alert.user_id == user_id)
+    alert = (await db.execute(query)).scalar_one_or_none()
+    if alert is None:
+        raise NotFoundError(f"Alert {alert_id} not found")
+
+    alert.read_at = datetime.now(UTC)
+    await db.commit()
+    await db.refresh(alert)
+    return AlertResponse.model_validate(alert)
+
+
+async def _get_or_create_subscription(db: AsyncSession, user_id: uuid.UUID) -> Subscription:
+    """Fetch a user's Subscription row, creating an empty default on first access.
+
+    Subscription has no unique constraint on user_id (nothing in the schema
+    prevents multiple rows per user) — this always operates on the
+    lowest-id row for a user, and get_subscription/update_subscription both
+    route through this so a repeated PUT updates the same row rather than
+    inserting a new one each time.
+
+    Args:
+        db: Async DB session.
+        user_id: User whose subscription row to fetch or create.
+    Returns:
+        The existing or newly created Subscription row.
+    """
+    query = select(Subscription).where(Subscription.user_id == user_id).order_by(Subscription.id)
+    subscription = (await db.execute(query)).scalars().first()
+    if subscription is None:
+        subscription = Subscription(
+            id=uuid.uuid4(), user_id=user_id, driver_ids=[], team_ids=[], alert_types=[]
+        )
+        db.add(subscription)
+        await db.commit()
+        await db.refresh(subscription)
+    return subscription
+
+
+async def get_subscription(db: AsyncSession, user_id: uuid.UUID) -> SubscriptionResponse:
+    """Fetch a user's current alert-subscription preferences.
+
+    Args:
+        db: Async DB session.
+        user_id: User whose subscription preferences to fetch.
+    Returns:
+        SubscriptionResponse — an empty-default row (see
+        _get_or_create_subscription) if the user has never set preferences.
+    """
+    subscription = await _get_or_create_subscription(db, user_id)
+    return SubscriptionResponse.model_validate(subscription)
+
+
+async def update_subscription(
+    db: AsyncSession, user_id: uuid.UUID, payload: SubscriptionCreate
+) -> SubscriptionResponse:
+    """Replace a user's alert-subscription preferences.
+
+    Args:
+        db: Async DB session.
+        user_id: User whose preferences to update.
+        payload: New driver_ids/team_ids/alert_types, replacing the existing values.
+    Returns:
+        SubscriptionResponse reflecting the update.
+    """
+    subscription = await _get_or_create_subscription(db, user_id)
+    subscription.driver_ids = [str(driver_id) for driver_id in payload.driver_ids]
+    subscription.team_ids = [str(team_id) for team_id in payload.team_ids]
+    subscription.alert_types = list(payload.alert_types)
+    await db.commit()
+    await db.refresh(subscription)
+    return SubscriptionResponse.model_validate(subscription)

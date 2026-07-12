@@ -25,6 +25,7 @@ app.conf.update(
     task_routes={
         "process_lap": {"queue": "telemetry_queue"},
         "run_strategy_prediction": {"queue": "prediction_queue"},
+        "run_race_simulation": {"queue": "prediction_queue"},
         "dispatch_alert": {"queue": "alert_queue"},
     },
 )

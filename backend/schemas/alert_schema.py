@@ -33,3 +33,4 @@ class AlertResponse(BaseModel):
     message: str
     triggered_at: datetime
     delivered_at: datetime | None
+    read_at: datetime | None

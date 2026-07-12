@@ -27,11 +27,18 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import redis.asyncio as aioredis
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.exceptions import TelemetryNotAvailableError
+from backend.core.exceptions import NotFoundError, TelemetryNotAvailableError
+from backend.models.race import Race
+from backend.models.race import Session as SessionModel
+from backend.schemas.telemetry_schema import (
+    LapHistoryBucket,
+    LiveTelemetryResponse,
+    SessionGapsResponse,
+)
 from backend.services.cache_service import cache_get, cacheable
 
 logger = logging.getLogger(__name__)
@@ -131,6 +138,77 @@ def _car_latest_key(season: int, round_number: int, car_number: Any) -> str:
     return f"f1:{season}:{round_number}:car:{car_number}:latest"
 
 
+# F1's live-timing CarData.z channel index convention: a stable, externally
+# documented mapping used across the FastF1/open-source live-timing ecosystem
+# generally — not something specific to this project. ingest_live_session.py's
+# _handle_car_data only structurally decodes the payload (gzip+base64 ->
+# JSON); it never translates these numeric channel keys into named fields, so
+# that decode step lives here instead.
+_CAR_DATA_CHANNELS = {"2": "speed_kmh", "3": "gear", "4": "throttle_pct", "5": "brake", "45": "drs"}
+_CAR_DATA_BOOLEAN_FIELDS = frozenset({"brake", "drs"})
+
+
+def _decode_car_channels(entry: dict[str, Any]) -> dict[str, Any]:
+    """Map a raw CarData.z per-car entry's numeric channel indices to named fields.
+
+    DRS's channel value is actually a multi-value status code (available vs.
+    active vs. off), not a plain boolean — this coarsely treats any nonzero
+    value as "DRS on", which is a simplification, not a fabricated channel
+    mapping (the channel index itself is a stable external convention).
+
+    Args:
+        entry: One car's raw entry from f1:{season}:{round}:car:{car_number}:latest
+            (the {"Channels": {"0": ..., "2": ..., ...}} shape F1's live-timing
+            feed sends, cached as-is by ingest_live_session.py's _handle_car_data).
+    Returns:
+        Dict with speed_kmh, throttle_pct, brake, gear, drs. Any channel absent
+        from entry (stale/partial sample) maps to None, not a fabricated default.
+    """
+    channels = entry.get("Channels")
+    if not isinstance(channels, dict):
+        return dict.fromkeys(_CAR_DATA_CHANNELS.values())
+
+    speed, gear, throttle, brake, drs = (
+        channels.get(index) for index in ("2", "3", "4", "5", "45")
+    )
+    return {
+        "speed_kmh": float(speed) if speed is not None else None,
+        "throttle_pct": float(throttle) if throttle is not None else None,
+        "brake": bool(brake) if brake is not None else None,
+        "gear": int(gear) if gear is not None else None,
+        "drs": bool(drs) if drs is not None else None,
+    }
+
+
+async def resolve_season_round(db: AsyncSession, session_id: uuid.UUID) -> tuple[int, int]:
+    """Resolve a session's (season, round_number) via its parent race.
+
+    The three GET /telemetry/{session_id}/... routes and the WS
+    /ws/telemetry/{session_id} endpoint only carry session_id, but
+    get_live_lap/get_lap_history/get_session_gaps/get_live_car_channels below
+    are keyed by (season, round_number) — this bridges the two. Public (no
+    leading underscore) since the WS route in apis/v1/telemetry.py calls it
+    directly, unlike the wrappers below which route handlers never bypass.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to resolve.
+    Returns:
+        (season, round_number).
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    query = (
+        select(Race.season, Race.round_number)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    row = (await db.execute(query)).one_or_none()
+    if row is None:
+        raise NotFoundError(f"Session {session_id} not found")
+    return int(row[0]), int(row[1])
+
+
 async def get_live_lap(
     redis_client: aioredis.Redis,  # type: ignore[type-arg]
     season: int,
@@ -167,6 +245,38 @@ async def get_live_lap(
         raise TelemetryNotAvailableError(f"No live telemetry cached for car {car_number}")
 
     return normalize_telemetry(raw)
+
+
+async def get_live_car_channels(
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    driver_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Best-effort decoded live CarData channels for one driver — None fields if unavailable.
+
+    Unlike get_live_lap (which raises when telemetry is missing, since a REST
+    client explicitly asked for it), this degrades gracefully: it enriches the
+    WS /ws/telemetry/{session_id} lap-completion broadcast, where a missing
+    live sample shouldn't block delivery of the lap event itself.
+
+    Args:
+        redis_client: Redis client.
+        season, round_number: Race weekend identifiers.
+        driver_id: Driver whose latest sample to read.
+    Returns:
+        Decoded channels (see _decode_car_channels) — all None if no car-number
+        mapping or no live sample is currently cached for this driver.
+    """
+    car_number = await cache_get(redis_client, _car_number_key(season, round_number, driver_id))
+    if car_number is None:
+        return dict.fromkeys(_CAR_DATA_CHANNELS.values())
+
+    raw = await cache_get(redis_client, _car_latest_key(season, round_number, car_number))
+    if raw is None:
+        return dict.fromkeys(_CAR_DATA_CHANNELS.values())
+
+    return _decode_car_channels(raw)
 
 
 async def _fetch_lap_history(
@@ -306,3 +416,70 @@ async def get_session_gaps(
         lap_number, position, gap_to_ahead_seconds, gap_to_behind_seconds.
     """
     return await _compute_session_gaps(db, session_id)
+
+
+# --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---
+
+
+async def get_live_lap_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+) -> LiveTelemetryResponse:
+    """Resolve season/round for a session, then read that driver's latest live sample.
+
+    Args:
+        client: Redis client (cache-aside passthrough — see get_live_lap).
+        db: Async DB session, for season/round resolution.
+        session_id: Session to resolve.
+        driver_id: Driver whose latest sample to read.
+    Returns:
+        LiveTelemetryResponse wrapping the normalized raw telemetry sample.
+    Raises:
+        NotFoundError: No session with this ID exists.
+        TelemetryNotAvailableError: See get_live_lap.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    data = await get_live_lap(client, season, round_number, driver_id)
+    return LiveTelemetryResponse(session_id=session_id, driver_id=driver_id, data=data)
+
+
+async def get_lap_history_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    last_n: int,
+) -> list[LapHistoryBucket]:
+    """Resolve season/round for a session, then delegate to get_lap_history.
+
+    Args: see get_lap_history — season/round_number are resolved here rather
+        than caller-supplied.
+    Returns:
+        See get_lap_history.
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    history = await get_lap_history(client, db, season, round_number, session_id, driver_id, last_n)
+    return [LapHistoryBucket.model_validate(entry) for entry in history]
+
+
+async def get_session_gaps_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> SessionGapsResponse:
+    """Resolve season/round for a session, then delegate to get_session_gaps.
+
+    Args: see get_session_gaps — season/round_number are resolved here rather
+        than caller-supplied.
+    Returns:
+        See get_session_gaps.
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    result = await get_session_gaps(client, db, season, round_number, session_id)
+    return SessionGapsResponse.model_validate(result)

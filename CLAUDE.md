@@ -216,9 +216,12 @@ is already installed (migration b2e4f6a8c0d1).
 | pit_predictor.pkl       | LGBMClassifier| did_pit (binary)       | All        |
 | safety_car_model.pkl    | Poisson/scipy | P(SC in N laps)        | —          |
 
-Models are loaded lazily on first request and cached in memory per worker process.
-New model versions are uploaded to S3 with a version tag. Workers check S3 for a
-newer :production tag every 60 seconds during a live session.
+Models are loaded lazily on first use per worker process (checking
+local disk cache, then S3's :production tag) and cached in memory
+for the process's lifetime — restart the worker to pick up a newly
+promoted model version. race_simulator.py is wired as of Day 11 via
+the run_race_simulation Celery task (prediction_queue), called by
+POST /strategy/{session_id}/simulate.
 
 ---
 
@@ -239,6 +242,7 @@ f1:driver_style:fit:{season}                                  TTL: 3600s    (cac
 f1:race:{race_id}:detail                                     TTL: 86400s   (race metadata)
 f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
+f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
@@ -265,6 +269,8 @@ Current endpoints overview:
 - GET    /api/v1/telemetry/{session_id}/{driver_id}/live
 - GET    /api/v1/telemetry/{session_id}/{driver_id}/history
 - WS     /api/v1/ws/telemetry/{session_id}
+- GET    /api/v1/telemetry/{session_id}/gaps
+- GET    /api/v1/strategy/simulate/{task_id}
 - GET    /api/v1/strategy/{session_id}/{driver_id}/pit-window
 - GET    /api/v1/strategy/{session_id}/{driver_id}/undercut
 - GET    /api/v1/strategy/{session_id}/overview
@@ -361,6 +367,13 @@ Update this list as each service is configured.
 
 ## Development Tooling Notes
 
+### Celery worker — restart required after code changes
+
+Unlike the backend container (uvicorn --reload auto-reloads), Celery 
+workers do not hot-reload. After any change to files in backend/workers/, 
+run: docker compose restart worker
+Otherwise the old worker process serves the old code indefinitely.
+
 ### libgomp1 — required in Docker final stage for LightGBM
 
 `python:3.11-slim` strips system libraries including `libgomp1`, which 
@@ -430,6 +443,17 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- **DRS decoding approximation:** _decode_car_channels in 
+  telemetry_service.py treats any nonzero DRS channel value as boolean 
+  "open." Real F1 channel is multi-value status code 
+  (0=off, 8=available, 10=enabled, 14=open+detection). Acceptable for 
+  display purposes but should be refined before production.
+
+- **run_race_simulation Celery serialization unverified:** confidence_interval 
+  is a Python tuple that becomes a JSON array through Celery's result backend. 
+  Pydantic should coerce back correctly but this path hasn't been tested with 
+  real ML models. Verify on Day 13 integration testing.
+
 - **prediction_worker → strategy_service:** undercut_score/overcut_score in 
   StrategyPrediction hardcoded 0.0. prediction_worker.py needs to call 
   strategy_service.get_undercut_score() to populate real scores. Without this, 
@@ -452,6 +476,19 @@ These are not schema changes but known integration gaps to fix on future days.
   Weather features are active in both training (train_models.py / tire_deg_model.py)
   and live inference (strategy_service.py's _resolve_weather, with a circuit+compound
   DB-average fallback when the live key is absent).
+
+  - **pit_predictor feature array (more broken than previously noted):** 
+  prediction_worker.py currently passes [[tyre_age_laps, lap_number]] 
+  to pit_predictor — this is the entirely wrong feature set, not just 
+  too few columns. pit_predictor.FEATURE_COLUMNS expects: 
+  current_tyre_age, predicted_life_remaining, gap_to_car_ahead, 
+  gap_to_car_behind, safety_car_probability, laps_to_race_end, 
+  position, fuel_load_est. Fix before Day 13 integration testing.
+
+  - **WebSocket JWT in query param (?token=):** access token appears in 
+  server logs and browser history. Acceptable for now. Production fix: 
+  short-lived WebSocket ticket — exchange via REST before connection, 
+  use one-time token for WS auth instead of the full JWT.
 
 -  teams and driver_contracts tables are empty — no ingestion script 
 populates them. Need a seed_teams.py script that:

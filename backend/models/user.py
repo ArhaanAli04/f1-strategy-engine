@@ -63,6 +63,9 @@ class Alert(Base):
     message: Mapped[str] = mapped_column(Text, nullable=False)
     triggered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set when a user marks the alert as read (PUT /alerts/{id}/read). Distinct
+    # from delivered_at, which tracks push/WS delivery, not user acknowledgement.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="alerts")
     session: Mapped["Session"] = relationship(back_populates="alerts")
