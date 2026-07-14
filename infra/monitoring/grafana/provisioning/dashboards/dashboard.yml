@@ -1,0 +1,14 @@
+# Auto-loads grafana-dashboard.json from the mounted dashboards folder so it
+# appears at localhost:3000 on first boot — no manual JSON import step.
+apiVersion: 1
+
+providers:
+  - name: f1-strategy-engine
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards

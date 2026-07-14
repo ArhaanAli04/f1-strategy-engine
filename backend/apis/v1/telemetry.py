@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.database import get_db
 from backend.core.exceptions import AuthenticationError, NotFoundError
+from backend.core.metrics import f1_active_websocket_connections
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import decode_token
@@ -179,6 +180,7 @@ async def websocket_telemetry(
         return
 
     await websocket.accept()
+    f1_active_websocket_connections.inc()
 
     channel = f"f1:telemetry:{session_id}:laps"
     pubsub = redis_client.pubsub()
@@ -204,3 +206,4 @@ async def websocket_telemetry(
                 )
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()  # type: ignore[attr-defined]
+        f1_active_websocket_connections.dec()

@@ -18,6 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_aws_settings, get_ml_settings, get_redis_settings
 from backend.core.database import get_engine
+from backend.core.metrics import (
+    f1_ml_inference_duration_seconds,
+    f1_strategy_predictions_total,
+)
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
@@ -275,12 +279,17 @@ def _run_inference(
     # tire_deg's features, which would be a different, more misleading bug.
     pit_features = [[tyre_age_laps, lap_number]]
 
-    tire_life_remaining = (
-        float(deg_model.predict(tire_deg_features)[0]) if deg_model is not None else 0.0
-    )
-    pit_probability = (
-        float(pit_model.predict_proba(pit_features)[0][1]) if pit_model is not None else 0.0
-    )
+    if deg_model is not None:
+        with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
+            tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
+    else:
+        tire_life_remaining = 0.0
+
+    if pit_model is not None:
+        with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
+            pit_probability = float(pit_model.predict_proba(pit_features)[0][1])
+    else:
+        pit_probability = 0.0
 
     return {
         "optimal_pit_lap": lap_number + max(int(tire_life_remaining), 1),
@@ -328,6 +337,7 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
             )
             db.add(row)
             await db.commit()
+            f1_strategy_predictions_total.inc()
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]
 
@@ -550,9 +560,10 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
         }
         forced_pit_laps = {str(requesting_driver_id): schedule}
 
-    result = race_simulator.simulate_race(
-        race_state, tire_deg_pipelines, pit_model, sc_model, forced_pit_laps=forced_pit_laps
-    )
+    with f1_ml_inference_duration_seconds.labels(model="race_simulator").time():
+        result = race_simulator.simulate_race(
+            race_state, tire_deg_pipelines, pit_model, sc_model, forced_pit_laps=forced_pit_laps
+        )
 
     requester_id_str = str(requesting_driver_id)
     requesting_distribution = next(

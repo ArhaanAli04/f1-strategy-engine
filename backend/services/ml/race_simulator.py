@@ -56,6 +56,7 @@ import numba
 import numpy as np
 import numpy.typing as npt
 
+from backend.core.metrics import f1_ml_inference_duration_seconds
 from backend.services.ml import pit_predictor, safety_car_model, tire_deg_model
 
 N_SIMULATIONS = 1000
@@ -246,19 +247,20 @@ def _tire_deg_predictions(
                 air_temp_arr,
             ]
         )
-        predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
+        with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
+            predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
 
-        life_flat = tire_deg_model.predict_life_remaining_batch(
-            pipeline,
-            lap_number_arr,
-            compound_encoded_flat,
-            tyre_age_flat,
-            fuel_adjusted_time_arr,
-            circuit_id_encoded_arr,
-            driver_id_encoded_flat,
-            track_temp_arr,
-            air_temp_arr,
-        )
+            life_flat = tire_deg_model.predict_life_remaining_batch(
+                pipeline,
+                lap_number_arr,
+                compound_encoded_flat,
+                tyre_age_flat,
+                fuel_adjusted_time_arr,
+                circuit_id_encoded_arr,
+                driver_id_encoded_flat,
+                track_temp_arr,
+                air_temp_arr,
+            )
         predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
 
     return predicted_delta, predicted_life_remaining
@@ -332,9 +334,10 @@ def _pit_scores(
             np.full(n, fuel_load_est),
         ]
     )
-    scores: npt.NDArray[np.float64] = pit_model.predict_proba(features)[:, 1].reshape(
-        n_sims, n_drivers
-    )
+    with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
+        scores: npt.NDArray[np.float64] = pit_model.predict_proba(features)[:, 1].reshape(
+            n_sims, n_drivers
+        )
     return scores
 
 
@@ -425,9 +428,10 @@ def simulate_race(
             fuel_adjusted_time,
         )
 
-        p_sc = sc_model.probability_within(
-            race_state.circuit_name, lap_number, race_state.wet_track, 1
-        )
+        with f1_ml_inference_duration_seconds.labels(model="safety_car").time():
+            p_sc = sc_model.probability_within(
+                race_state.circuit_name, lap_number, race_state.wet_track, 1
+            )
         sc_active = rng.random(n_simulations) < p_sc
 
         gap_to_ahead, gap_to_behind, position = _positions_and_gaps(cumulative_time)

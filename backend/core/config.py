@@ -58,10 +58,15 @@ class AppSettings(BaseSettings):
 
     sentry_dsn: str = ""
     environment: str = "development"
+    release_version: str = "0.1.0"
     fcm_server_key: str = ""
     # firebase-admin's messaging API requires a service-account JSON
     # (Google retired the legacy FCM_SERVER_KEY HTTP API in June 2024).
     firebase_credentials_path: str = ""
+    # Local dev defaults so the stack works without .env entries — Day 19
+    # replaces these with real values via GitHub Secrets in production.
+    metrics_user: str = "metrics"
+    metrics_password: str = "metrics-dev"  # noqa: S105
 
 
 @lru_cache

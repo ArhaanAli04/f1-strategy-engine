@@ -5,7 +5,14 @@ install:
 	pre-commit install
 
 dev:
-	docker compose -f infra/docker/docker-compose.yml up --build
+	# --env-file .env (only if present): Compose otherwise looks for .env
+	# next to the compose file (infra/docker/), not repo root where it
+	# actually lives — silently breaking alertmanager's
+	# ${SLACK_WEBHOOK_CRITICAL}-style interpolation (Day 12). Conditional on
+	# $(wildcard ...) because --env-file errors hard if the path doesn't
+	# exist, and every var it feeds already has a ${VAR:-default} fallback
+	# in docker-compose.yml — a fresh clone with no .env must still boot.
+	docker compose -f infra/docker/docker-compose.yml $(if $(wildcard .env),--env-file .env,) up --build
 
 test:
 	pytest backend/tests/ -v
