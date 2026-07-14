@@ -325,12 +325,13 @@ Update this list as each service is configured.
 |---|---|---|---|
 | Firebase / FCM | Push notifications (mobile + web) | ⬜ Not set up | Day 31 |
 | F1TV Subscription | Authenticated live timing feed | ⬜ Not set up | Live testing |
-| AWS S3 (f1-strategy-models) | ML model storage | ✅ Not set up | Day 7 |
-| AWS IAM credentials | S3 read/write access | ✅ Not set up | Day 7 |
+| AWS S3 (f1-strategy-models) | ML model storage | ✅ set up | Day 7 |
+| AWS IAM credentials | S3 read/write access | ✅  set up | Day 7 |
 | Supabase (production DB) | Cloud PostgreSQL + TimescaleDB | ⬜ Not set up | Day 23 |
 | Upstash Redis (production) | Cloud Redis cache + broker | ⬜ Not set up | Day 23 |
 | Kubernetes cluster (EKS/GKE) | Production container orchestration | ⬜ Not set up | Day 22 |
-| Sentry | Exception tracking + performance | ⬜ Not set up | Day 12 |
+| Sentry | Exception tracking + performance | ✅ set up | Day 12 |
+| Slack (F1 Strategy Engine workspace) | Alertmanager notifications | ✅ Set up | Day 12 |
 | Vercel | Web frontend deployment | ⬜ Not set up | Day 33 |
 | GitHub Secrets | CD pipeline credentials | ⬜ Not set up | Day 19 |
 
