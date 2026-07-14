@@ -1,0 +1,83 @@
+# Prometheus alerting rules — Day 12 monitoring stack.
+#
+# `severity` labels here are what infra/monitoring/alertmanager.yml's route
+# tree matches on to pick a receiver (Slack #alerts-critical, Slack
+# #alerts-warning, or PagerDuty). This file only defines *when* an alert
+# fires; alertmanager.yml defines *where* it goes.
+
+groups:
+  - name: f1-strategy-engine
+    rules:
+      - alert: APIHighLatencyP95
+        expr: >
+          histogram_quantile(
+            0.95,
+            sum(rate(http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API p95 latency above 2s"
+          description: >
+            p95 request latency has been above 2s for 5 minutes
+            (current: {{ $value | printf "%.2f" }}s).
+
+      - alert: APIHighErrorRate
+        expr: >
+          (
+            sum(rate(http_requests_total{status=~"5.."}[3m]))
+            /
+            sum(rate(http_requests_total[3m]))
+          ) > 0.01
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "API error rate above 1%"
+          description: >
+            5xx responses have been above 1% of total requests for 3 minutes
+            (current: {{ $value | humanizePercentage }}).
+
+      - alert: CeleryQueueDepthHigh
+        expr: f1_celery_queue_depth > 500
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Celery queue {{ $labels.queue }} depth above 500"
+          description: >
+            Queue {{ $labels.queue }} has held more than 500 pending tasks
+            for 2 minutes (current: {{ $value }}).
+
+      - alert: RedisCacheHitRateLow
+        expr: >
+          (
+            sum(rate(f1_cache_hits_total[10m]))
+            /
+            (sum(rate(f1_cache_hits_total[10m])) + sum(rate(f1_cache_misses_total[10m])))
+          ) < 0.6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis cache hit rate below 60%"
+          description: >
+            Cache hit rate has been below 60% for 10 minutes
+            (current: {{ $value | humanizePercentage }}).
+
+      # Depends on kube-state-metrics (kube_pod_container_status_restarts_total),
+      # which does not exist yet — no Kubernetes cluster is set up until Day 22
+      # (see CLAUDE.md's External Services & Credentials Checklist). Inert
+      # until then; kept here so the rule ships with the rest of the alerting
+      # config rather than being a separate future migration.
+      - alert: PodRestartsHigh
+        expr: increase(kube_pod_container_status_restarts_total{namespace="f1-strategy-engine"}[10m]) > 3
+        for: 0m
+        labels:
+          severity: pagerduty
+        annotations:
+          summary: "Pod {{ $labels.pod }} restarted more than 3 times in 10 minutes"
+          description: >
+            Container {{ $labels.container }} in pod {{ $labels.pod }} has
+            restarted {{ $value }} times in the last 10 minutes.

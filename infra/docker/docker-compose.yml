@@ -60,11 +60,93 @@ services:
       ENVIRONMENT: development
     volumes:
       - ../../backend:/app/backend
+    # No host port mapping: worker:9090/metrics (hand-rolled Celery metrics
+    # server started in workers/celery_app.py's worker_init signal) only
+    # needs to be reachable from prometheus over the internal Compose
+    # network — see prometheus.yml's f1-worker scrape job. Host port 9090 is
+    # already taken by the prometheus service's own UI below.
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
 
+  # --- Day 12 monitoring stack ---
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: postgresql://f1user:f1pass@postgres:5432/f1db?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    ports:
+      - "9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+      - worker
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    environment:
+      # Blank by default (see .env.example) — Slack/PagerDuty routes are
+      # inert until these are set. Never referenced directly by
+      # alertmanager.yml, which reads from the *_file paths written below
+      # instead (see alertmanager.yml's module docstring for why).
+      SLACK_WEBHOOK_CRITICAL: "${SLACK_WEBHOOK_CRITICAL:-}"
+      SLACK_WEBHOOK_WARNING: "${SLACK_WEBHOOK_WARNING:-}"
+      PAGERDUTY_INTEGRATION_KEY: "${PAGERDUTY_INTEGRATION_KEY:-}"
+    volumes:
+      - ../monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mkdir -p /etc/alertmanager/secrets &&
+        printf '%s' "$$SLACK_WEBHOOK_CRITICAL" > /etc/alertmanager/secrets/slack_webhook_critical &&
+        printf '%s' "$$SLACK_WEBHOOK_WARNING" > /etc/alertmanager/secrets/slack_webhook_warning &&
+        printf '%s' "$$PAGERDUTY_INTEGRATION_KEY" > /etc/alertmanager/secrets/pagerduty_integration_key &&
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      # Local dev default so the stack works out of the box, same convention
+      # as METRICS_USER/METRICS_PASSWORD in core/config.py — replace via
+      # GitHub Secrets on Day 19.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+    volumes:
+      - ../monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana-dashboard.json:/etc/grafana/dashboards/grafana-dashboard.json:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:

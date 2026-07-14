@@ -1,0 +1,12 @@
+# Auto-provisions the Prometheus datasource so grafana-dashboard.json's panels
+# resolve on first boot — no manual "Add data source" step in the Grafana UI.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
