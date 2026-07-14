@@ -202,6 +202,11 @@ Once that schema change lands, a follow-up migration can call `create_hypertable
 Until then, `lap_data` is a regular indexed Postgres table. The TimescaleDB extension
 is already installed (migration b2e4f6a8c0d1).
 
+**Celery worker pool — `--pool=solo`:**
+Single process, no forking. Rationale: scaling strategy is multiple worker 
+pods, not intra-process forking — solo pool enables prometheus_client metrics 
+(start_http_server, counters, histograms) to work correctly without multiprocess 
+mode complexity. Race day scaling: run 8+ worker pods, not 8 processes per pod.
 ---
 
 ## ML Model Registry
@@ -289,16 +294,17 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    3
-Day:      11
-Status:   Full REST API layer complete. telemetry.py (3 routes + WebSocket 
-          with JWT auth, pub/sub broadcast on lap completion, LapCompletedEvent 
-          with telemetry from Redis). strategy.py (pit-window with SHAP, 
-          undercut, overview, Monte Carlo simulation via Celery 202+poll). 
-          alerts.py (history, read-marking, subscription CRUD). 
-          prediction_worker.py 8-column feature array fixed — first real 
-          end-to-end prediction pipeline verified. read_at migration applied. 
-          82 files ruff+mypy clean. All endpoints verified through Swagger UI.
-Next:     Day 12 — Monitoring stack (Sentry, Prometheus alerts, health checks)
+Day:      12
+Status:   Full monitoring stack. backend/core/metrics.py with all custom 
+          f1_* metrics. /metrics gated by HTTP Basic Auth. Sentry init with 
+          FastAPI+Celery integrations, release tagging, env-conditional 
+          traces_sample_rate. Celery worker --pool=solo for Prometheus 
+          compatibility. prometheus.yml, alerts.yml, alertmanager.yml, 
+          grafana-dashboard.json with auto-provisioning. Docker Compose 
+          updated with prometheus, grafana, alertmanager, redis-exporter, 
+          postgres-exporter. Grafana verified at localhost:3000, all 9 
+          panels loaded, real data flowing.
+Next:     Day 13 — Integration testing + load testing
 Blockers: model_version assertion in integration test still says "latest" 
           (should be "production") — fix on Day 14
 ```
