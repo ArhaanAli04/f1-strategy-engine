@@ -11,6 +11,7 @@ from typing import Any
 
 import boto3
 import joblib
+import numpy as np
 import redis
 import redis.asyncio as aioredis
 from sqlalchemy import func, select
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_aws_settings, get_ml_settings, get_redis_settings
 from backend.core.database import get_engine
+from backend.core.exceptions import ModelNotLoadedError
 from backend.core.metrics import (
     f1_ml_inference_duration_seconds,
     f1_strategy_predictions_total,
@@ -26,7 +28,8 @@ from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
-from backend.services.ml import race_simulator, tire_deg_model
+from backend.services import strategy_service
+from backend.services.ml import pit_predictor, race_simulator, tire_deg_model
 from backend.services.ml.race_simulator import DriverRaceState, RaceSimulationInput
 from backend.workers.celery_app import app
 
@@ -51,10 +54,12 @@ _COMPOUND_TO_MODEL_SUFFIX = {
 }
 _MODEL_VERSION_TAG = "production"
 
-# Same encoding convention as strategy_service.py's identical constant —
-# duplicated rather than imported (services/ must not be imported by workers/
-# either, mirroring strategy_service.py's own "no cross-service imports" rule).
+# Same encoding convention as strategy_service.py's identical constant — kept
+# duplicated here (used inside the synchronous _run_inference) rather than
+# imported, independent of the strategy_service import below used for the
+# undercut/overcut calls, which do need a real cross-module call.
 _COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
+_WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 _model_cache: dict[str, Any] = {}
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -176,28 +181,114 @@ async def _resolve_weather(
     )
 
 
+async def _resolve_position_context(
+    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+) -> dict[str, Any]:
+    """Current field position and immediate track-position neighbors for one driver.
+
+    Uses the same "latest LapData row per driver, ordered by position" pattern
+    as _build_race_state below and alert_service._latest_positions — the
+    established convention for cross-driver field state in this codebase.
+    gap_to_car_ahead/behind mirror pit_predictor.add_gap_features' training-time
+    definition (cumulative race time difference by position, capped at
+    pit_predictor.MAX_GAP_SECONDS).
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver to locate within the field.
+    Returns:
+        Dict with position, gap_to_car_ahead, gap_to_car_behind,
+        target_ahead_driver_id, target_behind_driver_id. The two target ids are
+        None for the leader/last car, and all fields fall back to
+        MAX_GAP_SECONDS/no-target/back-of-field when driver_id has no
+        persisted lap yet in this session (e.g. the very first lap ingested).
+    """
+    subq = (
+        select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
+        .where(LapData.session_id == session_id)
+        .group_by(LapData.driver_id)
+        .subquery()
+    )
+    join_condition = (LapData.driver_id == subq.c.driver_id) & (
+        LapData.lap_number == subq.c.max_lap
+    )
+    query = (
+        select(LapData)
+        .join(subq, join_condition)
+        .where(LapData.session_id == session_id, LapData.position.is_not(None))
+        .order_by(LapData.position)
+    )
+    field = list((await db.execute(query)).scalars().all())
+    index = next((i for i, lap in enumerate(field) if lap.driver_id == driver_id), None)
+
+    if index is None:
+        return {
+            "position": len(field) + 1,
+            "gap_to_car_ahead": pit_predictor.MAX_GAP_SECONDS,
+            "gap_to_car_behind": pit_predictor.MAX_GAP_SECONDS,
+            "target_ahead_driver_id": None,
+            "target_behind_driver_id": None,
+        }
+
+    driver_lap = field[index]
+    driver_time = await _cumulative_race_time(db, session_id, driver_id, driver_lap.lap_number)
+
+    gap_to_car_ahead = pit_predictor.MAX_GAP_SECONDS
+    target_ahead_driver_id = None
+    if index > 0:
+        ahead = field[index - 1]
+        ahead_time = await _cumulative_race_time(db, session_id, ahead.driver_id, ahead.lap_number)
+        gap_to_car_ahead = min(max(driver_time - ahead_time, 0.0), pit_predictor.MAX_GAP_SECONDS)
+        target_ahead_driver_id = ahead.driver_id
+
+    gap_to_car_behind = pit_predictor.MAX_GAP_SECONDS
+    target_behind_driver_id = None
+    if index + 1 < len(field):
+        behind = field[index + 1]
+        behind_time = await _cumulative_race_time(
+            db, session_id, behind.driver_id, behind.lap_number
+        )
+        gap_to_car_behind = min(max(behind_time - driver_time, 0.0), pit_predictor.MAX_GAP_SECONDS)
+        target_behind_driver_id = behind.driver_id
+
+    return {
+        "position": driver_lap.position,
+        "gap_to_car_ahead": gap_to_car_ahead,
+        "gap_to_car_behind": gap_to_car_behind,
+        "target_ahead_driver_id": target_ahead_driver_id,
+        "target_behind_driver_id": target_behind_driver_id,
+    }
+
+
 async def _resolve_inference_context(
     db: AsyncSession,
     async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
     session_id: uuid.UUID,
+    driver_id: uuid.UUID,
     compound: str,
 ) -> dict[str, Any]:
-    """Resolve circuit/season/round/total_laps/weather context absent from the raw lap dict.
+    """Resolve circuit/season/round/total_laps/weather/position context for one driver+lap.
 
     Args:
         db: Async DB session.
         async_redis_client: Async Redis client, for the live weather key.
         session_id: Session the lap belongs to.
+        driver_id: Driver to resolve field position/neighbors for.
         compound: Current tyre compound, for the weather DB-average fallback.
     Returns:
-        Dict with circuit_id, total_laps, track_temp, air_temp.
+        Dict with circuit_id, circuit_name, season, round_number, total_laps,
+        track_temp, air_temp, plus _resolve_position_context's position,
+        gap_to_car_ahead, gap_to_car_behind, target_ahead_driver_id,
+        target_behind_driver_id.
     """
     context_query = (
-        select(Race.circuit_id, Race.season, Race.round_number)
+        select(Race.circuit_id, Race.season, Race.round_number, Circuit.name)
         .join(SessionModel, SessionModel.race_id == Race.id)
+        .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    circuit_id, season, round_number = (await db.execute(context_query)).one()
+    circuit_id, season, round_number, circuit_name = (await db.execute(context_query)).one()
 
     total_laps_query = select(func.max(LapData.lap_number)).where(LapData.session_id == session_id)
     total_laps = (await db.execute(total_laps_query)).scalar_one()
@@ -205,11 +296,17 @@ async def _resolve_inference_context(
     track_temp, air_temp = await _resolve_weather(
         async_redis_client, db, season, round_number, circuit_id, compound
     )
+    position_context = await _resolve_position_context(db, session_id, driver_id)
+
     return {
         "circuit_id": circuit_id,
+        "circuit_name": circuit_name,
+        "season": int(season),
+        "round_number": int(round_number),
         "total_laps": int(total_laps) if total_laps is not None else None,
         "track_temp": track_temp,
         "air_temp": air_temp,
+        **position_context,
     }
 
 
@@ -221,33 +318,34 @@ def _run_inference(
 ) -> dict[str, Any]:
     """Run the strategy models for one driver/lap context.
 
-    tire_deg inference now uses the full 8-column feature vector
-    (tire_deg_model.FEATURE_COLUMNS) — previously only lap_number and
-    tyre_age_laps were passed, a 2-vs-8 mismatch predating the weather-features
-    pass (see CLAUDE.md's Deferred Wiring notes). pit_predictor inference is
-    NOT fixed here — it needs an entirely different feature set
-    (pit_predictor.FEATURE_COLUMNS: gaps, safety_car_probability, position,
-    fuel_load_est) that this worker doesn't have inputs for yet, and that gap
-    is already tracked in CLAUDE.md bundled with the undercut_score/
-    overcut_score wiring, out of scope for today's fix.
-
-    Undercut/overcut/confidence scoring depends on opponent-relative
-    simulation logic that lands with the ML models themselves (Day 7+);
-    those fields are placeholder zeros until then.
+    Both tire_deg and pit_predictor now use their full FEATURE_COLUMNS vectors
+    (see CLAUDE.md's Deferred Wiring notes for the mismatches this replaces:
+    tire_deg was already fixed to 8 columns before this pass; pit_predictor
+    was still on a 2-value placeholder and is fixed here to its real 8-column
+    schema, using the position/gap context _resolve_inference_context now
+    resolves plus predicted_life_remaining/safety_car_probability computed
+    below from the already-loaded tire_deg/safety_car models — the same
+    approach train_models.py uses to build these two features at training
+    time). undercut_score/overcut_score are NOT set here — they need awaited
+    calls into strategy_service and are filled in by the caller,
+    _persist_and_publish, after this function returns.
 
     Args:
         models: Loaded model registry, keyed by filename.
         context: Driver + lap context — expects compound, tyre_age_laps, lap_number.
-        resolved: Output of _resolve_inference_context — circuit_id, total_laps,
-            track_temp, air_temp.
+        resolved: Output of _resolve_inference_context — circuit_id, circuit_name,
+            total_laps, track_temp, air_temp, position, gap_to_car_ahead,
+            gap_to_car_behind.
         driver_id: Driver this prediction is for, for the driver_id_encoded feature.
     Returns:
-        Prediction fields matching the StrategyPrediction model.
+        Prediction fields matching the StrategyPrediction model; undercut_score
+        and overcut_score are placeholder 0.0, overwritten by the caller.
     """
     compound = str(context.get("compound", "")).upper()
     suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
     deg_model = models.get(f"tire_deg_{suffix}.pkl")
     pit_model = models.get("pit_predictor.pkl")
+    sc_model = models.get("safety_car_model.pkl")
 
     lap_number = int(context.get("lap_number", 0))
     tyre_age_laps = int(context.get("tyre_age_laps", 0))
@@ -273,17 +371,46 @@ def _run_inference(
             resolved["air_temp"],
         ]
     ]
-    # Unchanged pre-existing behaviour: pit_predictor.FEATURE_COLUMNS is a
-    # different 8-column schema this worker can't populate yet (see docstring
-    # above) — kept on its own original 2-value vector rather than being fed
-    # tire_deg's features, which would be a different, more misleading bug.
-    pit_features = [[tyre_age_laps, lap_number]]
 
     if deg_model is not None:
         with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
             tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
+        predicted_life_remaining = float(
+            tire_deg_model.predict_life_remaining_batch(
+                deg_model,
+                np.array([lap_number]),
+                np.array([compound_encoded]),
+                np.array([tyre_age_laps]),
+                np.array([fuel_adjusted_time]),
+                np.array([circuit_code]),
+                np.array([driver_code]),
+                np.array([resolved["track_temp"]]),
+                np.array([resolved["air_temp"]]),
+            )[0]
+        )
     else:
         tire_life_remaining = 0.0
+        predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
+
+    safety_car_probability = 0.0
+    if sc_model is not None:
+        safety_car_probability = sc_model.probability_within(
+            resolved["circuit_name"], lap_number, compound in _WET_COMPOUNDS, 1
+        )
+
+    fuel_load_est = max(fuel_at_lap, 0.0)
+    pit_features = [
+        [
+            tyre_age_laps,
+            predicted_life_remaining,
+            resolved["gap_to_car_ahead"],
+            resolved["gap_to_car_behind"],
+            safety_car_probability,
+            total_laps - lap_number,
+            resolved["position"],
+            fuel_load_est,
+        ]
+    ]
 
     if pit_model is not None:
         with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
@@ -310,6 +437,82 @@ def _publish_prediction(session_id: uuid.UUID, prediction: dict[str, Any]) -> No
         client.close()
 
 
+async def _resolve_undercut_overcut(
+    async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    resolved: dict[str, Any],
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+) -> tuple[float, float]:
+    """Undercut/overcut scores for one driver against their immediate track-position neighbors.
+
+    undercut_score is driver_id's probability of gaining position by pitting now
+    against the car immediately ahead (strategy_service.get_undercut_score);
+    overcut_score is driver_id's probability of retaining position by staying
+    out while the car immediately behind pits now (get_overcut_score) — this is
+    the pairing alert_service.evaluate_threats' docstring already assumes for
+    undercut_score. Both are 0.0 when there's no such neighbor (leader/last
+    car, per _resolve_position_context) or when a required tire degradation
+    model isn't loaded for one of the two drivers.
+
+    Args:
+        async_redis_client: Async Redis client — both the cache-aside client
+            strategy_service's @cacheable functions expect and the client
+            _resolve_position_context's caller already opened.
+        db: Async DB session.
+        resolved: Output of _resolve_inference_context — season, round_number,
+            target_ahead_driver_id, target_behind_driver_id.
+        session_id: Session being evaluated.
+        driver_id: Driver this prediction is for.
+    Returns:
+        (undercut_score, overcut_score).
+    """
+    season, round_number = resolved["season"], resolved["round_number"]
+    undercut_score = 0.0
+    target_ahead_driver_id = resolved["target_ahead_driver_id"]
+    if target_ahead_driver_id is not None:
+        try:
+            result = await strategy_service.get_undercut_score(
+                async_redis_client,
+                db,
+                season,
+                round_number,
+                session_id,
+                driver_id,
+                target_ahead_driver_id,
+            )
+            undercut_score = float(result["probability_pit_now_gains_position"])
+        except ModelNotLoadedError:
+            logger.warning(
+                "undercut_score: tire degradation model not loaded for driver %s vs %s",
+                driver_id,
+                target_ahead_driver_id,
+            )
+
+    overcut_score = 0.0
+    target_behind_driver_id = resolved["target_behind_driver_id"]
+    if target_behind_driver_id is not None:
+        try:
+            result = await strategy_service.get_overcut_score(
+                async_redis_client,
+                db,
+                season,
+                round_number,
+                session_id,
+                driver_id,
+                target_behind_driver_id,
+            )
+            overcut_score = float(result["probability_stay_out_retains_position"])
+        except ModelNotLoadedError:
+            logger.warning(
+                "overcut_score: tire degradation model not loaded for driver %s vs %s",
+                driver_id,
+                target_behind_driver_id,
+            )
+
+    return undercut_score, overcut_score
+
+
 async def _persist_and_publish(context: dict[str, Any]) -> None:
     models = _load_models()
 
@@ -324,9 +527,14 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
     try:
         async with session_factory() as db:
             resolved = await _resolve_inference_context(
-                db, async_redis_client, session_id, compound
+                db, async_redis_client, session_id, driver_id, compound
             )
             prediction = _run_inference(models, context, resolved, driver_id)
+            undercut_score, overcut_score = await _resolve_undercut_overcut(
+                async_redis_client, db, resolved, session_id, driver_id
+            )
+            prediction["undercut_score"] = undercut_score
+            prediction["overcut_score"] = overcut_score
 
             row = StrategyPrediction(
                 id=uuid.uuid4(),
@@ -363,8 +571,6 @@ def run_strategy_prediction(context: dict[str, Any]) -> None:
 
 
 # --- run_race_simulation: wires race_simulator.py for the first time (Day 11) ---
-
-_WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 
 async def _cumulative_race_time(

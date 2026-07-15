@@ -11,6 +11,7 @@ import uuid
 from datetime import date
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,10 +36,18 @@ def _eager_celery() -> None:
 
 @pytest.fixture
 def _stub_models(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the real ML models — they don't exist until Day 7."""
+    """Stand in for the real ML models — they don't exist until Day 7.
+
+    predict.side_effect returns one prediction per input row rather than a
+    fixed-length list — _run_inference now calls .predict() both directly
+    (one row) and via tire_deg_model.predict_life_remaining_batch (one row
+    per MAX_LOOKAHEAD_LAPS offset), and the batch call's .reshape() requires
+    the returned array to match the row count it was actually called with.
+    """
     stub_model = MagicMock()
-    stub_model.predict.return_value = [2.5]
+    stub_model.predict.side_effect = lambda features: np.full(len(features), 2.5)
     stub_model.predict_proba.return_value = [[0.2, 0.8]]
+    stub_model.probability_within.return_value = 0.05
 
     stub_registry = dict.fromkeys(prediction_worker._MODEL_FILES, stub_model)
     monkeypatch.setattr(prediction_worker, "_load_models", lambda: stub_registry)

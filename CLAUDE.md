@@ -461,22 +461,6 @@ These are not schema changes but known integration gaps to fix on future days.
   Pydantic should coerce back correctly but this path hasn't been tested with 
   real ML models. Verify on Day 13 integration testing.
 
-- **prediction_worker → strategy_service:** undercut_score/overcut_score in 
-  StrategyPrediction hardcoded 0.0. prediction_worker.py needs to call 
-  strategy_service.get_undercut_score() to populate real scores. Without this, 
-  evaluate_threats never fires real alerts.
-
-- **prediction_worker.py tire_deg feature vector shape:** `_run_inference()` builds
-  `features = [[tyre_age_laps, lap_number]]` — 2 values — against
-  tire_deg_model.FEATURE_COLUMNS, which now has 8 columns (lap_number,
-  compound_encoded, tyre_age_laps, fuel_adjusted_time, circuit_id_encoded,
-  driver_id_encoded, track_temp, air_temp) after the weather-features pass. This
-  predates that pass — it was already a 2-vs-6 mismatch before track_temp/air_temp
-  existed — so it is not a new regression, just a pre-existing bug whose correct
-  target shape changed. Needs the same real feature construction strategy_service.py's
-  `_project_stint_delta`/`_resolve_weather` already use when this gets fixed
-  alongside the undercut_score/overcut_score wiring above.
-
 - **WeatherData live stream:** now wired (was previously subscribed but discarded).
   ingest_live_session.py parses AirTemp/TrackTemp from the WeatherData topic and
   writes them to f1:{season}:{round}:weather:latest (see Redis Cache Key Schema).
@@ -484,15 +468,7 @@ These are not schema changes but known integration gaps to fix on future days.
   and live inference (strategy_service.py's _resolve_weather, with a circuit+compound
   DB-average fallback when the live key is absent).
 
-  - **pit_predictor feature array (more broken than previously noted):** 
-  prediction_worker.py currently passes [[tyre_age_laps, lap_number]] 
-  to pit_predictor — this is the entirely wrong feature set, not just 
-  too few columns. pit_predictor.FEATURE_COLUMNS expects: 
-  current_tyre_age, predicted_life_remaining, gap_to_car_ahead, 
-  gap_to_car_behind, safety_car_probability, laps_to_race_end, 
-  position, fuel_load_est. Fix before Day 13 integration testing.
-
-  - **WebSocket JWT in query param (?token=):** access token appears in 
+- **WebSocket JWT in query param (?token=):** access token appears in 
   server logs and browser history. Acceptable for now. Production fix: 
   short-lived WebSocket ticket — exchange via REST before connection, 
   use one-time token for WS auth instead of the full JWT.
@@ -513,6 +489,29 @@ Add alongside a future ingestion improvement pass.
 - `PUT /auth/fcm-token` endpoint added for mobile clients
 - Note: fcm_token intentionally NOT included in UserResponse —
   no need to echo device token back in every user payload
+
+**prediction_worker.py pit_predictor feature array + undercut/overcut wiring (✅ completed, pre-Day-13 fix pass):**
+- tire_deg feature vector was confirmed already fixed (8 columns, done prior to
+  this pass) — no change needed there.
+- pit_predictor now gets its real 8-column vector
+  (`pit_predictor.FEATURE_COLUMNS`): `predicted_life_remaining` via
+  `tire_deg_model.predict_life_remaining_batch`, `safety_car_probability` via
+  the loaded `safety_car_model.pkl`'s `.probability_within(...)`, and
+  `gap_to_car_ahead`/`gap_to_car_behind`/`position` from a new
+  `_resolve_position_context` helper (latest-`LapData`-per-driver query,
+  ordered by position, same pattern as `_build_race_state`/
+  `alert_service._latest_positions`).
+- `undercut_score`/`overcut_score` now call `strategy_service.get_undercut_score`/
+  `get_overcut_score` for real, against the car immediately ahead/behind in track
+  position respectively (matching `alert_service.evaluate_threats`' existing
+  assumption about what `undercut_score` means). `ModelNotLoadedError` is caught
+  per-call and falls back to `0.0` with a logged warning; leader/last-car have no
+  target and also fall back to `0.0`.
+- Worker → service import (`from backend.services import strategy_service` in
+  `prediction_worker.py`) is intentional and was checked for cycles: nothing
+  under `backend/services/` imports `backend/workers/`, so this is a one-way
+  dependency, not a violation of the "services must not import other services"
+  rule (that rule is about services importing services).
 
 ## Deferred Telemetry Features
 
