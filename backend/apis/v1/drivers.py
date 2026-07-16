@@ -26,9 +26,11 @@ router = APIRouter(prefix="/drivers", tags=["drivers"])
 @router.get("", response_model=list[DriverResponse])
 @limiter.limit(rate_limit_value)
 async def list_drivers(
-    request: Request, db: Annotated[AsyncSession, Depends(get_db)]
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
 ) -> list[DriverResponse]:
-    return await driver_service.get_drivers(db)
+    return await driver_service.get_drivers(redis_client, db)
 
 
 @router.get("/{driver_id}/analysis", response_model=DriverAnalysisResponse)
@@ -50,7 +52,10 @@ async def get_driver_laps(
     driver_id: uuid.UUID,
     session_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> PaginatedResponse[LapDataResponse]:
-    return await driver_service.get_driver_laps(db, driver_id, session_id, page, page_size)
+    return await driver_service.get_driver_laps(
+        redis_client, db, driver_id, session_id, page, page_size
+    )

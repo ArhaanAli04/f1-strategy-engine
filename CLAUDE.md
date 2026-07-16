@@ -244,7 +244,12 @@ f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driv
 f1:{season}:{round}:weather:latest                            TTL: 60s      (live track_temp/air_temp, written by ingest_live_session.py's WeatherData handler)
 f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile — season-level archetype/cluster/UMAP; written as a side effect of the population fit below, see driver_service.get_driver_analysis)
 f1:driver_style:fit:{season}                                  TTL: 3600s    (cached population-level PCA(4)->KMeans(5)->UMAP(2D) fit for driver_service.py's driver-style analysis endpoint — avoids refitting for every driver requested in the same season, see services/driver_service.py)
-f1:race:{race_id}:detail                                     TTL: 86400s   (race metadata)
+f1:race:{race_id}:detail                                          TTL: 86400s   (race + circuit + sessions, now wired Day 13)
+f1:race:{race_id}:session:{session_id}:detail                     TTL: 86400s   (single session lookup)
+f1:races:list:{season}:{round_number}:{page}:{page_size}          TTL: 86400s   (paginated race listing)
+f1:current_race:{season}                                          TTL: 300s     (Ergast-resolved current race, insulates external API)
+f1:drivers:all                                                    TTL: infinity (driver roster, manual invalidation only)
+f1:driver:{driver_id}:session:{session_id}:laps:{page}:{page_size} TTL: 86400s (paginated per-driver lap history)
 f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
@@ -294,17 +299,26 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    3
-Day:      12
-Status:   Full monitoring stack. backend/core/metrics.py with all custom 
-          f1_* metrics. /metrics gated by HTTP Basic Auth. Sentry init with 
-          FastAPI+Celery integrations, release tagging, env-conditional 
-          traces_sample_rate. Celery worker --pool=solo for Prometheus 
-          compatibility. prometheus.yml, alerts.yml, alertmanager.yml, 
-          grafana-dashboard.json with auto-provisioning. Docker Compose 
-          updated with prometheus, grafana, alertmanager, redis-exporter, 
-          postgres-exporter. Grafana verified at localhost:3000, all 9 
-          panels loaded, real data flowing.
-Next:     Day 13 — Integration testing + load testing
+Day:      13
+Status:   Caching layer audit + load testing complete. tests/load/locustfile.py
+          (RaceDayViewerUser, StrategyUser, WebSocketUser), replay_publisher.py,
+          and ws_load_test.py (standalone asyncio WS benchmark) all written and
+          verified against live Docker. strategy_predictions/alerts composite
+          indexes added (20260716_add_strategy_predictions_and_alerts_.py).
+          Two WS connection-pool-exhaustion bugs found and fixed (DB session
+          held for connection lifetime; Redis pool too small) — see Deferred
+          Wiring for the fan-out redundancy issue found alongside them.
+          Baseline load test (-u 100 -r 10 --run-time 2m) surfaced a cache
+          stampede in cache_service.cacheable (fixed: single-flight Redis
+          lock) and an uncached negative-result path in race_service's
+          get_current_race (fixed: differentiated TTL, hand-rolled
+          cache-aside). broker_pool_limit raised 10->50 but did NOT fix
+          POST /simulate's ~12-14s enqueue latency — see Deferred Wiring,
+          real cause is likely the shared default ThreadPoolExecutor cap
+          (~20 threads), not the Celery producer pool.
+Next:     Day 14 — model_version assertion fix; revisit the three open
+          Day 13 items below (races/current stampede, executor bottleneck,
+          strategy/overview's 16-17s single-computation floor)
 Blockers: model_version assertion in integration test still says "latest" 
           (should be "production") — fix on Day 14
 ```
@@ -373,6 +387,14 @@ Update this list as each service is configured.
 
 
 ## Development Tooling Notes
+
+### AWS Credentials
+
+AWS credentials must be explicitly passed to backend and worker 
+containers via docker-compose.yml env vars — boto3's default 
+credential chain does not read pydantic-settings .env values. 
+Both _download_from_s3 functions and the compose env passthrough 
+were fixed on Day 13.
 
 ### Celery worker — restart required after code changes
 
@@ -480,6 +502,142 @@ populates them. Need a seed_teams.py script that:
     - Can use FastF1's session.get_driver() data or a hardcoded 
     current-season roster
 Add alongside a future ingestion improvement pass.
+
+- **WS telemetry broadcast: redundant per-connection enrichment fan-out —
+  fix before Day 22 Kubernetes deployment.** `_forward_lap_events` in
+  `backend/apis/v1/telemetry.py` runs one `pubsub.listen()` loop per WS
+  connection, and on every lap-completion message each loop independently
+  calls `telemetry_service.get_live_car_channels(...)` — the same Redis GET,
+  for the same cache key, once per connected client, per event. At N
+  concurrent viewers that's Nx redundant Redis round trips per event instead
+  of one. Measured via `tests/load/ws_load_test.py --connections 200
+  --messages 50 --rate 20` (2026-07-16, after the two pool fixes below were
+  already applied): only ~24/50 messages delivered per connection on average
+  before the test's drain window closed, p50 latency ~2.2s, p95 ~3.6s, max
+  ~4.0s — versus a clean 20-connection run at the same rate (p50 16ms, p99
+  47ms, 0 loss). Bumping Redis `max_connections` further would only raise the
+  ceiling, not remove the redundancy, since every extra viewer still adds
+  another full copy of the same lookup work per event.
+
+  Required fix: replace the one-pubsub-per-connection model with a single
+  shared listener per session — one `pubsub.listen()` task (keyed by
+  `session_id`) that receives each lap-completion message once, calls
+  `get_live_car_channels` once, builds one `TelemetryStreamMessage`, and
+  fans it out by iterating the set of WebSocket connections currently
+  attached to that session (a session_id -> set[WebSocket] registry, started
+  on first subscriber and torn down when the last one disconnects — same
+  lifecycle shape as a per-session singleton, not a per-request dependency).
+  `_watch_for_disconnect` per-connection can stay as-is for detecting client
+  disconnects; only the listen+enrich+send path needs to move from
+  per-connection to per-session. Re-run `ws_load_test.py` at
+  `--connections 200` after the change and confirm delivery returns to ~0
+  loss with sub-100ms p99, matching the 20-connection baseline above.
+
+  Two related pool-sizing fixes already landed alongside this finding
+  (2026-07-16, pre-Day-14 load testing pass) and should NOT be re-litigated
+  when the fan-out fix lands — they're independent, already-verified issues:
+  - `websocket_telemetry` used to take `db: Annotated[AsyncSession,
+    Depends(get_db)]`, which FastAPI keeps open for the WS connection's
+    entire lifetime even though the DB is only needed once at connect time
+    (`resolve_season_round`). With `pool_size=10 + max_overflow=20` (30
+    total, `core/database.py`), this capped concurrent viewers at ~30
+    regardless of pod scaling. Fixed by resolving season/round through a
+    short-lived module-local session factory (same pattern as
+    `workers/*.py`'s `_get_session_factory`) before entering the streaming
+    loop, instead of a request-scoped dependency held for the connection.
+  - Redis pub/sub subscriptions pin a dedicated connection from the shared
+    pool for the subscription's lifetime (a redis-py constraint, not a bug).
+    `core/redis_client.py`'s pool was `max_connections=50`, capping
+    concurrent viewers there too. Raised to 250 to give the 200-connection
+    load test headroom on top of ordinary REST-route command traffic. This
+    number will need revisiting once the fan-out fix above lands and
+    replaces N pubsub connections with 1 per session.
+
+- **Cache stampede in `cache_service.cacheable` — fixed 2026-07-16.**
+  The cache-aside decorator had no single-flight protection: on a miss, every
+  concurrent caller independently re-ran the full decorated function instead
+  of one computing and the rest reusing the result. Confirmed via Day 13
+  baseline load test (`-u 100 -r 10 --run-time 2m`) on `/strategy/{session_id}/overview`:
+  30s TTL, ~100 concurrent viewers, p50=55ms (clean hits) alongside
+  p95=15000ms/p99=17000ms/max=19000ms and 2 `RemoteDisconnected` failures
+  (clustered recomputation at each TTL rollover). Fixed by adding a Redis-lock
+  single-flight (`client.lock(f"{key}:lock", ...)`) around the miss path —
+  losers block on the lock (not busy-polling) and re-read cache once it
+  releases, rather than recomputing. Verified directly: 5 concurrent requests
+  against a cold key now produce exactly one Redis write (checked via
+  `TTL`/`EXISTS` immediately after) instead of 5 redundant computations, and
+  the 2 `RemoteDisconnected` failures are gone in the post-fix re-run (0/478).
+  **Lock timeout tuning note:** the first attempt used `timeout=20.0,
+  blocking_timeout=20.0`, which is barely above `get_competitor_predicted_strategy`'s
+  own **~16-17s uncontended** runtime (verified: a single cold-cache request
+  with zero concurrency still took ~16s) — so under a concurrent burst, every
+  waiter's `blocking_timeout` elapsed at essentially the same moment the
+  winner finished, and they fell through to recomputing independently anyway
+  (measured: 15 concurrent requests against a cold key all took ~20s each,
+  i.e. no benefit at all). Retuned to 40.0/40.0 for real headroom above that
+  16-17s floor.
+  **Still open:** this fix removes the *redundant* computation cost, but does
+  nothing about the *underlying* ~16-17s single-computation cost itself
+  (`get_competitor_predicted_strategy`'s nested per-driver ML inference loop
+  in `strategy_service.py`) — confirmed in the Day 13 re-run: `/strategy/overview`'s
+  p95/p99/max were *unchanged* (16000/19000/20070ms) even with the stampede
+  fixed, because a request that's unlucky enough to need a fresh computation
+  (or wait behind one) still pays close to that full 16-17s floor. This is
+  now the single highest-leverage remaining target — a future day should
+  profile why ~20 drivers' worth of pit_predictor + tire_deg calls costs
+  16-17s (candidate causes: no batching across drivers, redundant per-lap
+  looping inside `_first_pit_lap_over_threshold`) before reaching for
+  anything more drastic.
+
+- **`/races/current` negative-result caching — fixed 2026-07-16, but doesn't
+  help under this test's specific traffic shape; needs single-flight too.**
+  `race_service._fetch_current_race` raised `NotFoundError` when the
+  Ergast-resolved season/round hadn't been ingested yet (true for 2026 right
+  now — ingestion stops at the 2025 holdout set). Since the old
+  `@cacheable` wrapper only wrote to cache on a successful return, a raised
+  exception meant this negative result was *never* cached — every request
+  paid the full external Ergast round trip. Confirmed as the root cause of
+  `/races/current`'s p50=13000ms (all 34/34 requests, 100% uncached) in the
+  original baseline. Fixed: `_fetch_current_race` is no longer wrapped in
+  `@cacheable`; `get_current_race` now hand-rolls cache-aside with two
+  different TTLs — `CURRENT_RACE_TTL_SECONDS` (300s) for a real race,
+  `CURRENT_RACE_NOT_FOUND_TTL_SECONDS` (60s) for "no current race". Verified
+  manually: first call 1.28s (real Ergast round trip), second call 50ms
+  (cached negative result).
+  **Still open:** the Day 13 re-run showed *no improvement* (p50 still
+  13000ms across all 34 requests) — root cause is a stampede specific to how
+  `locustfile.py`'s `RaceDayViewerUser` uses this endpoint: it's called
+  exactly once, in `on_start()`, and Locust ramps all 100 simulated users up
+  within ~10 seconds. All 34 `RaceDayViewerUser`s hit the cold cache key
+  within that same burst, before any single one of them finishes its own
+  ~13s Ergast call and populates the cache for the others — the identical
+  failure mode as the `cacheable` stampede above, just on a hand-rolled cache
+  path that doesn't share `cacheable`'s new lock. Fix: add the same
+  single-flight lock pattern directly into `get_current_race`'s manual
+  cache-aside (can't just re-wrap in `@cacheable` — the two-TTL split still
+  needs to stay hand-rolled).
+
+- **`broker_pool_limit` 10->50 — applied 2026-07-16, confirmed live, did NOT
+  fix POST `/strategy/{session_id}/simulate`'s enqueue latency.** Original
+  hypothesis: Celery's producer-side `broker_pool_limit` (default 10, confirmed
+  via `app.conf.broker_pool_limit` before the change) capped concurrent
+  `.delay()` calls from the API process, explaining why a call that should be
+  a near-instant broker publish was taking ~12s median at 100 concurrent users.
+  Raised to 50 in `workers/celery_app.py`'s `app.conf.update(...)`; confirmed
+  live post-restart (`app.conf.broker_pool_limit == 50` in the running
+  container). Re-ran the identical baseline: p50 went from 12000ms to
+  14000ms — unchanged at best, possibly noise, definitely not fixed.
+  **Real cause is probably elsewhere:** `apis/v1/strategy.py`'s
+  `simulate_strategy` wraps `.delay()` in
+  `loop.run_in_executor(None, run_race_simulation.delay, task_payload)` —
+  passing `None` uses asyncio's *default* `ThreadPoolExecutor`, capped at
+  `min(32, cpu_count+4)` (= 20 on this container's 16 CPUs). 100 concurrent
+  requests competing for 20 threads just to make the call would bottleneck
+  regardless of how many broker connections are available downstream. Not
+  yet investigated further — a future day should either size a dedicated
+  executor for this route or restructure to avoid the thread-pool hop
+  entirely (e.g. an async-native Celery producer path, if one exists for
+  this Celery version).
 
 ### Notes
 

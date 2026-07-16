@@ -194,8 +194,13 @@ def _tire_deg_predictions(
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Batch tire_deg predictions (delta + life remaining) for every (sim, driver) pair.
 
+    race_state.track_temp/air_temp are intentionally not read here — as of
+    2026-07-16 tire_deg_model.FEATURE_COLUMNS is back to 6 columns (see that
+    module's docstring), matching the deployed production models pending a
+    weather-aware retrain+promotion.
+
     Args:
-        race_state: The simulation's static race context (also supplies track_temp/air_temp).
+        race_state: The simulation's static race context.
         compound_groups: compound -> array of driver column indices with that compound.
         compound_encoded_by_driver: (n_drivers,) current encoded compound per driver.
             Mutable across laps (unlike race_state.drivers[i].compound_encoded, which is
@@ -232,8 +237,6 @@ def _tire_deg_predictions(
         circuit_id_encoded_arr = np.full(
             tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.int64
         )
-        track_temp_arr = np.full(tyre_age_flat.shape[0], race_state.track_temp)
-        air_temp_arr = np.full(tyre_age_flat.shape[0], race_state.air_temp)
 
         features = np.column_stack(
             [
@@ -243,8 +246,6 @@ def _tire_deg_predictions(
                 fuel_adjusted_time_arr,
                 circuit_id_encoded_arr.astype(np.float64),
                 driver_id_encoded_flat.astype(np.float64),
-                track_temp_arr,
-                air_temp_arr,
             ]
         )
         with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
@@ -258,8 +259,6 @@ def _tire_deg_predictions(
                 fuel_adjusted_time_arr,
                 circuit_id_encoded_arr,
                 driver_id_encoded_flat,
-                track_temp_arr,
-                air_temp_arr,
             )
         predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
 

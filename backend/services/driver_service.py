@@ -44,12 +44,19 @@ from backend.models.telemetry import LapData, TireStint
 from backend.schemas.common import PaginatedResponse
 from backend.schemas.driver_schema import DriverAnalysisResponse, DriverResponse
 from backend.schemas.telemetry_schema import LapDataResponse
-from backend.services.cache_service import cache_get, cache_set
+from backend.services.cache_service import cache_get, cache_set, cacheable
 from backend.services.ml.driver_style import build_driver_style_features, fit_driver_style_clusters
 
 DRIVER_STYLE_FIT_TTL_SECONDS = 3600
 DRIVER_FINGERPRINT_TTL_SECONDS = 3600
 DEFAULT_PAGE_SIZE = 20
+# Static roster data (per CLAUDE.md's cache key schema "static data" bucket) —
+# no expiry, only invalidated by a manual cache_service delete if the roster
+# changes (new driver contract, etc).
+DRIVERS_LIST_TTL_SECONDS = None
+# Historical lap data — immutable once a session's laps are ingested, matching
+# race_service.py's RACE_DETAIL_TTL_SECONDS bucket.
+DRIVER_LAPS_TTL_SECONDS = 86400
 
 
 def _fingerprint_key(driver_id: uuid.UUID | str) -> str:
@@ -60,21 +67,41 @@ def _population_fit_key(season: int) -> str:
     return f"f1:driver_style:fit:{season}"
 
 
-async def get_drivers(db: AsyncSession) -> list[DriverResponse]:
-    """List all drivers with their team contract history.
+def _key_drivers_list(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> str:
+    return "f1:drivers:all"
 
-    Args:
-        db: Async DB session.
-    Returns:
-        Every driver, contracts (and each contract's team) eagerly loaded.
-    """
+
+@cacheable(ttl=DRIVERS_LIST_TTL_SECONDS, key_fn=_key_drivers_list)
+async def _fetch_drivers(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> list[dict[str, Any]]:
     query = (
         select(Driver)
         .options(selectinload(Driver.contracts).selectinload(DriverContract.team))
         .order_by(Driver.full_name)
     )
     rows = (await db.execute(query)).scalars().all()
-    return [DriverResponse.model_validate(d) for d in rows]
+    return [DriverResponse.model_validate(d).model_dump(mode="json") for d in rows]
+
+
+async def get_drivers(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> list[DriverResponse]:
+    """List all drivers with their team contract history.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_drivers).
+        db: Async DB session.
+    Returns:
+        Every driver, contracts (and each contract's team) eagerly loaded.
+    """
+    data = await _fetch_drivers(client, db)
+    return [DriverResponse.model_validate(d) for d in data]
 
 
 async def _resolve_season(db: AsyncSession, session_id: uuid.UUID) -> int:
@@ -296,25 +323,26 @@ async def get_driver_analysis(
     )
 
 
-async def get_driver_laps(
+def _key_driver_laps(
+    client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
     driver_id: uuid.UUID,
     session_id: uuid.UUID,
-    page: int = 1,
-    page_size: int = DEFAULT_PAGE_SIZE,
-) -> PaginatedResponse[LapDataResponse]:
-    """Paginated lap history for one driver in one session.
+    page: int,
+    page_size: int,
+) -> str:
+    return f"f1:driver:{driver_id}:session:{session_id}:laps:{page}:{page_size}"
 
-    Args:
-        db: Async DB session.
-        driver_id: Driver whose laps to fetch.
-        session_id: Session to scope laps to.
-        page: 1-indexed page number.
-        page_size: Rows per page.
-    Returns:
-        Laps ordered by lap number, each including its tire compound (for
-        client-side tire-compound coloring) and sector times.
-    """
+
+@cacheable(ttl=DRIVER_LAPS_TTL_SECONDS, key_fn=_key_driver_laps)
+async def _fetch_driver_laps(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    driver_id: uuid.UUID,
+    session_id: uuid.UUID,
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
     filters = (LapData.driver_id == driver_id, LapData.session_id == session_id)
 
     total = (
@@ -336,4 +364,29 @@ async def get_driver_laps(
         total=total,
         page=page,
         page_size=page_size,
-    )
+    ).model_dump(mode="json")
+
+
+async def get_driver_laps(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    driver_id: uuid.UUID,
+    session_id: uuid.UUID,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> PaginatedResponse[LapDataResponse]:
+    """Paginated lap history for one driver in one session.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_driver_laps).
+        db: Async DB session.
+        driver_id: Driver whose laps to fetch.
+        session_id: Session to scope laps to.
+        page: 1-indexed page number.
+        page_size: Rows per page.
+    Returns:
+        Laps ordered by lap number, each including its tire compound (for
+        client-side tire-compound coloring) and sector times.
+    """
+    data = await _fetch_driver_laps(client, db, driver_id, session_id, page, page_size)
+    return PaginatedResponse[LapDataResponse].model_validate(data)

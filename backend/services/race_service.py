@@ -9,13 +9,25 @@ matched against our own races table to build the response. If that season/
 round hasn't been ingested yet, this raises NotFoundError rather than
 fabricating a response FastF1 UUIDs can't back — same "don't paper over a
 real data gap" precedent as strategy_service.py's model-loading errors.
+
+Day 13 caching pass: every public function here now takes a Redis client as
+its first positional argument (matching strategy_service.py/telemetry_service.py's
+convention) and delegates to a private `_fetch_*` function wrapped in
+cache_service.cacheable. The cached function returns a JSON-serialisable dict
+(`.model_dump(mode="json")`) rather than the Pydantic response model itself,
+since cache_set/redis_set round-trip through json.dumps — the public function
+reconstructs the response schema from that dict on both cache hit and miss.
+Same split already used by strategy_service.get_optimal_pit_window (cached,
+raw) vs. get_pit_window_with_explanation (uncached wrapper).
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+import redis.asyncio as aioredis
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -25,28 +37,50 @@ from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.schemas.common import PaginatedResponse
 from backend.schemas.race_schema import RaceListResponse, RaceResponse, SessionResponse
+from backend.services.cache_service import cache_get, cache_set, cacheable
 
 DEFAULT_PAGE_SIZE = 20
 
+# Race/session metadata is immutable once ingested (a 2023 race never changes),
+# so this is the "historical race/lap data" TTL bucket from CLAUDE.md's cache
+# key schema, not the "static data, infinite TTL" bucket (that's reserved for
+# circuits/drivers — see driver_service.get_drivers).
+RACE_DETAIL_TTL_SECONDS = 86400
+SESSION_DETAIL_TTL_SECONDS = 86400
+RACES_LIST_TTL_SECONDS = 86400
+# Short TTL, not one of CLAUDE.md's 4 documented buckets: get_current_race
+# calls the external Ergast API on every miss, which every race-day viewer
+# hits — this insulates that external dependency from request volume while
+# still noticing a new race weekend same-day.
+CURRENT_RACE_TTL_SECONDS = 300
+# Shorter TTL for the "no current race" outcome specifically (see
+# get_current_race) — noticing a newly-ingested season/round sooner than a
+# full 300s matters more when we know we're currently in a gap.
+CURRENT_RACE_NOT_FOUND_TTL_SECONDS = 60
 
-async def get_races(
+
+def _key_races_list(
+    client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
-    season: int | None = None,
-    round_number: int | None = None,
-    page: int = 1,
-    page_size: int = DEFAULT_PAGE_SIZE,
-) -> PaginatedResponse[RaceListResponse]:
-    """List races, optionally filtered by season/round, newest first.
+    season: int | None,
+    round_number: int | None,
+    page: int,
+    page_size: int,
+) -> str:
+    season_segment = season if season is not None else "any"
+    round_segment = round_number if round_number is not None else "any"
+    return f"f1:races:list:{season_segment}:{round_segment}:{page}:{page_size}"
 
-    Args:
-        db: Async DB session.
-        season: Optional season year filter.
-        round_number: Optional round-within-season filter.
-        page: 1-indexed page number.
-        page_size: Rows per page.
-    Returns:
-        Paginated race list with each race's circuit nested.
-    """
+
+@cacheable(ttl=RACES_LIST_TTL_SECONDS, key_fn=_key_races_list)
+async def _fetch_races(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int | None,
+    round_number: int | None,
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
     filters = []
     if season is not None:
         filters.append(Race.season == season)
@@ -71,20 +105,47 @@ async def get_races(
         total=total,
         page=page,
         page_size=page_size,
-    )
+    ).model_dump(mode="json")
 
 
-async def get_race(db: AsyncSession, race_id: uuid.UUID) -> RaceResponse:
-    """Fetch a single race with its circuit and sessions.
+async def get_races(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int | None = None,
+    round_number: int | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+) -> PaginatedResponse[RaceListResponse]:
+    """List races, optionally filtered by season/round, newest first.
 
     Args:
+        client: Redis client (cache-aside, forwarded to _fetch_races).
         db: Async DB session.
-        race_id: Race to fetch.
+        season: Optional season year filter.
+        round_number: Optional round-within-season filter.
+        page: 1-indexed page number.
+        page_size: Rows per page.
     Returns:
-        The race.
-    Raises:
-        NotFoundError: If no race with this ID exists.
+        Paginated race list with each race's circuit nested.
     """
+    data = await _fetch_races(client, db, season, round_number, page, page_size)
+    return PaginatedResponse[RaceListResponse].model_validate(data)
+
+
+def _key_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+) -> str:
+    return f"f1:race:{race_id}:detail"
+
+
+@cacheable(ttl=RACE_DETAIL_TTL_SECONDS, key_fn=_key_race)
+async def _fetch_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+) -> dict[str, Any]:
     query = (
         select(Race)
         .options(selectinload(Race.circuit), selectinload(Race.sessions))
@@ -93,15 +154,64 @@ async def get_race(db: AsyncSession, race_id: uuid.UUID) -> RaceResponse:
     race = (await db.execute(query)).scalar_one_or_none()
     if race is None:
         raise NotFoundError(f"Race {race_id} not found")
-    return RaceResponse.model_validate(race)
+    return RaceResponse.model_validate(race).model_dump(mode="json")
+
+
+async def get_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+) -> RaceResponse:
+    """Fetch a single race with its circuit and sessions.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_race).
+        db: Async DB session.
+        race_id: Race to fetch.
+    Returns:
+        The race.
+    Raises:
+        NotFoundError: If no race with this ID exists.
+    """
+    data = await _fetch_race(client, db, race_id)
+    return RaceResponse.model_validate(data)
+
+
+def _key_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+    session_id: uuid.UUID,
+) -> str:
+    return f"f1:race:{race_id}:session:{session_id}:detail"
+
+
+@cacheable(ttl=SESSION_DETAIL_TTL_SECONDS, key_fn=_key_session)
+async def _fetch_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+    session_id: uuid.UUID,
+) -> dict[str, Any]:
+    query = select(SessionModel).where(
+        SessionModel.id == session_id, SessionModel.race_id == race_id
+    )
+    session = (await db.execute(query)).scalar_one_or_none()
+    if session is None:
+        raise NotFoundError(f"Session {session_id} not found for race {race_id}")
+    return SessionResponse.model_validate(session).model_dump(mode="json")
 
 
 async def get_session(
-    db: AsyncSession, race_id: uuid.UUID, session_id: uuid.UUID
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    race_id: uuid.UUID,
+    session_id: uuid.UUID,
 ) -> SessionResponse:
     """Fetch a single session, scoped to its parent race.
 
     Args:
+        client: Redis client (cache-aside, forwarded to _fetch_session).
         db: Async DB session.
         race_id: Parent race.
         session_id: Session to fetch.
@@ -110,27 +220,21 @@ async def get_session(
     Raises:
         NotFoundError: If no session with this ID exists under this race.
     """
-    query = select(SessionModel).where(
-        SessionModel.id == session_id, SessionModel.race_id == race_id
-    )
-    session = (await db.execute(query)).scalar_one_or_none()
-    if session is None:
-        raise NotFoundError(f"Session {session_id} not found for race {race_id}")
-    return SessionResponse.model_validate(session)
+    data = await _fetch_session(client, db, race_id, session_id)
+    return SessionResponse.model_validate(data)
 
 
-async def get_current_race(db: AsyncSession) -> RaceResponse:
-    """Resolve the currently active/upcoming race via Ergast's schedule.
+def _key_current_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> str:
+    return f"f1:current_race:{datetime.now(UTC).year}"
 
-    Args:
-        db: Async DB session.
-    Returns:
-        The current season's next race whose date hasn't passed yet, or the
-        season's final race if the season has already concluded.
-    Raises:
-        NotFoundError: If Ergast has no schedule for the current season, or
-            the resolved season/round hasn't been ingested into our races table.
-    """
+
+async def _fetch_current_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> dict[str, Any]:
     from fastf1.ergast import Ergast
 
     today = datetime.now(UTC).date()
@@ -162,4 +266,58 @@ async def get_current_race(db: AsyncSession) -> RaceResponse:
             f"Season {season} round {target_round} is Ergast's current race "
             "but hasn't been ingested yet"
         )
-    return RaceResponse.model_validate(race)
+    return RaceResponse.model_validate(race).model_dump(mode="json")
+
+
+_NOT_FOUND_SENTINEL_FIELD = "_not_found"
+
+
+async def get_current_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> RaceResponse:
+    """Resolve the currently active/upcoming race via Ergast's schedule.
+
+    Hand-rolled cache-aside rather than @cacheable: unlike every other
+    cached lookup in this codebase, this one needs two different TTLs for
+    the same key depending on outcome (a real race vs. "no current race"),
+    and @cacheable only ever writes to cache on a successful return —
+    a raised NotFoundError previously skipped caching entirely, so *every*
+    request paid the full external Ergast round trip whenever the current
+    season/round hadn't been ingested yet (confirmed as the root cause of
+    /races/current's p50=13s during Day 13 load testing: all 34 requests in
+    a 2-minute run hit Ergast fresh, since nothing was ever cached either
+    way). The "not found" case is now cached too, just at a shorter TTL, so
+    only the first request (or first few racing concurrently) pays that cost
+    per CURRENT_RACE_NOT_FOUND_TTL_SECONDS window.
+
+    Args:
+        client: Redis client (cache-aside).
+        db: Async DB session.
+    Returns:
+        The current season's next race whose date hasn't passed yet, or the
+        season's final race if the season has already concluded.
+    Raises:
+        NotFoundError: If Ergast has no schedule for the current season, or
+            the resolved season/round hasn't been ingested into our races table.
+    """
+    key = _key_current_race(client, db)
+    cached = await cache_get(client, key)
+    if cached is not None:
+        if cached.get(_NOT_FOUND_SENTINEL_FIELD):
+            raise NotFoundError(cached["reason"])
+        return RaceResponse.model_validate(cached)
+
+    try:
+        data = await _fetch_current_race(client, db)
+    except NotFoundError as exc:
+        await cache_set(
+            client,
+            key,
+            {_NOT_FOUND_SENTINEL_FIELD: True, "reason": str(exc)},
+            CURRENT_RACE_NOT_FOUND_TTL_SECONDS,
+        )
+        raise
+
+    await cache_set(client, key, data, CURRENT_RACE_TTL_SECONDS)
+    return RaceResponse.model_validate(data)

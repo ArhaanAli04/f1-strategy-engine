@@ -21,9 +21,9 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.core.database import get_db
+from backend.core.database import get_db, get_engine
 from backend.core.exceptions import AuthenticationError, NotFoundError
 from backend.core.metrics import f1_active_websocket_connections
 from backend.core.rate_limit import limiter, rate_limit_value
@@ -47,6 +47,23 @@ ws_router = APIRouter()
 # any auth/lookup failure during the handshake — matches the codebase's
 # HTTP-side convention of a single AuthenticationError-shaped rejection.
 _WS_POLICY_VIOLATION_CLOSE_CODE = 4401
+
+# A dedicated short-lived-session factory (same pattern as workers/*.py),
+# rather than Depends(get_db): that FastAPI dependency stays open for the
+# entire route call, which for a WebSocket route means the whole connection's
+# lifetime. The one-time season/round lookup below doesn't need a DB
+# connection pinned for as long as a viewer stays connected — with
+# pool_size=10 + max_overflow=20 (see core/database.py), holding one per
+# connection capped concurrent WS viewers at ~30, confirmed via
+# tests/load/ws_load_test.py.
+_session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+def _get_session_factory() -> async_sessionmaker[AsyncSession]:
+    global _session_factory
+    if _session_factory is None:
+        _session_factory = async_sessionmaker(get_engine(), expire_on_commit=False)
+    return _session_factory
 
 
 @router.get("/{session_id}/{driver_id}/live", response_model=LiveTelemetryResponse)
@@ -139,7 +156,6 @@ async def _watch_for_disconnect(websocket: WebSocket) -> None:
 async def websocket_telemetry(
     websocket: WebSocket,
     session_id: uuid.UUID,
-    db: Annotated[AsyncSession, Depends(get_db)],
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
 ) -> None:
     """Broadcast LapCompletedEvent to every client connected for a session.
@@ -153,7 +169,6 @@ async def websocket_telemetry(
     Args:
         websocket: The incoming WebSocket connection (not yet accepted).
         session_id: Session to stream lap-completion events for.
-        db: Async DB session, to resolve season/round for the enrichment lookup.
         redis_client: Redis client, for both the pub/sub subscription and the
             per-message live-telemetry enrichment lookup.
     Returns:
@@ -174,7 +189,8 @@ async def websocket_telemetry(
         return
 
     try:
-        season, round_number = await telemetry_service.resolve_season_round(db, session_id)
+        async with _get_session_factory()() as db:
+            season, round_number = await telemetry_service.resolve_season_round(db, session_id)
     except NotFoundError:
         await websocket.close(code=_WS_POLICY_VIOLATION_CLOSE_CODE)
         return
