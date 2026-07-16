@@ -6,8 +6,13 @@ classifier, and the safety car Poisson model. Each is evaluated against the
 holdout MAE improves on the current production model's holdout MAE (first
 run always promotes, since there is no existing production model to beat).
 
-track_temp/air_temp were dropped from tire_deg_model's feature set — not yet
-ingested, see CLAUDE.md Deferred Schema Changes.
+track_temp/air_temp are fetched here (and still stored via
+tire_deg_model.add_engineered_features) but are not part of
+tire_deg_model.FEATURE_COLUMNS as of 2026-07-16 — a weather-aware retrain
+regressed holdout MAE 30-40% and the promotion guard correctly refused to
+replace production models, so training here intentionally matches the
+6-feature schema actually deployed. See tire_deg_model.py's module
+docstring and CLAUDE.md's Data Quality Notes.
 
 If a tire_deg compound has no holdout-season data (e.g. a dry 2025 means zero
 WET laps), promotion falls back to comparing cv_mae instead of a true holdout
@@ -265,8 +270,7 @@ def _add_predicted_life_remaining(
 
     Args:
         df: Must include compound, lap_number, compound_encoded, tyre_age_laps,
-            fuel_adjusted_time, circuit_id_encoded, driver_id_encoded, track_temp,
-            air_temp.
+            fuel_adjusted_time, circuit_id_encoded, driver_id_encoded.
         tire_deg_results: Fitted tire degradation results, keyed by compound.
     Returns:
         Series aligned to df.index with the estimated laps remaining.
@@ -289,8 +293,6 @@ def _add_predicted_life_remaining(
             group["fuel_adjusted_time"].to_numpy(),
             group["circuit_id_encoded"].to_numpy(),
             group["driver_id_encoded"].to_numpy(),
-            group["track_temp"].to_numpy(),
-            group["air_temp"].to_numpy(),
         )
         out.loc[group.index] = life
     return out

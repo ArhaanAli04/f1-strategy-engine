@@ -36,6 +36,10 @@ services:
       SECRET_KEY: dev-secret-key-not-for-production
       FASTF1_CACHE_DIR: /tmp/fastf1_cache
       ENVIRONMENT: development
+      AWS_BUCKET_NAME: "${AWS_BUCKET_NAME:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-ap-south-1}"
     volumes:
       - ../../backend:/app/backend
     ports:
@@ -58,6 +62,10 @@ services:
       SECRET_KEY: dev-secret-key-not-for-production
       FASTF1_CACHE_DIR: /tmp/fastf1_cache
       ENVIRONMENT: development
+      AWS_BUCKET_NAME: "${AWS_BUCKET_NAME:-}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_REGION: "${AWS_REGION:-ap-south-1}"
     volumes:
       - ../../backend:/app/backend
     # No host port mapping: worker:9090/metrics (hand-rolled Celery metrics

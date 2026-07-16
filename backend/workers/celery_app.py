@@ -36,6 +36,16 @@ app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    # Celery's default (10) caps concurrent producer-side broker connections
+    # for .delay()/.apply_async() calls — this is the API process's outbound
+    # connection pool, unrelated to worker concurrency. Confirmed via Day 13
+    # load testing as the reason POST /strategy/{session_id}/simulate took
+    # ~12s median just to return its 202 Accepted at 100 concurrent users:
+    # that call is a single Redis broker publish and should be near-instant
+    # regardless of queue depth, but 100 concurrent requests were serializing
+    # behind only 10 broker connections. Raised to comfortably cover expected
+    # concurrent race-day viewers.
+    broker_pool_limit=50,
     task_default_queue="telemetry_queue",
     task_routes={
         "process_lap": {"queue": "telemetry_queue"},

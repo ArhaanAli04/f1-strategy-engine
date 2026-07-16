@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,13 +15,29 @@ if TYPE_CHECKING:
 
 class StrategyPrediction(Base):
     __tablename__ = "strategy_predictions"
+    # Backs alert_service._latest_undercut_scores: filters by session_id,
+    # groups by driver_id, aggregates MAX(predicted_at) — then re-joins on
+    # (driver_id, predicted_at) to fetch the winning row. DESC matches the
+    # "most recent prediction" access pattern; the single-column indexes
+    # below on session_id/driver_id don't help SQLAlchemy plan the composite
+    # filter+group+max as one index scan.
+    __table_args__ = (
+        Index(
+            "ix_strategy_predictions_session_driver_predicted_at",
+            "session_id",
+            "driver_id",
+            text("predicted_at DESC"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # No standalone index=True here: ix_strategy_predictions_session_driver_predicted_at
+    # above already leads with session_id, so a separate single-column index
+    # on it would be a pure duplicate.
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("sessions.id", ondelete="CASCADE"),
         nullable=False,
-        index=True,
     )
     driver_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False, index=True

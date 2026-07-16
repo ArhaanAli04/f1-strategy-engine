@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,10 +55,17 @@ class User(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
+    # Backs alert_service.get_alerts_for_user: WHERE user_id = :user_id [AND
+    # read_at IS NULL] ORDER BY triggered_at DESC. DESC matches the ORDER BY
+    # directly so Postgres can satisfy it via an index scan instead of a sort.
+    __table_args__ = (Index("ix_alerts_user_triggered_at", "user_id", text("triggered_at DESC")),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # No standalone index=True here: ix_alerts_user_triggered_at above already
+    # leads with user_id, so a separate single-column index would be a pure
+    # duplicate.
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

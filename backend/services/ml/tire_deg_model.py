@@ -1,8 +1,10 @@
 """XGBoost tire degradation regression — one model per compound.
 
 Predicts, for a given lap, the lap time delta from that driver's session
-median lap time as a function of tyre age, fuel-adjusted pace, track/air
-temperature, and circuit/driver context.
+median lap time as a function of tyre age, fuel-adjusted pace, and
+circuit/driver context. See FEATURE_COLUMNS below for why track/air
+temperature are computed (weather infra) but not currently selected into
+the feature set.
 """
 
 from __future__ import annotations
@@ -27,10 +29,19 @@ FEATURE_COLUMNS = [
     "fuel_adjusted_time",
     "circuit_id_encoded",
     "driver_id_encoded",
-    "track_temp",
-    "air_temp",
 ]
 TARGET_COLUMN = "lap_time_delta"
+
+# track_temp/air_temp were removed from FEATURE_COLUMNS on 2026-07-16: adding
+# them regressed holdout MAE 30-40% (see CLAUDE.md Data Quality Notes) and the
+# promotion guard correctly refused to replace production models with the
+# regressed version — so the actual "production"-tagged S3 models are still
+# the pre-weather 6-feature versions. This reverts the feature set to match
+# what's actually deployed. _impute_weather/add_engineered_features below
+# still compute imputed track_temp/air_temp columns (weather infrastructure
+# stays wired per CLAUDE.md), they're just no longer selected into the
+# feature matrix. Re-add both columns above once a weather-aware retrain
+# improves holdout MAE and gets promoted.
 
 # Fallback used only if a (compound, circuit) group has zero non-null weather
 # readings — i.e. add_engineered_features's own group-mean imputation has
@@ -187,22 +198,18 @@ def predict_life_remaining_batch(
     fuel_adjusted_time: npt.NDArray[np.float64],
     circuit_id_encoded: npt.NDArray[np.int64],
     driver_id_encoded: npt.NDArray[np.int64],
-    track_temp: npt.NDArray[np.float64],
-    air_temp: npt.NDArray[np.float64],
 ) -> npt.NDArray[np.int64]:
     """Estimate laps remaining before predicted degradation crosses the threshold.
 
     For each input lap, simulates tyre_age_laps + 0..MAX_LOOKAHEAD_LAPS-1 (lap_number
     advancing in step) in a single batched predict() call, holding fuel_adjusted_time
-    and track_temp/air_temp fixed at their current-lap values — pace beyond the next
-    few laps is dominated by tyre wear, not the small residual fuel effect or short-term
-    weather drift.
+    fixed at its current-lap value — pace beyond the next few laps is dominated by
+    tyre wear, not the small residual fuel effect.
 
     Args:
         pipeline: Fitted tire degradation pipeline for the relevant compound.
         lap_number, compound_encoded, tyre_age_laps, fuel_adjusted_time,
-            circuit_id_encoded, driver_id_encoded, track_temp, air_temp: 1D arrays,
-            one entry per lap.
+            circuit_id_encoded, driver_id_encoded: 1D arrays, one entry per lap.
     Returns:
         1D int array, same length as inputs: estimated laps remaining until predicted
         lap_time_delta >= DEGRADATION_THRESHOLD_SECONDS, capped at MAX_LOOKAHEAD_LAPS.
@@ -221,8 +228,6 @@ def predict_life_remaining_batch(
             np.repeat(fuel_adjusted_time, MAX_LOOKAHEAD_LAPS),
             np.repeat(circuit_id_encoded, MAX_LOOKAHEAD_LAPS),
             np.repeat(driver_id_encoded, MAX_LOOKAHEAD_LAPS),
-            np.repeat(track_temp, MAX_LOOKAHEAD_LAPS),
-            np.repeat(air_temp, MAX_LOOKAHEAD_LAPS),
         ],
         axis=1,
     ).astype(float)

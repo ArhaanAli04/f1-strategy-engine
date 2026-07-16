@@ -19,7 +19,15 @@ def _get_pool() -> aioredis.ConnectionPool:  # type: ignore[type-arg]
         _pool = aioredis.ConnectionPool.from_url(
             settings.redis_url,
             decode_responses=True,
-            max_connections=50,
+            # A pub/sub subscription (see /ws/telemetry/{session_id}) pins a
+            # dedicated connection from this pool for the entire WS
+            # connection's lifetime, unlike a plain command which borrows and
+            # returns one immediately. At the old default of 50 this capped
+            # concurrent WS viewers per pod at ~50 regardless of API/worker
+            # scaling — confirmed via tests/load/ws_load_test.py. 250 covers
+            # the 200-connection load test with headroom for the REST routes'
+            # per-request borrow/return traffic on top.
+            max_connections=250,
         )
     return _pool
 

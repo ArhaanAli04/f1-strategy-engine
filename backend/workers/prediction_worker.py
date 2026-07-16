@@ -91,7 +91,12 @@ def _download_from_s3(filename: str) -> Path:
         return path
 
     settings = get_aws_settings()
-    client = boto3.client("s3", region_name=settings.aws_region)
+    client = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
     key = f"{_MODEL_VERSION_TAG}/{filename}"
     client.download_file(settings.aws_bucket_name, key, str(path))
     return path
@@ -318,17 +323,19 @@ def _run_inference(
 ) -> dict[str, Any]:
     """Run the strategy models for one driver/lap context.
 
-    Both tire_deg and pit_predictor now use their full FEATURE_COLUMNS vectors
-    (see CLAUDE.md's Deferred Wiring notes for the mismatches this replaces:
-    tire_deg was already fixed to 8 columns before this pass; pit_predictor
-    was still on a 2-value placeholder and is fixed here to its real 8-column
-    schema, using the position/gap context _resolve_inference_context now
-    resolves plus predicted_life_remaining/safety_car_probability computed
-    below from the already-loaded tire_deg/safety_car models — the same
-    approach train_models.py uses to build these two features at training
-    time). undercut_score/overcut_score are NOT set here — they need awaited
-    calls into strategy_service and are filled in by the caller,
-    _persist_and_publish, after this function returns.
+    pit_predictor uses its full 8-column FEATURE_COLUMNS vector, using the
+    position/gap context _resolve_inference_context resolves plus
+    predicted_life_remaining/safety_car_probability computed below from the
+    already-loaded tire_deg/safety_car models — the same approach
+    train_models.py uses to build these two features at training time.
+    tire_deg uses its 6-column FEATURE_COLUMNS vector as of 2026-07-16 (see
+    tire_deg_model.py's module docstring: track_temp/air_temp were reverted
+    out after regressing holdout MAE, pending a weather-aware retrain+
+    promotion) — resolved["track_temp"]/["air_temp"] are still resolved by
+    _resolve_inference_context but intentionally unused here. undercut_score/
+    overcut_score are NOT set here — they need awaited calls into
+    strategy_service and are filled in by the caller, _persist_and_publish,
+    after this function returns.
 
     Args:
         models: Loaded model registry, keyed by filename.
@@ -367,8 +374,6 @@ def _run_inference(
             fuel_adjusted_time,
             circuit_code,
             driver_code,
-            resolved["track_temp"],
-            resolved["air_temp"],
         ]
     ]
 
@@ -384,8 +389,6 @@ def _run_inference(
                 np.array([fuel_adjusted_time]),
                 np.array([circuit_code]),
                 np.array([driver_code]),
-                np.array([resolved["track_temp"]]),
-                np.array([resolved["air_temp"]]),
             )[0]
         )
     else:

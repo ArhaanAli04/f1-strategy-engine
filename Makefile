@@ -1,4 +1,4 @@
-.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest ingest-season backfill-tire-data ingest-live
+.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits ingest ingest-season backfill-tire-data ingest-live warm-cache
 
 install:
 	pip install -e ".[dev]"
@@ -57,3 +57,6 @@ backfill-tire-data:
 
 ingest-live:
 	python backend/scripts/ingest_live_session.py --season $(SEASON) $(if $(ROUND),--round $(ROUND) --session-type $(SESSION_TYPE),--poll)
+
+warm-cache:
+	python backend/scripts/warm_strategy_cache.py --session-id $(SESSION_ID)
