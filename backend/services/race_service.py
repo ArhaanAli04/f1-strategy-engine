@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import redis.asyncio as aioredis
+from redis.exceptions import LockNotOwnedError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -37,7 +38,7 @@ from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.schemas.common import PaginatedResponse
 from backend.schemas.race_schema import RaceListResponse, RaceResponse, SessionResponse
-from backend.services.cache_service import cache_get, cache_set, cacheable
+from backend.services.cache_service import cache_get, cache_lock, cache_set, cacheable
 
 DEFAULT_PAGE_SIZE = 20
 
@@ -272,6 +273,61 @@ async def _fetch_current_race(
 _NOT_FOUND_SENTINEL_FIELD = "_not_found"
 
 
+async def _read_current_race_cache(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    key: str,
+) -> RaceResponse | None:
+    """Read and interpret a cached get_current_race outcome, if present.
+
+    Args:
+        client: Redis client.
+        key: Cache key from _key_current_race.
+    Returns:
+        The cached race, or None on a cache miss.
+    Raises:
+        NotFoundError: If the cached outcome is the "no current race" sentinel.
+    """
+    cached = await cache_get(client, key)
+    if cached is None:
+        return None
+    if cached.get(_NOT_FOUND_SENTINEL_FIELD):
+        raise NotFoundError(cached["reason"])
+    return RaceResponse.model_validate(cached)
+
+
+async def _fetch_and_cache_current_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    key: str,
+) -> RaceResponse:
+    """Call Ergast, cache the outcome under whichever TTL bucket applies, and return/raise.
+
+    Args:
+        client: Redis client.
+        db: Async DB session.
+        key: Cache key from _key_current_race.
+    Returns:
+        The current race.
+    Raises:
+        NotFoundError: If Ergast has no schedule for the current season, or the
+            resolved season/round hasn't been ingested — cached at the shorter
+            "not found" TTL.
+    """
+    try:
+        data = await _fetch_current_race(client, db)
+    except NotFoundError as exc:
+        await cache_set(
+            client,
+            key,
+            {_NOT_FOUND_SENTINEL_FIELD: True, "reason": str(exc)},
+            CURRENT_RACE_NOT_FOUND_TTL_SECONDS,
+        )
+        raise
+
+    await cache_set(client, key, data, CURRENT_RACE_TTL_SECONDS)
+    return RaceResponse.model_validate(data)
+
+
 async def get_current_race(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -291,6 +347,17 @@ async def get_current_race(
     only the first request (or first few racing concurrently) pays that cost
     per CURRENT_RACE_NOT_FOUND_TTL_SECONDS window.
 
+    Single-flight (pre-Day-14 fix): the Day 13 re-run still showed no
+    improvement (p50 still 13s) because locustfile.py's RaceDayViewerUser
+    calls this exactly once, in on_start(), and Locust ramps all simulated
+    users up within ~10s — every one of them hits the cold cache key in that
+    same burst, before any single one finishes its own ~13s Ergast call and
+    populates the cache for the others. Same stampede shape cache_service.
+    cacheable() already guards against, just on this hand-rolled path. Uses
+    cache_service.cache_lock (same tuning as cacheable) rather than
+    re-wrapping in @cacheable, since the two-TTL split still needs to stay
+    hand-rolled.
+
     Args:
         client: Redis client (cache-aside).
         db: Async DB session.
@@ -302,22 +369,33 @@ async def get_current_race(
             the resolved season/round hasn't been ingested into our races table.
     """
     key = _key_current_race(client, db)
-    cached = await cache_get(client, key)
+    cached = await _read_current_race_cache(client, key)
     if cached is not None:
-        if cached.get(_NOT_FOUND_SENTINEL_FIELD):
-            raise NotFoundError(cached["reason"])
-        return RaceResponse.model_validate(cached)
+        return cached
+
+    lock = cache_lock(client, key)
+    acquired = await lock.acquire()
+    if not acquired:
+        # Didn't win the lock within blocking_timeout — the holder is
+        # unusually slow or died without releasing. Fall back to computing
+        # independently rather than blocking the request indefinitely;
+        # re-check the cache first in case it was populated in the interim.
+        cached = await _read_current_race_cache(client, key)
+        if cached is not None:
+            return cached
+        return await _fetch_and_cache_current_race(client, db, key)
 
     try:
-        data = await _fetch_current_race(client, db)
-    except NotFoundError as exc:
-        await cache_set(
-            client,
-            key,
-            {_NOT_FOUND_SENTINEL_FIELD: True, "reason": str(exc)},
-            CURRENT_RACE_NOT_FOUND_TTL_SECONDS,
-        )
-        raise
-
-    await cache_set(client, key, data, CURRENT_RACE_TTL_SECONDS)
-    return RaceResponse.model_validate(data)
+        # Re-check: another caller may have populated the cache between our
+        # first miss and winning the lock.
+        cached = await _read_current_race_cache(client, key)
+        if cached is not None:
+            return cached
+        return await _fetch_and_cache_current_race(client, db, key)
+    finally:
+        try:
+            await lock.release()
+        except LockNotOwnedError:
+            # Our own timeout already expired and another caller took over
+            # ownership — nothing left for us to release.
+            pass

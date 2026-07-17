@@ -343,4 +343,9 @@ class WebSocketUser(User):
         )
 
     def on_stop(self) -> None:
-        self._ws.close()
+        # on_start's ws_connect() can raise (e.g. handshake timeout) before
+        # ever assigning self._ws — Locust still calls on_stop for a user
+        # whose on_start failed, so this must not assume the connection
+        # exists.
+        if hasattr(self, "_ws"):
+            self._ws.close()

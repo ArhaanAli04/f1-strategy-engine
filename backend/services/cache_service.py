@@ -21,6 +21,7 @@ from typing import Any, TypeVar
 
 import redis.asyncio as aioredis
 from prometheus_client import Counter
+from redis.asyncio.lock import Lock
 from redis.exceptions import LockNotOwnedError
 
 from backend.core.redis_client import redis_get, redis_set
@@ -159,6 +160,27 @@ async def cache_invalidate_driver(
     return fingerprint_deleted + strategy_deleted
 
 
+def cache_lock(client: aioredis.Redis, key: str) -> Lock:  # type: ignore[type-arg]
+    """Build a single-flight Redis lock for a cache key, tuned per cacheable()'s comment.
+
+    Exposed so hand-rolled cache-aside paths that can't use the @cacheable decorator
+    directly (e.g. race_service.get_current_race's two-TTL success/not-found split)
+    still get the same single-flight protection and timeout tuning, from one place.
+
+    Args:
+        client: Redis client.
+        key: The cache key being guarded (the lock itself is keyed off this plus
+            _LOCK_SUFFIX, not this key directly).
+    Returns:
+        An unacquired redis-py Lock. Caller is responsible for acquire()/release().
+    """
+    return client.lock(
+        f"{key}{_LOCK_SUFFIX}",
+        timeout=_LOCK_TIMEOUT_SECONDS,
+        blocking_timeout=_LOCK_BLOCKING_TIMEOUT_SECONDS,
+    )
+
+
 def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
     """Cache-aside decorator for async service methods, with single-flight locking.
 
@@ -196,11 +218,7 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
             if cached is not None:
                 return cached
 
-            lock = client.lock(
-                f"{key}{_LOCK_SUFFIX}",
-                timeout=_LOCK_TIMEOUT_SECONDS,
-                blocking_timeout=_LOCK_BLOCKING_TIMEOUT_SECONDS,
-            )
+            lock = cache_lock(client, key)
             acquired = await lock.acquire()
             if not acquired:
                 # Didn't win the lock within blocking_timeout — the holder is
