@@ -6,8 +6,13 @@ classifier, and the safety car Poisson model. Each is evaluated against the
 holdout MAE improves on the current production model's holdout MAE (first
 run always promotes, since there is no existing production model to beat).
 
-track_temp/air_temp were dropped from tire_deg_model's feature set — not yet
-ingested, see CLAUDE.md Deferred Schema Changes.
+track_temp/air_temp are fetched here (and still stored via
+tire_deg_model.add_engineered_features) but are not part of
+tire_deg_model.FEATURE_COLUMNS as of 2026-07-16 — a weather-aware retrain
+regressed holdout MAE 30-40% and the promotion guard correctly refused to
+replace production models, so training here intentionally matches the
+6-feature schema actually deployed. See tire_deg_model.py's module
+docstring and CLAUDE.md's Data Quality Notes.
 
 If a tire_deg compound has no holdout-season data (e.g. a dry 2025 means zero
 WET laps), promotion falls back to comparing cv_mae instead of a true holdout
@@ -84,6 +89,8 @@ async def _fetch_laps() -> pd.DataFrame:
             LapData.tyre_age_laps,
             LapData.position,
             LapData.track_status,
+            LapData.track_temp,
+            LapData.air_temp,
             LapData.is_valid,
             Race.season,
             Circuit.name.label("circuit_name"),
@@ -111,6 +118,8 @@ async def _fetch_laps() -> pd.DataFrame:
             "tyre_age_laps",
             "position",
             "track_status",
+            "track_temp",
+            "air_temp",
             "is_valid",
             "season",
             "circuit_name",

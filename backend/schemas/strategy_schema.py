@@ -21,17 +21,40 @@ class StrategyPredictionResponse(BaseModel):
     created_at: datetime
 
 
+class FeatureContributionResponse(BaseModel):
+    """One SHAP feature contribution — see services/ml/explainability.py."""
+
+    feature_name: str
+    value: float
+    contribution: float
+    direction: str
+
+
 class PitWindowResponse(BaseModel):
     pit_lap: int
     window_start: int
     window_end: int
-    confidence_pct: float
+    projected_total_delta_seconds: float
+    shap_explanation: list[FeatureContributionResponse] | None = None
 
 
 class UndercutThreatResponse(BaseModel):
-    driver_ahead: uuid.UUID
-    threat_score: float
+    target_driver_id: uuid.UUID
+    probability_pit_now_gains_position: float
+    projected_gap_seconds: float
+    n_laps_projected: int
     recommended_action: str
+
+
+class CompetitorStrategyEntry(BaseModel):
+    driver_id: uuid.UUID
+    predicted_pit_lap: int
+    pit_probability: float
+
+
+class StrategyOverviewResponse(BaseModel):
+    session_id: uuid.UUID
+    drivers: list[CompetitorStrategyEntry]
 
 
 class StrategyComparisonEntry(BaseModel):

@@ -212,3 +212,7 @@ __marimo__/
 
 # FastF1 local cache
 fastf1_cache/
+
+# Load test auth token cache (backend/tests/load/locustfile.py) — live
+# access/refresh tokens for locally-provisioned test users, never commit.
+backend/tests/load/.token_cache.json

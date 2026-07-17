@@ -42,3 +42,22 @@ class DriverListResponse(BaseModel):
     full_name: str
     nationality: str
     date_of_birth: date | None
+
+
+class DriverAnalysisResponse(BaseModel):
+    """Driver-style fingerprint (see services/ml/driver_style.py) plus
+    session-relative performance. Not ORM-backed — assembled from a cached
+    population-level cluster fit and a live lap-time aggregate query.
+    """
+
+    driver_id: uuid.UUID
+    season: int
+    archetype: str
+    cluster: int
+    sector_time_variance: float
+    tyre_management_index: float
+    lap_time_consistency: float
+    stint_length_tendency: float
+    umap_x: float
+    umap_y: float
+    performance_vs_team_avg_seconds: float | None

@@ -60,6 +60,10 @@ _TOPICS = ["TimingData", "CarData.z", "SessionInfo", "TrackStatus", "WeatherData
 _MAX_BACKOFF_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 15.0
 
+# Weather changes slowly (over minutes, not seconds) relative to CarData/TimingData's
+# 8s TTL, so a longer TTL here is appropriate — see CLAUDE.md Redis Cache Key Schema.
+_WEATHER_KEY_TTL_SECONDS = 60
+
 
 def _decode_z(payload: str) -> dict[str, Any]:
     """Decode a gzip-over-base64 '.z' channel payload from the live timing feed."""
@@ -77,6 +81,15 @@ def _parse_lap_time(value: str | None) -> float | None:
             return int(parts[0]) * 60 + float(parts[1])
         return float(parts[0])
     except ValueError:
+        return None
+
+
+def _parse_temp(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -145,6 +158,8 @@ class F1SignalRIngestor:
                 self._handle_car_data(data)
             elif topic == "TimingData":
                 self._handle_timing_data(data)
+            elif topic == "WeatherData":
+                self._handle_weather_data(data)
             else:
                 logger.debug("Received %s message", topic)
         except Exception:
@@ -155,6 +170,20 @@ class F1SignalRIngestor:
         for car_number, entry in decoded.get("Cars", {}).items():
             key = f"f1:{self._season}:{self._round_number}:car:{car_number}:latest"
             self._redis.setex(key, 8, json.dumps(entry))
+
+    def _handle_weather_data(self, payload: dict[str, Any]) -> None:
+        track_temp = _parse_temp(payload.get("TrackTemp"))
+        air_temp = _parse_temp(payload.get("AirTemp"))
+        if track_temp is None or air_temp is None:
+            logger.debug("Incomplete WeatherData message, skipping: %s", payload)
+            return
+
+        key = f"f1:{self._season}:{self._round_number}:weather:latest"
+        self._redis.setex(
+            key,
+            _WEATHER_KEY_TTL_SECONDS,
+            json.dumps({"track_temp": track_temp, "air_temp": air_temp}),
+        )
 
     def _handle_timing_data(self, payload: dict[str, Any]) -> None:
         for car_number, entry in payload.get("Lines", {}).items():
@@ -299,6 +328,19 @@ def run_live_ingestor(
     redis_client: redis.Redis = redis.Redis.from_url(  # type: ignore[type-arg]
         get_redis_settings().redis_url, decode_responses=True
     )
+
+    # telemetry_service.get_live_lap needs the reverse of this map (driver_id ->
+    # car_number) to resolve the f1:{season}:{round}:car:{car_number}:latest key
+    # from an API-facing driver_id — persist it here since car_number_to_driver_id
+    # itself only lives in this process's memory. TTL matches max_duration: the
+    # mapping is only valid for as long as this ingestor session runs.
+    car_number_ttl = int(max_duration.total_seconds())
+    for car_number, mapped_driver_id in car_number_to_driver_id.items():
+        redis_client.setex(
+            f"f1:{season}:{round_number}:driver:{mapped_driver_id}:car_number",
+            car_number_ttl,
+            car_number,
+        )
 
     ingestor = F1SignalRIngestor(
         season=season,

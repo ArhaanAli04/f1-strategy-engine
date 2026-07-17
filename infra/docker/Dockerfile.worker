@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir ".[dev]"
 # ---- final: lean runtime image ----
 FROM python:3.11-slim AS final
 
+# libgomp1: OpenMP runtime lightgbm dlopen()s at import time
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system f1 && useradd --system --gid f1 --create-home f1
 
 WORKDIR /app
@@ -29,5 +33,11 @@ COPY backend/ ./backend/
 
 USER f1
 
+# --pool=solo: no forked child processes, so the single in-process Prometheus
+# registry (metrics server started in celery_app.py) stays consistent — see
+# CLAUDE.md's Day 12 note on why prefork's forked children would otherwise
+# each get an isolated, broken copy of the metrics registry. Concurrency is
+# achieved by running multiple worker pods/containers, not intra-process
+# forking (matches CLAUDE.md's stated race-day scaling model).
 CMD ["celery", "-A", "backend.workers.celery_app", "worker", "--loglevel=info", \
-     "-Q", "telemetry_queue,prediction_queue,alert_queue"]
+     "--pool=solo", "-Q", "telemetry_queue,prediction_queue,alert_queue"]

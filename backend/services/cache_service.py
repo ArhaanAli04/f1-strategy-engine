@@ -21,11 +21,32 @@ from typing import Any, TypeVar
 
 import redis.asyncio as aioredis
 from prometheus_client import Counter
+from redis.asyncio.lock import Lock
+from redis.exceptions import LockNotOwnedError
 
 from backend.core.redis_client import redis_get, redis_set
 
 _CACHE_HITS = Counter("f1_cache_hits_total", "Cache hits", ["key_pattern"])
 _CACHE_MISSES = Counter("f1_cache_misses_total", "Cache misses", ["key_pattern"])
+
+# Single-flight lock tuning for cacheable() below. Auto-expiry (timeout) is a
+# safety net if a holder dies mid-computation without releasing. blocking_timeout
+# bounds how long a waiter blocks before giving up and computing independently,
+# rather than stalling the request indefinitely if the holder is unusually slow.
+#
+# Both need real margin above the slowest known cacheable body's *uncontended*
+# runtime, not just a round number: get_competitor_predicted_strategy (backs
+# /strategy/{session_id}/overview) measured at ~16s for a single cold miss with
+# zero contention (nested per-driver ML inference loop — see CLAUDE.md's
+# deferred items). An earlier 20s/20s pairing here was barely above that 16s
+# floor, so under a concurrent-miss burst every waiter's blocking_timeout
+# elapsed at essentially the same moment the winner finished, and they fell
+# through to recomputing independently anyway — measured directly: 15
+# concurrent requests against a cold key all took ~20s each, i.e. the lock
+# provided no benefit at all. 40s gives real headroom above the 16s floor.
+_LOCK_SUFFIX = ":lock"
+_LOCK_TIMEOUT_SECONDS = 40.0
+_LOCK_BLOCKING_TIMEOUT_SECONDS = 40.0
 
 # Matches a UUID (or any long hex/hyphen id) or a plain integer key segment.
 _ID_SEGMENT = re.compile(r"^[0-9a-fA-F-]{8,}$|^\d+$")
@@ -139,15 +160,49 @@ async def cache_invalidate_driver(
     return fingerprint_deleted + strategy_deleted
 
 
-def cacheable(ttl: int, key_fn: Callable[..., str]) -> Callable[[F], F]:
-    """Cache-aside decorator for async service methods.
+def cache_lock(client: aioredis.Redis, key: str) -> Lock:  # type: ignore[type-arg]
+    """Build a single-flight Redis lock for a cache key, tuned per cacheable()'s comment.
+
+    Exposed so hand-rolled cache-aside paths that can't use the @cacheable decorator
+    directly (e.g. race_service.get_current_race's two-TTL success/not-found split)
+    still get the same single-flight protection and timeout tuning, from one place.
+
+    Args:
+        client: Redis client.
+        key: The cache key being guarded (the lock itself is keyed off this plus
+            _LOCK_SUFFIX, not this key directly).
+    Returns:
+        An unacquired redis-py Lock. Caller is responsible for acquire()/release().
+    """
+    return client.lock(
+        f"{key}{_LOCK_SUFFIX}",
+        timeout=_LOCK_TIMEOUT_SECONDS,
+        blocking_timeout=_LOCK_BLOCKING_TIMEOUT_SECONDS,
+    )
+
+
+def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
+    """Cache-aside decorator for async service methods, with single-flight locking.
 
     Convention: the decorated function's first positional argument must be the Redis
     client — the same dependency-injection convention used everywhere else in this
     codebase (see core/redis_client.py's get_redis()).
 
+    Single-flight: on a miss, concurrent callers race for a short-lived Redis
+    lock keyed off the cache key rather than all independently recomputing.
+    The winner computes and populates the cache; everyone else blocks on the
+    lock (redis-py's blocking acquire — not busy-polling this function) and,
+    once it's released, re-reads the now-populated cache. Without this, N
+    concurrent misses on the same key each pay the full compute cost — this
+    was confirmed as a cache-stampede on /strategy/{session_id}/overview
+    during Day 13 load testing (30s TTL, ~100 concurrent viewers: p50 55ms
+    alongside a p95/p99 of 15-19s from clustered recomputation at every TTL
+    rollover, each one re-running the full per-driver ML inference loop).
+
     Args:
-        ttl: Seconds before the cached entry expires.
+        ttl: Seconds before the cached entry expires, or None for no expiry (a plain
+            Redis SET with no EX, per redis_set — a persistent key, not EXPIRE 0).
+            Used for static data that only changes via manual cache invalidation.
         key_fn: Builds the cache key from the decorated function's arguments (called
             with the same *args, **kwargs the function itself receives).
     Returns:
@@ -162,9 +217,34 @@ def cacheable(ttl: int, key_fn: Callable[..., str]) -> Callable[[F], F]:
             cached = await cache_get(client, key)
             if cached is not None:
                 return cached
-            result = await func(*args, **kwargs)
-            await cache_set(client, key, result, ttl)
-            return result
+
+            lock = cache_lock(client, key)
+            acquired = await lock.acquire()
+            if not acquired:
+                # Didn't win the lock within blocking_timeout — the holder is
+                # unusually slow or died without releasing. Fall back to
+                # computing independently rather than blocking the request
+                # indefinitely; re-check the cache first in case it was
+                # populated in the interim.
+                cached = await cache_get(client, key)
+                return cached if cached is not None else await func(*args, **kwargs)
+
+            try:
+                # Re-check: another caller may have populated the cache
+                # between our first miss and winning the lock.
+                cached = await cache_get(client, key)
+                if cached is not None:
+                    return cached
+                result = await func(*args, **kwargs)
+                await cache_set(client, key, result, ttl)
+                return result
+            finally:
+                try:
+                    await lock.release()
+                except LockNotOwnedError:
+                    # Our own timeout already expired and another caller
+                    # took over ownership — nothing left for us to release.
+                    pass
 
         return wrapper  # type: ignore[return-value]
 

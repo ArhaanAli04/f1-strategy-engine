@@ -34,6 +34,18 @@ class TokenResponse(BaseModel):
     expires_at: datetime
 
 
+class LoginResponse(TokenResponse):
+    refresh_token: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
+class FCMTokenUpdate(BaseModel):
+    fcm_token: str
+
+
 class SubscriptionCreate(BaseModel):
     driver_ids: list[uuid.UUID]
     team_ids: list[uuid.UUID]
@@ -56,6 +68,9 @@ __all__ = [
     "UserResponse",
     "UserLogin",
     "TokenResponse",
+    "LoginResponse",
+    "RefreshTokenRequest",
+    "FCMTokenUpdate",
     "SubscriptionCreate",
     "SubscriptionResponse",
 ]

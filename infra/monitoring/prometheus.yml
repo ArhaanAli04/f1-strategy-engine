@@ -1,0 +1,52 @@
+# Prometheus scrape configuration — Day 12 monitoring stack.
+#
+# f1-backend's basic_auth credentials mirror AppSettings.metrics_user /
+# metrics_password's local-dev defaults (backend/core/config.py) — keep both
+# in sync. Production credentials move to GitHub Secrets / a mounted file on
+# Day 19 (see CLAUDE.md's External Services & Credentials Checklist), at
+# which point this should switch to basic_auth.password_file.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # FastAPI backend — Instrumentator's default metrics (http_requests_total,
+  # http_request_duration_seconds) plus backend/core/metrics.py's custom
+  # f1_* metrics, all served from the same /metrics route (see main.py).
+  - job_name: f1-backend
+    scrape_interval: 10s
+    metrics_path: /metrics
+    basic_auth:
+      username: metrics
+      password: metrics-dev
+    static_configs:
+      - targets: ["backend:8000"]
+
+  # Celery worker — hand-rolled metrics server started in
+  # workers/celery_app.py's worker_init signal (see CLAUDE.md's Day 12 note
+  # on why the worker runs with --pool=solo instead of a separate
+  # celery-exporter container).
+  - job_name: f1-worker
+    scrape_interval: 10s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9090"]
+
+  - job_name: postgres-exporter
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis-exporter
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["redis-exporter:9121"]

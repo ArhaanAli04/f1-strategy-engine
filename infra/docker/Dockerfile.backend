@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir ".[dev]"
 # ---- final: lean runtime image ----
 FROM python:3.11-slim AS final
 
+# libgomp1: OpenMP runtime lightgbm dlopen()s at import time
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system f1 && useradd --system --gid f1 --create-home f1
 
 WORKDIR /app
