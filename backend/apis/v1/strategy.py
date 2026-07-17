@@ -14,6 +14,7 @@ default, and why each handler below needs a `request: Request` parameter.
 
 import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated
 
 import redis.asyncio as aioredis
@@ -40,6 +41,18 @@ from backend.workers.celery_app import app as celery_app
 from backend.workers.prediction_worker import run_race_simulation
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
+
+# Dedicated executor for the .delay() hop below, instead of asyncio's shared
+# default ThreadPoolExecutor (run_in_executor(None, ...)) — the default pool
+# is capped at min(32, cpu_count+4), which measured at 20 threads on this
+# container and was the actual bottleneck behind /simulate's ~12-14s enqueue
+# latency at 100 concurrent users (see CLAUDE.md's Deferred Wiring: raising
+# Celery's broker_pool_limit 10->50 did not fix it). Sized to match that same
+# broker_pool_limit=50 (workers/celery_app.py) — more threads than available
+# broker connections would just queue on the connection instead of the thread.
+_SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=50, thread_name_prefix="simulate-enqueue"
+)
 
 
 # Registered ahead of the /{session_id}/... routes below: session_id is
@@ -69,9 +82,12 @@ async def simulate_strategy(
     # .delay() is a quick synchronous Redis broker call, not the simulation
     # itself (that runs in a separate Celery worker process) — but it's still
     # blocking I/O, so it's offloaded to a thread rather than run directly on
-    # the event loop.
+    # the event loop. Uses a dedicated executor, not the shared asyncio
+    # default — see _SIMULATE_ENQUEUE_EXECUTOR above.
     loop = asyncio.get_running_loop()
-    task = await loop.run_in_executor(None, run_race_simulation.delay, task_payload)
+    task = await loop.run_in_executor(
+        _SIMULATE_ENQUEUE_EXECUTOR, run_race_simulation.delay, task_payload
+    )
     return SimulateTaskAccepted(task_id=task.id, status=task.status)
 
 

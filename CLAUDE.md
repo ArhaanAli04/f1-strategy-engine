@@ -553,6 +553,30 @@ Add alongside a future ingestion improvement pass.
     number will need revisiting once the fan-out fix above lands and
     replaces N pubsub connections with 1 per session.
 
+  **Corroborating evidence, pre-Day-14 fix pass (2026-07-18):** a combined
+  Locust run (`-u 100 -r 10 --run-time 2m`, `RaceDayViewerUser` +
+  `StrategyUser` + `WebSocketUser` together, `replay_publisher.py --rate 5`
+  feeding real WS traffic) — run to verify the `/races/current` single-flight
+  lock and the `/strategy/simulate` dedicated-executor fix below — showed
+  `POST /strategy/{session_id}/simulate`'s enqueue latency regress back to
+  ~12s p50, even though both of those fixes were independently confirmed
+  working in isolated (WS-free) runs on the same day (p50 630-2400ms).
+  `redis-cli slowlog get` during the combined run showed the rate limiter's
+  own `EVALSHA` check — normally sub-millisecond — taking 12-16ms, consistent
+  with Redis's single-threaded command queue backing up under load rather
+  than any one code path being newly slow. Given `redis-1` is the same
+  instance serving cache reads/writes, the Celery broker, rate-limit checks,
+  and every WS pub/sub subscription, this fan-out's Nx-per-event redundant
+  `get_live_car_channels` GETs (up to ~33 concurrent `WebSocketUser`s at
+  5 events/sec in this run) is the most likely source of the extra command
+  volume dragging down unrelated Redis-adjacent paths — not a new bottleneck,
+  the same one already scoped above, now visible because this was the first
+  load test to run WS + overview + simulate + races/current simultaneously
+  (Day 13's baseline and this session's earlier re-tests each isolated a
+  subset). Supports doing this fix before Day 22 as planned, rather than
+  deferring further — its blast radius already reaches beyond `/ws/telemetry`
+  itself once real WS traffic is in the mix.
+
 - **Cache stampede in `cache_service.cacheable` — fixed 2026-07-16.**
   The cache-aside decorator had no single-flight protection: on a miss, every
   concurrent caller independently re-ran the full decorated function instead
