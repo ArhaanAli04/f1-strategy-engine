@@ -472,6 +472,12 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- prometheus.yml Basic Auth credentials are hardcoded as dev defaults 
+(metrics/metrics-dev). Fix on Day 19 when setting up GitHub Secrets — 
+use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD} 
+into prometheus.yml at container startup, same pattern as alertmanager.yml's 
+Slack webhook handling.
+
 - **DRS decoding approximation:** _decode_car_channels in 
   telemetry_service.py treats any nonzero DRS channel value as boolean 
   "open." Real F1 channel is multi-value status code 
