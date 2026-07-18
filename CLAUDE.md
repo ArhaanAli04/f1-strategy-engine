@@ -478,12 +478,6 @@ use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD}
 into prometheus.yml at container startup, same pattern as alertmanager.yml's 
 Slack webhook handling.
 
-- **run_race_simulation Celery serialization unverified:** confidence_interval 
-  is a Python tuple that becomes a JSON array through Celery's result backend. 
-  Pydantic should coerce back correctly but this path hasn't been tested with 
-  real ML models. Day 13 integration testing never verified this path —
-  verify on Day 14 as part of the integration test suite.
-
 
 
 - **WebSocket JWT in query param (?token=):** access token appears in 
@@ -703,6 +697,22 @@ strings: {0: "off", 8: "available", 10: "enabled", 14: "open"},
 fallback "unknown" for unrecognized codes. LapCompletedEvent.drs 
 changed from bool | None to Literal["off","available","enabled",
 "open","unknown"] | None.
+
+**run_race_simulation Celery serialization (✅ verified pre-Day-14C):**
+confidence_interval's Python tuple was suspected to become a JSON array
+through Celery's result backend (task_serializer/result_serializer="json",
+workers/celery_app.py) with the Pydantic v2 round-trip coercion back to
+tuple untested against a real ML pipeline. Verified via
+tests/integration/test_race_simulation_serialization.py: runs the real
+run_race_simulation task body (stubbed ML models, real race_simulator.py
+Monte Carlo loop) to get a genuine confidence_interval tuple, round-trips it
+through a real celery.backends.redis.RedisBackend (store_result/
+get_task_meta, not eager mode, which would skip serialization entirely),
+confirms the tuple becomes a JSON list on the wire as expected, then
+confirms SimulateStrategyResponse.model_validate(...) — the same call
+apis/v1/strategy.py's get_simulation_result makes — coerces it back to a
+tuple with the original values intact. No schema change was needed;
+Pydantic v2's tuple validator accepts any sequence.
 
 **prediction_worker.py pit_predictor feature array + undercut/overcut wiring (✅ completed, pre-Day-13 fix pass):**
 - tire_deg feature vector was confirmed already fixed (8 columns, done prior to
