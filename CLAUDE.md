@@ -478,23 +478,13 @@ use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD}
 into prometheus.yml at container startup, same pattern as alertmanager.yml's 
 Slack webhook handling.
 
-- **DRS decoding approximation:** _decode_car_channels in 
-  telemetry_service.py treats any nonzero DRS channel value as boolean 
-  "open." Real F1 channel is multi-value status code 
-  (0=off, 8=available, 10=enabled, 14=open+detection). Acceptable for 
-  display purposes but should be refined before production.
-
 - **run_race_simulation Celery serialization unverified:** confidence_interval 
   is a Python tuple that becomes a JSON array through Celery's result backend. 
   Pydantic should coerce back correctly but this path hasn't been tested with 
-  real ML models. Verify on Day 13 integration testing.
+  real ML models. Day 13 integration testing never verified this path —
+  verify on Day 14 as part of the integration test suite.
 
-- **WeatherData live stream:** now wired (was previously subscribed but discarded).
-  ingest_live_session.py parses AirTemp/TrackTemp from the WeatherData topic and
-  writes them to f1:{season}:{round}:weather:latest (see Redis Cache Key Schema).
-  Weather features are active in both training (train_models.py / tire_deg_model.py)
-  and live inference (strategy_service.py's _resolve_weather, with a circuit+compound
-  DB-average fallback when the live key is absent).
+
 
 - **WebSocket JWT in query param (?token=):** access token appears in 
   server logs and browser history. Acceptable for now. Production fix: 
@@ -583,91 +573,49 @@ Add alongside a future ingestion improvement pass.
   deferring further — its blast radius already reaches beyond `/ws/telemetry`
   itself once real WS traffic is in the mix.
 
-- **Cache stampede in `cache_service.cacheable` — fixed 2026-07-16.**
-  The cache-aside decorator had no single-flight protection: on a miss, every
-  concurrent caller independently re-ran the full decorated function instead
-  of one computing and the rest reusing the result. Confirmed via Day 13
-  baseline load test (`-u 100 -r 10 --run-time 2m`) on `/strategy/{session_id}/overview`:
-  30s TTL, ~100 concurrent viewers, p50=55ms (clean hits) alongside
-  p95=15000ms/p99=17000ms/max=19000ms and 2 `RemoteDisconnected` failures
-  (clustered recomputation at each TTL rollover). Fixed by adding a Redis-lock
-  single-flight (`client.lock(f"{key}:lock", ...)`) around the miss path —
-  losers block on the lock (not busy-polling) and re-read cache once it
-  releases, rather than recomputing. Verified directly: 5 concurrent requests
-  against a cold key now produce exactly one Redis write (checked via
-  `TTL`/`EXISTS` immediately after) instead of 5 redundant computations, and
-  the 2 `RemoteDisconnected` failures are gone in the post-fix re-run (0/478).
-  **Lock timeout tuning note:** the first attempt used `timeout=20.0,
-  blocking_timeout=20.0`, which is barely above `get_competitor_predicted_strategy`'s
-  own **~16-17s uncontended** runtime (verified: a single cold-cache request
-  with zero concurrency still took ~16s) — so under a concurrent burst, every
-  waiter's `blocking_timeout` elapsed at essentially the same moment the
-  winner finished, and they fell through to recomputing independently anyway
-  (measured: 15 concurrent requests against a cold key all took ~20s each,
-  i.e. no benefit at all). Retuned to 40.0/40.0 for real headroom above that
-  16-17s floor.
-  **Still open:** this fix removes the *redundant* computation cost, but does
-  nothing about the *underlying* ~16-17s single-computation cost itself
-  (`get_competitor_predicted_strategy`'s nested per-driver ML inference loop
-  in `strategy_service.py`) — confirmed in the Day 13 re-run: `/strategy/overview`'s
-  p95/p99/max were *unchanged* (16000/19000/20070ms) even with the stampede
-  fixed, because a request that's unlucky enough to need a fresh computation
-  (or wait behind one) still pays close to that full 16-17s floor. This is
-  now the single highest-leverage remaining target — a future day should
-  profile why ~20 drivers' worth of pit_predictor + tire_deg calls costs
-  16-17s (candidate causes: no batching across drivers, redundant per-lap
-  looping inside `_first_pit_lap_over_threshold`) before reaching for
-  anything more drastic.
-
-- **`/races/current` negative-result caching — fixed 2026-07-16, but doesn't
-  help under this test's specific traffic shape; needs single-flight too.**
-  `race_service._fetch_current_race` raised `NotFoundError` when the
-  Ergast-resolved season/round hadn't been ingested yet (true for 2026 right
-  now — ingestion stops at the 2025 holdout set). Since the old
-  `@cacheable` wrapper only wrote to cache on a successful return, a raised
-  exception meant this negative result was *never* cached — every request
-  paid the full external Ergast round trip. Confirmed as the root cause of
-  `/races/current`'s p50=13000ms (all 34/34 requests, 100% uncached) in the
-  original baseline. Fixed: `_fetch_current_race` is no longer wrapped in
-  `@cacheable`; `get_current_race` now hand-rolls cache-aside with two
-  different TTLs — `CURRENT_RACE_TTL_SECONDS` (300s) for a real race,
-  `CURRENT_RACE_NOT_FOUND_TTL_SECONDS` (60s) for "no current race". Verified
-  manually: first call 1.28s (real Ergast round trip), second call 50ms
-  (cached negative result).
-  **Still open:** the Day 13 re-run showed *no improvement* (p50 still
-  13000ms across all 34 requests) — root cause is a stampede specific to how
-  `locustfile.py`'s `RaceDayViewerUser` uses this endpoint: it's called
-  exactly once, in `on_start()`, and Locust ramps all 100 simulated users up
-  within ~10 seconds. All 34 `RaceDayViewerUser`s hit the cold cache key
-  within that same burst, before any single one of them finishes its own
-  ~13s Ergast call and populates the cache for the others — the identical
-  failure mode as the `cacheable` stampede above, just on a hand-rolled cache
-  path that doesn't share `cacheable`'s new lock. Fix: add the same
-  single-flight lock pattern directly into `get_current_race`'s manual
-  cache-aside (can't just re-wrap in `@cacheable` — the two-TTL split still
-  needs to stay hand-rolled).
+- **Cache stampede fix does not address the underlying 16-17s compute
+  floor:** the single-flight lock added to `cache_service.cacheable` (see
+  Notes: "Cache stampede single-flight lock") removes the *redundant*
+  computation cost, but does nothing about the *underlying* ~16-17s
+  single-computation cost itself (`get_competitor_predicted_strategy`'s
+  nested per-driver ML inference loop in `strategy_service.py`) — confirmed
+  in the Day 13 re-run: `/strategy/overview`'s p95/p99/max were *unchanged*
+  (16000/19000/20070ms) even with the stampede fixed, because a request
+  that's unlucky enough to need a fresh computation (or wait behind one)
+  still pays close to that full 16-17s floor. This is now the single
+  highest-leverage remaining target — a future day should profile why ~20
+  drivers' worth of pit_predictor + tire_deg calls costs 16-17s (candidate
+  causes: no batching across drivers, redundant per-lap looping inside
+  `_first_pit_lap_over_threshold`) before reaching for anything more
+  drastic.
 
 - **`broker_pool_limit` 10->50 — applied 2026-07-16, confirmed live, did NOT
-  fix POST `/strategy/{session_id}/simulate`'s enqueue latency.** Original
-  hypothesis: Celery's producer-side `broker_pool_limit` (default 10, confirmed
-  via `app.conf.broker_pool_limit` before the change) capped concurrent
-  `.delay()` calls from the API process, explaining why a call that should be
-  a near-instant broker publish was taking ~12s median at 100 concurrent users.
-  Raised to 50 in `workers/celery_app.py`'s `app.conf.update(...)`; confirmed
-  live post-restart (`app.conf.broker_pool_limit == 50` in the running
-  container). Re-ran the identical baseline: p50 went from 12000ms to
-  14000ms — unchanged at best, possibly noise, definitely not fixed.
-  **Real cause is probably elsewhere:** `apis/v1/strategy.py`'s
-  `simulate_strategy` wraps `.delay()` in
+  fix POST `/strategy/{session_id}/simulate`'s enqueue latency on its own.**
+  Original hypothesis: Celery's producer-side `broker_pool_limit` (default
+  10, confirmed via `app.conf.broker_pool_limit` before the change) capped
+  concurrent `.delay()` calls from the API process, explaining why a call
+  that should be a near-instant broker publish was taking ~12s median at 100
+  concurrent users. Raised to 50 in `workers/celery_app.py`'s
+  `app.conf.update(...)`; confirmed live post-restart. Re-ran the identical
+  baseline: p50 went from 12000ms to 14000ms — unchanged at best.
+  **Real cause identified and fixed (pre-Day-14):** `apis/v1/strategy.py`'s
+  `simulate_strategy` was wrapping `.delay()` in
   `loop.run_in_executor(None, run_race_simulation.delay, task_payload)` —
   passing `None` uses asyncio's *default* `ThreadPoolExecutor`, capped at
-  `min(32, cpu_count+4)` (= 20 on this container's 16 CPUs). 100 concurrent
-  requests competing for 20 threads just to make the call would bottleneck
-  regardless of how many broker connections are available downstream. Not
-  yet investigated further — a future day should either size a dedicated
-  executor for this route or restructure to avoid the thread-pool hop
-  entirely (e.g. an async-native Celery producer path, if one exists for
-  this Celery version).
+  `min(32, cpu_count+4)` (= 20 on this container's 16 CPUs). Fixed with a
+  dedicated `_SIMULATE_ENQUEUE_EXECUTOR` (50 workers, matching
+  `broker_pool_limit=50`) — confirmed working in isolated (WS-free) load
+  test runs: p50 630-2400ms, down from ~12-14s.
+  **Regression under combined load is not a new bug — it's the WS fan-out
+  issue tracked above:** a combined Locust run (`RaceDayViewerUser` +
+  `StrategyUser` + `WebSocketUser` together, real WS traffic) showed this
+  same enqueue latency regress back to ~12s p50 even with the
+  dedicated-executor fix in place, traced to Redis's single-threaded
+  command queue backing up under the WS telemetry fan-out's
+  Nx-redundant-per-event `get_live_car_channels` GETs (see the "WS
+  telemetry broadcast: redundant per-connection enrichment fan-out" bullet
+  above for the full analysis and required fix). No separate action needed
+  on this bullet — fixing the fan-out should resolve this regression too.
 
 - **get_competitor_predicted_strategy 16-17s cold compute floor:**
   `/strategy/{session_id}/overview` has p50=55ms (cache hits) but 
@@ -678,17 +626,6 @@ Add alongside a future ingestion improvement pass.
   simultaneously. Profile _first_pit_lap_over_threshold first — 
   redundant per-lap looping may be the dominant cost. Fix before Day 22.
 
-- **Redis cache hit rate collapses under burst ramp-up:**
-  Even with single-flight lock, cache hit rate drops from ~88% to ~5% 
-  when all users arrive within the same 10-second ramp window (before 
-  any cache is populated). warm_strategy_cache.py addresses strategy 
-  predictions but not /races/current or other endpoints. Full solution: 
-  run warm_strategy_cache.py before load test/race day start, and 
-  consider increasing TTLs for endpoints whose data changes infrequently 
-  (races list at 86400s is good; /races/current at 300s could be higher 
-  during an active race weekend). Low priority — operational concern 
-  rather than code change.
-
 ### Notes
 
 **users.fcm_token (✅ completed Day 10):**
@@ -697,6 +634,75 @@ Add alongside a future ingestion improvement pass.
 - `PUT /auth/fcm-token` endpoint added for mobile clients
 - Note: fcm_token intentionally NOT included in UserResponse —
   no need to echo device token back in every user payload
+
+**WeatherData live stream (✅ wired, weather improvement pass):**
+ingest_live_session.py now parses AirTemp/TrackTemp → Redis 
+f1:{season}:{round}:weather:latest (TTL 60s). strategy_service 
+_resolve_weather reads live key with DB fallback.
+
+**`/races/current` negative-result caching + single-flight (✅ fixed pre-Day-14):**
+`race_service._fetch_current_race` raised `NotFoundError` when the
+Ergast-resolved season/round hadn't been ingested yet (true for 2026 right
+now — ingestion stops at the 2025 holdout set). Since the old `@cacheable`
+wrapper only wrote to cache on a successful return, a raised exception
+meant this negative result was never cached — every request paid the full
+external Ergast round trip (confirmed as the root cause of
+`/races/current`'s p50=13000ms, 100% uncached, in the Day 13 baseline).
+Fixed: `_fetch_current_race` is no longer wrapped in `@cacheable`;
+`get_current_race` hand-rolls cache-aside with two TTLs —
+`CURRENT_RACE_TTL_SECONDS` (300s) for a real race,
+`CURRENT_RACE_NOT_FOUND_TTL_SECONDS` (60s) for "no current race". The Day
+13 re-run showed this alone wasn't enough — `RaceDayViewerUser.on_start()`
+calls this once per user and all ~34 users ramped up within the same ~10s
+window, hitting the cold key before any one of them finished its ~13s
+Ergast call — the same stampede shape `cacheable()`'s lock already guards
+against, just on a hand-rolled path. Fixed by adding a
+`cache_service.cache_lock` single-flight lock (same tuning as `cacheable`)
+directly into `get_current_race`'s manual cache-aside. Confirmed in code:
+`race_service.py`'s `get_current_race` now acquires the lock, re-checks
+cache after acquiring (in case another caller populated it while waiting),
+and falls back to computing independently if `blocking_timeout` elapses.
+
+**Cache stampede single-flight lock (✅ fixed Day 13):**
+`cache_service.cacheable`'s cache-aside decorator had no single-flight
+protection — on a miss, every concurrent caller independently re-ran the
+full decorated function instead of one computing and the rest reusing the
+result. Confirmed via Day 13 baseline load test (`-u 100 -r 10 --run-time
+2m`) on `/strategy/{session_id}/overview`: p50=55ms (clean hits) alongside
+p95=15000ms/p99=17000ms/max=19000ms and 2 `RemoteDisconnected` failures
+(clustered recomputation at each TTL rollover). Fixed by adding a
+Redis-lock single-flight (`cache_service.cache_lock`) around the miss
+path — losers block on the lock (not busy-polling) and re-read cache once
+it releases. Verified directly: 5 concurrent requests against a cold key
+now produce exactly one Redis write instead of 5 redundant computations,
+and the 2 `RemoteDisconnected` failures are gone in the post-fix re-run
+(0/478). Lock timeouts tuned to 40.0s/40.0s — the first attempt
+(`20.0`/`20.0`) was barely above `get_competitor_predicted_strategy`'s own
+~16-17s uncontended runtime, so under a concurrent burst every waiter's
+`blocking_timeout` elapsed at essentially the same moment the winner
+finished and they fell through to recomputing independently anyway (no
+benefit at all). **Does not address the underlying 16-17s
+single-computation cost** — see Deferred Wiring's "Cache stampede fix does
+not address the underlying 16-17s compute floor" bullet.
+
+**Redis cache hit rate under burst ramp-up (accepted operational
+trade-off, not a pending code fix):**
+Even with the single-flight lock, cache hit rate drops from ~88% to ~5%
+when all users arrive within the same 10-second ramp window (before any
+cache is populated). `warm_strategy_cache.py` addresses strategy
+predictions but not `/races/current` or other endpoints. Mitigation: run
+`warm_strategy_cache.py` before load test/race day start, and consider
+increasing TTLs for endpoints whose data changes infrequently (races list
+at 86400s is good; `/races/current` at 300s could be higher during an
+active race weekend). This is an operational/deployment concern, not a
+code bug — no fix is planned against it.
+
+**DRS decoding (✅ fixed pre-Day-14B):**
+_decode_car_channels now maps DRS channel values to proper status 
+strings: {0: "off", 8: "available", 10: "enabled", 14: "open"}, 
+fallback "unknown" for unrecognized codes. LapCompletedEvent.drs 
+changed from bool | None to Literal["off","available","enabled",
+"open","unknown"] | None.
 
 **prediction_worker.py pit_predictor feature array + undercut/overcut wiring (✅ completed, pre-Day-13 fix pass):**
 - tire_deg feature vector was confirmed already fixed (8 columns, done prior to
