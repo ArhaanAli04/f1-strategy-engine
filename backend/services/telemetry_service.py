@@ -145,24 +145,31 @@ def _car_latest_key(season: int, round_number: int, car_number: Any) -> str:
 # JSON); it never translates these numeric channel keys into named fields, so
 # that decode step lives here instead.
 _CAR_DATA_CHANNELS = {"2": "speed_kmh", "3": "gear", "4": "throttle_pct", "5": "brake", "45": "drs"}
-_CAR_DATA_BOOLEAN_FIELDS = frozenset({"brake", "drs"})
+_CAR_DATA_BOOLEAN_FIELDS = frozenset({"brake"})
+
+# DRS's channel value is a multi-value status code, not a plain boolean.
+# Codes not in this map (channel present but unrecognised) decode to "unknown"
+# rather than being fabricated into one of the known statuses.
+_DRS_STATUS_CODES: dict[int, str] = {0: "off", 8: "available", 10: "enabled", 14: "open"}
+
+
+def _decode_drs_status(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _DRS_STATUS_CODES.get(int(value), "unknown")
 
 
 def _decode_car_channels(entry: dict[str, Any]) -> dict[str, Any]:
     """Map a raw CarData.z per-car entry's numeric channel indices to named fields.
-
-    DRS's channel value is actually a multi-value status code (available vs.
-    active vs. off), not a plain boolean — this coarsely treats any nonzero
-    value as "DRS on", which is a simplification, not a fabricated channel
-    mapping (the channel index itself is a stable external convention).
 
     Args:
         entry: One car's raw entry from f1:{season}:{round}:car:{car_number}:latest
             (the {"Channels": {"0": ..., "2": ..., ...}} shape F1's live-timing
             feed sends, cached as-is by ingest_live_session.py's _handle_car_data).
     Returns:
-        Dict with speed_kmh, throttle_pct, brake, gear, drs. Any channel absent
-        from entry (stale/partial sample) maps to None, not a fabricated default.
+        Dict with speed_kmh, throttle_pct, brake, gear, drs (drs is a status
+        string — see _decode_drs_status). Any channel absent from entry
+        (stale/partial sample) maps to None, not a fabricated default.
     """
     channels = entry.get("Channels")
     if not isinstance(channels, dict):
@@ -176,7 +183,7 @@ def _decode_car_channels(entry: dict[str, Any]) -> dict[str, Any]:
         "throttle_pct": float(throttle) if throttle is not None else None,
         "brake": bool(brake) if brake is not None else None,
         "gear": int(gear) if gear is not None else None,
-        "drs": bool(drs) if drs is not None else None,
+        "drs": _decode_drs_status(drs),
     }
 
 
