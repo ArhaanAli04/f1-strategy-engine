@@ -298,29 +298,17 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    3
-Day:      13
-Status:   Caching layer audit + load testing complete. tests/load/locustfile.py
-          (RaceDayViewerUser, StrategyUser, WebSocketUser), replay_publisher.py,
-          and ws_load_test.py (standalone asyncio WS benchmark) all written and
-          verified against live Docker. strategy_predictions/alerts composite
-          indexes added (20260716_add_strategy_predictions_and_alerts_.py).
-          Two WS connection-pool-exhaustion bugs found and fixed (DB session
-          held for connection lifetime; Redis pool too small) — see Deferred
-          Wiring for the fan-out redundancy issue found alongside them.
-          Baseline load test (-u 100 -r 10 --run-time 2m) surfaced a cache
-          stampede in cache_service.cacheable (fixed: single-flight Redis
-          lock) and an uncached negative-result path in race_service's
-          get_current_race (fixed: differentiated TTL, hand-rolled
-          cache-aside). broker_pool_limit raised 10->50 but did NOT fix
-          POST /simulate's ~12-14s enqueue latency — see Deferred Wiring,
-          real cause is likely the shared default ThreadPoolExecutor cap
-          (~20 threads), not the Celery producer pool.
-Next:     Day 14 — model_version assertion fix; revisit the three open
-          Day 13 items below (races/current stampede, executor bottleneck,
-          strategy/overview's 16-17s single-computation floor)
-Blockers: model_version assertion in integration test still says "latest" 
-          (should be "production") — fix on Day 14
+Phase:    4
+Day:      14
+Status:   37 unit tests passing. Coverage: tire_deg_model 95%, 
+          pit_predictor 95%, cache_service 90%, safety_car_model 88%, 
+          strategy_service 85%, race_simulator 85%. Bug found and fixed: 
+          cache_invalidate_driver missing trailing wildcard on strategy keys. 
+          model_version "latest" assertion fixed. @pytest.mark.slow 
+          registered for race_simulator tests.
+Next:     Day 15 — Unit tests: API schemas, auth, alert service, 
+          telemetry service
+Blockers: None
 ```
 
 ---
