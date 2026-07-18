@@ -156,7 +156,7 @@ async def cache_invalidate_driver(
         Total number of keys deleted across the fingerprint and strategy key families.
     """
     fingerprint_deleted = await _delete_matching(client, f"f1:driver:{driver_id}:*")
-    strategy_deleted = await _delete_matching(client, f"f1:*:*:strategy:{driver_id}")
+    strategy_deleted = await _delete_matching(client, f"f1:*:*:strategy:{driver_id}:*")
     return fingerprint_deleted + strategy_deleted
 
 
