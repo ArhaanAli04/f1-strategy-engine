@@ -64,6 +64,7 @@ markers = [
     "integration: marks tests as integration tests (real DB + Redis)",
     "e2e: marks tests as end-to-end tests (full stack, Playwright)",
     "load: marks tests as load tests (Locust)",
+    "slow: marks tests with a long first-run cost (e.g. numba JIT warm-up)",
 ]
 testpaths = ["backend/tests"]
 
