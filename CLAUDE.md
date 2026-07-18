@@ -669,6 +669,26 @@ Add alongside a future ingestion improvement pass.
   entirely (e.g. an async-native Celery producer path, if one exists for
   this Celery version).
 
+- **get_competitor_predicted_strategy 16-17s cold compute floor:**
+  `/strategy/{session_id}/overview` has p50=55ms (cache hits) but 
+  p99=17,000ms (cold misses). The cold path iterates all 20 drivers 
+  sequentially with ML inference per driver — no batching, no parallelism. 
+  Candidate fixes: parallelise with asyncio.gather() across drivers, 
+  or batch the tire_deg/pit_predictor calls across all 20 drivers 
+  simultaneously. Profile _first_pit_lap_over_threshold first — 
+  redundant per-lap looping may be the dominant cost. Fix before Day 22.
+
+- **Redis cache hit rate collapses under burst ramp-up:**
+  Even with single-flight lock, cache hit rate drops from ~88% to ~5% 
+  when all users arrive within the same 10-second ramp window (before 
+  any cache is populated). warm_strategy_cache.py addresses strategy 
+  predictions but not /races/current or other endpoints. Full solution: 
+  run warm_strategy_cache.py before load test/race day start, and 
+  consider increasing TTLs for endpoints whose data changes infrequently 
+  (races list at 86400s is good; /races/current at 300s could be higher 
+  during an active race weekend). Low priority — operational concern 
+  rather than code change.
+
 ### Notes
 
 **users.fcm_token (✅ completed Day 10):**

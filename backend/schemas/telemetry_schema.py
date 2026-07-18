@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -101,7 +101,7 @@ class LapCompletedEvent(BaseModel):
     throttle_pct: float | None = None
     brake: bool | None = None
     gear: int | None = None
-    drs: bool | None = None
+    drs: Literal["off", "available", "enabled", "open", "unknown"] | None = None
 
 
 class TelemetryStreamMessage(BaseModel):
