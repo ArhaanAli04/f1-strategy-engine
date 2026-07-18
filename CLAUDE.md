@@ -485,14 +485,6 @@ Slack webhook handling.
   short-lived WebSocket ticket — exchange via REST before connection, 
   use one-time token for WS auth instead of the full JWT.
 
--  teams and driver_contracts tables are empty — no ingestion script 
-populates them. Need a seed_teams.py script that:
-    - Seeds current teams (McLaren, Ferrari, Red Bull, etc.)
-    - Seeds driver_contracts linking current drivers to their teams
-    - Can use FastF1's session.get_driver() data or a hardcoded 
-    current-season roster
-Add alongside a future ingestion improvement pass.
-
 - **WS telemetry broadcast: redundant per-connection enrichment fan-out —
   fix before Day 22 Kubernetes deployment.** `_forward_lap_events` in
   `backend/apis/v1/telemetry.py` runs one `pubsub.listen()` loop per WS
@@ -698,7 +690,7 @@ fallback "unknown" for unrecognized codes. LapCompletedEvent.drs
 changed from bool | None to Literal["off","available","enabled",
 "open","unknown"] | None.
 
-**run_race_simulation Celery serialization (✅ verified pre-Day-14C):**
+**run_race_simulation Celery serialization (✅ completed pre-Day-14C):**
 confidence_interval's Python tuple was suspected to become a JSON array
 through Celery's result backend (task_serializer/result_serializer="json",
 workers/celery_app.py) with the Pydantic v2 round-trip coercion back to
@@ -713,6 +705,22 @@ confirms SimulateStrategyResponse.model_validate(...) — the same call
 apis/v1/strategy.py's get_simulation_result makes — coerces it back to a
 tuple with the original values intact. No schema change was needed;
 Pydantic v2's tuple validator accepts any sequence.
+
+**teams/driver_contracts seeding (✅ completed pre-Day-14C):**
+Both tables were empty — no ingestion script populated them, so `GET
+/drivers` never returned team or contract info. Fixed via
+`backend/scripts/seed_teams.py` (`make seed-teams`): a hardcoded, confirmed
+2026 grid (11 teams including the new Cadillac entry, 22 drivers).
+Upsert-or-create on both upstream tables, not just the join: any roster
+driver code missing from `drivers` (e.g. Arvid Lindblad, a 2026 rookie with
+no prior FastF1 session to have been ingested from) is inserted before its
+`DriverContract` row, same for any missing `Team`. `driver_contracts` has no
+DB-level unique constraint on `(driver_id, season)`, so duplicate-avoidance
+is done at the application level (existing-pairs set checked before insert),
+same convention as `seed_circuits.py`'s skip-by-name set — confirmed
+idempotent via a second run (0 inserts). Verified live against the local
+Docker Postgres: `GET /drivers` returns correct `team`/`contracts` for all
+22 rostered drivers.
 
 **prediction_worker.py pit_predictor feature array + undercut/overcut wiring (✅ completed, pre-Day-13 fix pass):**
 - tire_deg feature vector was confirmed already fixed (8 columns, done prior to
