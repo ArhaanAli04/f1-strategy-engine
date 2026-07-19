@@ -149,7 +149,16 @@ def build_driver_style_features(laps: pd.DataFrame, stints: pd.DataFrame) -> pd.
         DataFrame with driver_id, season, and FEATURE_COLUMNS. Driver-seasons missing
         any one of the four features (e.g. too few stints/laps) are dropped rather
         than imputed, since imputing a style feature would misrepresent that driver.
+        Empty (not a crash) if laps or stints is empty — a 0-row DataFrame built from
+        an empty DB query result has object dtype on every column (no data to infer
+        from), and object-dtype boolean indexing (compute_lap_time_consistency's
+        laps[laps["is_valid"]]) silently drops all columns in pandas, which would
+        otherwise surface as an unrelated KeyError in the groupby calls below instead
+        of the empty-result contract callers (driver_service._fit_population) rely on.
     """
+    if laps.empty or stints.empty:
+        return pd.DataFrame(columns=["driver_id", "season", *FEATURE_COLUMNS])
+
     sector_var = compute_sector_time_variance(laps)
     lap_consistency = compute_lap_time_consistency(laps)
     stint_length = compute_stint_length_tendency(stints, laps)
