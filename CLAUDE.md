@@ -299,16 +299,18 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    4
-Day:      15
-Status:   104 unit tests passing (37 Day-14 + 67 new). Coverage: 
-          security 100%, alert_service 100%, driver_style 100%, 
-          schemas 94-100%, driver_service 97%, telemetry_service 97%, 
-          race_service 98%. Two bugs found and fixed: subscription 
-          upsert logic in alert_service, NaN float normalization in 
-          telemetry_service. Variable scoping collision fixed in test 
-          fixture.
-Next:     Integration tests — DB, API endpoints, Alembic, Redis
-Blockers: None
+Day:      16
+Status:   13 integration tests passing. test_alembic_migrations (3), 
+          test_race_api (4), test_strategy_endpoint (2), 
+          test_telemetry_ingestion (2), test_live_prediction_pipeline (1), 
+          test_race_simulation_serialization (1). Fixed pre-existing 
+          production bug: prometheus-fastapi-instrumentator 8.0.0 
+          incompatible with FastAPI 0.138/Starlette 1.3.1 — bumped to 
+          8.0.2. Fixed two Celery singleton-caching issues in eager mode. 
+          TimescaleDB image now used in testcontainers. 104 unit tests 
+          still passing. ruff+mypy clean.
+Next:     Integration tests — auth, WebSocket & user flows
+Blockers: Strategy endpoints missing auth (noted in deferred wiring)
 ```
 
 ---
@@ -604,6 +606,16 @@ Kubernetes deployment.
   or batch the tire_deg/pit_predictor calls across all 20 drivers 
   simultaneously. Profile _first_pit_lap_over_threshold first — 
   redundant per-lap looping may be the dominant cost. Fix before Day 22.
+
+### Dependency version drift — prometheus-fastapi-instrumentator
+
+pyproject.toml lower-bound-only pins caused a silent compatibility 
+break: prometheus-fastapi-instrumentator 8.0.0 crashed on every HTTP 
+request with AttributeError: '_IncludedRouter' object has no attribute 
+'path' under FastAPI 0.138/Starlette 1.3.1. Fixed Day 16 by bumping 
+to >=8.0.2 (GitHub issue #370, fixed in 8.0.1). For middleware/monitoring 
+libraries that hook into framework internals, consider upper bounds to 
+prevent silent breaks during pip install --upgrade.
 
 ### Notes
 
