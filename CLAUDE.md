@@ -466,7 +466,12 @@ use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD}
 into prometheus.yml at container startup, same pattern as alertmanager.yml's 
 Slack webhook handling.
 
-
+- Strategy endpoints missing authentication: POST /strategy/simulate 
+and GET /strategy/{session_id}/{driver_id}/pit-window should require 
+Depends(get_current_user) before production deployment. Currently 
+public — rate limiting (10 req/min unauth) provides minimal protection 
+but compute-heavy endpoints are exploitable. Fix before Day 22 
+Kubernetes deployment.
 
 - **WebSocket JWT in query param (?token=):** access token appears in 
   server logs and browser history. Acceptable for now. Production fix: 
