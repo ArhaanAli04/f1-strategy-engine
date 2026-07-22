@@ -164,6 +164,20 @@ ENVIRONMENT           development | staging | production
 
 ## Architecture Decisions (understand these before proposing alternatives)
 
+**WebSocket pubsub cleanup — fire-and-forget aclose():**
+redis-py 6.4.0's `PubSub.aclose()` hangs indefinitely on disconnect 
+when `forward_task` is cancelled mid-read inside `conn.read_response()` 
+— the connection is left in a non-cancellable state. Even 
+`asyncio.wait_for(..., timeout=2.0)` cannot rescue this because the 
+inner cancellation itself never completes (it waits for the stuck 
+connection to acknowledge the cancel). Fixed in `telemetry.py` by 
+scheduling `pubsub.aclose()` as a detached `asyncio.create_task()` 
+with a logged done-callback, so `.dec()` and the route's return are 
+never blocked by a wedged connection. Without this fix, every WS 
+disconnect leaks one Redis connection from the pool permanently — 
+critical to preserve given pool exhaustion was already a documented 
+load-test finding.
+
 **Why Celery + Redis for predictions, not FastAPI BackgroundTasks?**
 BackgroundTasks run in the same process as the web server. A slow ML inference
 (500ms+) would block that worker from handling other requests. Celery tasks run
@@ -791,6 +805,27 @@ services written earlier.
 | tests/unit/test_pit_predictor.py | backend/services/ml/pit_predictor.py | Day 14 |
 | tests/unit/test_safety_car_model.py | backend/services/ml/safety_car_model.py | Day 14 |
 
+## Planned Feature — Live Circuit Map (Days 25-28)
+
+Display live race on circuit layout with drivers as moving dots 
+alongside the timing tower on the same page.
+
+Backend prep needed (before Day 25):
+- Extract circuit map X/Y coordinates from FastF1 pos_data for 
+  all 24 circuits, store as JSON
+- Capture LapDistance from TimingData SignalR stream in 
+  ingest_live_session.py
+- New Redis key: f1:{season}:{round}:car:{driver}:lap_distance TTL 2s
+- Endpoint to serve circuit coordinates
+
+Frontend (Days 25-28):
+- SVG circuit outline from stored coordinates
+- 20 team-colored dots interpolated along circuit path from LapDistance
+- Updates via WebSocket or polling
+- Timing tower on same page, selecting driver syncs both panels
+
+Reference: https://github.com/TiE23/sab-f1-ui for timing tower 
+animation CSS patterns
 
 ## Data Quality Notes
 

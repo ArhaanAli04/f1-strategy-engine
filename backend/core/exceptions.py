@@ -61,9 +61,13 @@ async def f1_strategy_error_handler(request: Request, exc: F1StrategyError) -> J
         request.url.path,
         exc.message,
     )
+    # RFC 6750: a 401 on a bearer-token-protected resource must carry
+    # WWW-Authenticate so a client knows which auth scheme to retry with.
+    headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthenticationError) else None
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.error_code, "message": exc.message, "detail": exc.detail},
+        headers=headers,
     )
 
 

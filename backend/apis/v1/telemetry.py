@@ -7,6 +7,7 @@ each handler below needs a `request: Request` parameter.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import uuid
@@ -152,6 +153,22 @@ async def _watch_for_disconnect(websocket: WebSocket) -> None:
         await websocket.receive_text()
 
 
+def _log_pubsub_cleanup_failure(session_id: uuid.UUID, task: "asyncio.Task[None]") -> None:
+    """Done-callback for the detached pubsub.aclose() cleanup task.
+
+    Args:
+        session_id: The WS session the pubsub connection belonged to (for the log line).
+        task: The completed (or cancelled) aclose() task.
+    Returns:
+        None.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("pubsub.aclose() failed in background for session %s: %s", session_id, exc)
+
+
 @ws_router.websocket("/ws/telemetry/{session_id}")
 async def websocket_telemetry(
     websocket: WebSocket,
@@ -221,5 +238,18 @@ async def websocket_telemetry(
                     "Unexpected error in WS telemetry stream for session %s", session_id
                 )
         await pubsub.unsubscribe(channel)
-        await pubsub.aclose()  # type: ignore[attr-defined]
+        # redis-py 6.4.0's PubSub.aclose() can hang indefinitely on
+        # connection.disconnect() when forward_task was cancelled mid-read on
+        # this same connection — confirmed via a manual print-trace during
+        # Day 17 test-writing: unsubscribe completes, but aclose() never
+        # returns. Worse, even asyncio.wait_for(aclose(), timeout=...)
+        # doesn't rescue it: wait_for cancels the inner task and then awaits
+        # its actual completion, which never comes either, since the
+        # underlying connection is stuck in a non-cancellable state (not an
+        # ordinary "slow" case a timeout can bound). Running it as a
+        # detached background task instead means a wedged connection can
+        # never block .dec() or this coroutine's return — worst case it
+        # abandons that one connection rather than stalling every disconnect.
+        cleanup_task = asyncio.create_task(pubsub.aclose())  # type: ignore[attr-defined]
+        cleanup_task.add_done_callback(functools.partial(_log_pubsub_cleanup_failure, session_id))
         f1_active_websocket_connections.dec()
