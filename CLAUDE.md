@@ -313,17 +313,16 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    4
-Day:      16
-Status:   13 integration tests passing. test_alembic_migrations (3), 
-          test_race_api (4), test_strategy_endpoint (2), 
-          test_telemetry_ingestion (2), test_live_prediction_pipeline (1), 
-          test_race_simulation_serialization (1). Fixed pre-existing 
-          production bug: prometheus-fastapi-instrumentator 8.0.0 
-          incompatible with FastAPI 0.138/Starlette 1.3.1 — bumped to 
-          8.0.2. Fixed two Celery singleton-caching issues in eager mode. 
-          TimescaleDB image now used in testcontainers. 104 unit tests 
-          still passing. ruff+mypy clean.
-Next:     Integration tests — auth, WebSocket & user flows
+Day:      17
+Status:   129 tests passing (104 unit + 25 integration). 12 new 
+          integration tests: test_auth (6), test_websocket (3), 
+          test_alerts (3). Application code coverage ~94%. Two 
+          production bugs found and fixed: WWW-Authenticate: Bearer 
+          header missing on AuthenticationError (core/exceptions.py), 
+          and WebSocket pubsub.aclose() hanging forever on disconnect 
+          causing Redis connection pool leak (telemetry.py — fixed 
+          with fire-and-forget detached task).
+Next:     End-to-end tests (Playwright) & load tests (Locust)
 Blockers: Strategy endpoints missing auth (noted in deferred wiring)
 ```
 
