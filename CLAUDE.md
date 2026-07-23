@@ -567,6 +567,23 @@ Kubernetes deployment.
   deferring further — its blast radius already reaches beyond `/ws/telemetry`
   itself once real WS traffic is in the mix.
 
+  **Corroborating evidence, Day 18 (2026-07-23), at the strongest scale
+  yet:** the 500-user race-day load test (`locust -u 500 -r 20 --run-time
+  10m`, `WebSocketUser` weighted to ~206 concurrent connections,
+  `replay_publisher.py --rate 5`) showed 13139/13387 (98.15%) of WS
+  connections failing outright with `ConnectionClosedError` (`keepalive
+  ping timeout`, close code 1011) — a step up from the pre-Day-14 combined
+  run's milder degradation (~24/50 messages delivered per connection at
+  200 connections, not outright failure). At this connection count the
+  per-connection redundant `get_live_car_channels` Redis GETs back up the
+  server badly enough that it can no longer service WS keepalive pings in
+  time at all. No new root cause — this is the same fan-out already scoped
+  above, now demonstrated at a scale close to real race-day viewer counts.
+  See `docs/load_test_results.md`'s 2026-07-23 500-user run entry for the
+  full per-endpoint breakdown. Supports fixing this before Day 22 as one of
+  the two highest-priority items alongside the DB connection pool
+  exhaustion finding below — both block any real race-day-scale deployment.
+
 - **Cache stampede fix does not address the underlying 16-17s compute
   floor:** the single-flight lock added to `cache_service.cacheable` (see
   Notes: "Cache stampede single-flight lock") removes the *redundant*
@@ -619,6 +636,93 @@ Kubernetes deployment.
   or batch the tire_deg/pit_predictor calls across all 20 drivers 
   simultaneously. Profile _first_pit_lap_over_threshold first — 
   redundant per-lap looping may be the dominant cost. Fix before Day 22.
+
+- **DB connection pool exhaustion at 500 concurrent users — fix before
+  Day 22 Kubernetes deployment.** `core/database.py`'s
+  `create_async_engine(..., pool_size=10, max_overflow=20)` (30 total
+  connections, default 30s `pool_timeout`) is far too small once
+  concurrency reaches race-day scale. Measured via the Day 18 500-user load
+  test (`locust -u 500 -r 20 --run-time 10m`, 2026-07-23): backend
+  container logs for the run window show 493 occurrences of
+  `sqlalchemy.exc.TimeoutError: QueuePool limit of size 10 overflow 20
+  reached, connection timed out, timeout 30.00`. This single exhaustion
+  cascades into several symptoms that look unrelated on the surface:
+  - 172 of 1954 `/strategy/{session_id}/overview` failures were clean
+    `500 Internal Server Error`s caused directly by the pool timeout
+    propagating up as an unhandled exception (28.49% failure rate on that
+    endpoint overall).
+  - A previously-unseen WebSocket bug — 58 occurrences of `RuntimeError:
+    Expected ASGI message 'websocket.send' or 'websocket.close', but got
+    'websocket.accept'` in `telemetry.py`. Root cause: `websocket_telemetry`'s
+    `resolve_season_round` DB lookup (telemetry.py:210) stalls up to 30s
+    waiting on the same exhausted pool, while Locust's client-side
+    `ws_connect(ws_url, open_timeout=10)` gives up after only 10s and tears
+    down its side of the connection. When the server's stalled DB call
+    eventually returns and reaches `await websocket.accept()`
+    (telemetry.py:215), it's accepting a transport the client already
+    abandoned — uvicorn's ASGI state machine rejects the late accept with
+    this error. Not a standalone bug, a symptom of the pool exhaustion
+    above.
+  - Very likely also the dominant cause of the remaining
+    `RemoteDisconnected` / `ConnectionAbortedError` failures on `/overview`
+    and `/drivers/laps` (see `docs/load_test_results.md`'s 2026-07-23
+    500-user run for the full breakdown).
+
+  Proposed fix: raise `pool_size`/`max_overflow` with real numbers derived
+  from a follow-up load test (not guessed), and consider a bounded retry or
+  a faster-failing timeout so an overloaded request returns a clean 503
+  instead of hanging up to 30s per attempt. Fix before Day 22 Kubernetes
+  deployment — this blocks any real race-day-scale traffic today.
+
+- **Single `--pool=solo` Celery worker cannot sustain race-day simulate
+  traffic — fix via multiple worker pods on Day 22.** This project's
+  existing `--pool=solo` rationale already anticipated needing "8+ worker
+  pods" on race day, but the Day 18 500-user load test (2026-07-23) gives
+  the first concrete number for how large that gap actually is. Grafana's
+  Celery queue-depth panel showed ~580 queued tasks at peak during the run,
+  which reads like a transient spike — it isn't. Verified directly after
+  the run: `redis-cli llen prediction_queue` still read 559 roughly 30
+  minutes after `--run-time` expired, and `docker logs docker-worker-1`
+  showed each `run_race_simulation` task taking 65-88 seconds end-to-end
+  (not the ~10s Grafana's ML-inference panel shows — that panel measures
+  only the Monte Carlo inference sub-step, not the full task including its
+  per-driver DB round trips, themselves slowed by the connection-pool
+  exhaustion above). At ~75s/task average and 559 tasks still queued, full
+  backlog drain was projected at 10+ hours on the single solo-pool worker
+  process — confirmed while writing the Day 18 E2E test
+  (`tests/e2e/test_api_flows.py`): a fresh `/simulate` call queued behind
+  this backlog did not complete even once in a 30s poll window, and only
+  succeeded (in 68s) after the stale queue was purged
+  (`celery -A backend.workers.celery_app purge -f -Q prediction_queue`,
+  555 messages removed) to unblock testing. 647 simulate requests were
+  submitted in the 10-minute run — far more than one worker pod at
+  ~0.013 tasks/sec (1/75s) can remotely keep up with.
+
+  Proposed fix: scale to multiple worker pods for race day, as already
+  planned in the `--pool=solo` rationale — this run supplies the real
+  per-task cost (65-88s) needed to size that pool count properly instead of
+  guessing. Fix on Day 22 Kubernetes deployment alongside the DB pool
+  sizing fix above, since both block real race-day-scale traffic.
+
+- **Load-test harness account-pool-size formula doesn't scale past ~100
+  simulated users — fix before the next 500+-user load test.**
+  `tests/load/locustfile.py`'s `_target_pool_size` caps the shared test
+  account pool at `min(users, 30)` regardless of population (see its
+  docstring's rate-limit rationale, sized against Day 13's 100-user
+  baseline where 30 accounts meant ~3.3 simulated users per account). At
+  500 users this is unchanged at 30 accounts, so each account now backs
+  ~17 simulated users, pushing each shared account's request rate well past
+  the documented 60/min authenticated rate-limit bucket. Confirmed in the
+  Day 18 500-user run (2026-07-23): 1385 of 15242 total failures were
+  `429 Too Many Requests` (1257 on `/strategy/overview`, 88 on `/simulate`,
+  40 on `/drivers/laps`) — the rate limiter correctly protecting the
+  server, not a server-side bug. This is a load-test harness limitation,
+  not application code, but it meaningfully dilutes the failure count and
+  makes real server-side bottlenecks (DB pool exhaustion, WS fan-out, both
+  above) harder to isolate from the aggregate numbers. Fix before the next
+  500+-user run: either raise the pool-size cap for larger runs (accepting
+  a longer, rate-limit-paced provisioning pass) or give the rate-limit
+  budget more headroom accounted for in the pool-size formula itself.
 
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
