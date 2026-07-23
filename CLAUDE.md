@@ -313,17 +313,19 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    4
-Day:      17
-Status:   129 tests passing (104 unit + 25 integration). 12 new 
-          integration tests: test_auth (6), test_websocket (3), 
-          test_alerts (3). Application code coverage ~94%. Two 
-          production bugs found and fixed: WWW-Authenticate: Bearer 
-          header missing on AuthenticationError (core/exceptions.py), 
-          and WebSocket pubsub.aclose() hanging forever on disconnect 
-          causing Redis connection pool leak (telemetry.py — fixed 
-          with fire-and-forget detached task).
-Next:     End-to-end tests (Playwright) & load tests (Locust)
-Blockers: Strategy endpoints missing auth (noted in deferred wiring)
+Day:      18
+Status:   Phase 4 complete. Load test final pass: 100-user baseline 
+          confirmed all pre-Day-14 fixes held. 500-user race-day run 
+          revealed DB pool exhaustion (493x QueuePool timeouts), real 
+          Celery task cost 65-88s under load (not ~10s isolated), 
+          WS fan-out at 98.15% failure rate at 206 viewers. All 
+          findings documented in docs/load_test_results.md and 
+          CLAUDE.md deferred wiring. E2E infrastructure: conftest.py, 
+          test_api_flows.py (passing), test_live_race_flow.py (3 
+          Playwright stubs, skipped until Day 25). 129 tests passing.
+Next:     Day 19 — CI/CD pipeline (GitHub Actions)
+Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
+          (fix before Day 22)
 ```
 
 ---
