@@ -234,8 +234,18 @@ def _provision_test_users(environment: Any, **kwargs: Any) -> None:
 
 
 class RaceDayViewerUser(HttpUser):
-    """The spec's "User": hits /races/current, then /strategy/{session_id}/overview every ~5s."""
+    """The spec's "User": hits /races/current, then /strategy/{session_id}/overview every ~5s.
 
+    Day 18 spec calls this population "RaceViewerUser (weight=70): GET
+    /strategy/overview every 5s + WebSocket connection" as a single user type.
+    Locust's HttpUser can't hold a raw websockets connection alongside HTTP
+    task polling without a rewrite of the class hierarchy this file already
+    has (WebSocketUser below uses the plain `User` base + a sync websockets
+    client) — so the "+ WebSocket connection" half of that spec line is
+    WebSocketUser, weighted to match (see its class docstring).
+    """
+
+    weight = 70
     wait_time = between(4, 6)
 
     def on_start(self) -> None:
@@ -263,8 +273,12 @@ class RaceDayViewerUser(HttpUser):
 
 
 class StrategyUser(HttpUser):
-    """Heavy-compute user: POSTs /strategy/{session_id}/simulate every ~30s."""
+    """Heavy-compute user: POSTs /strategy/{session_id}/simulate every ~30s.
 
+    Day 18 spec: StrategyAnalystUser, weight=20.
+    """
+
+    weight = 20
     wait_time = between(28, 32)
 
     def on_start(self) -> None:
@@ -294,6 +308,30 @@ class StrategyUser(HttpUser):
         )
 
 
+class HistoricalUser(HttpUser):
+    """Historical data browser: GET /drivers/{driver_id}/laps every ~10s.
+
+    Day 18 spec: HistoricalUser, weight=10. Reuses the same shared token pool
+    and driver-id cycle as StrategyUser rather than introducing a new env var.
+    """
+
+    weight = 10
+    wait_time = between(9, 11)
+
+    def on_start(self) -> None:
+        self.client.headers["Authorization"] = f"Bearer {_next_token()}"
+        self.session_id = _session_id()
+        self.driver_id = _next_driver_id()
+
+    @task
+    def driver_laps(self) -> None:
+        self.client.get(
+            f"/api/v1/drivers/{self.driver_id}/laps",
+            params={"session_id": self.session_id, "page": 1, "page_size": 20},
+            name="/drivers/[driver_id]/laps",
+        )
+
+
 def _to_ws_url(host: str, session_id: str, token: str) -> str:
     ws_scheme_host = host.replace("https://", "wss://").replace("http://", "ws://")
     return f"{ws_scheme_host}/api/v1/ws/telemetry/{session_id}?token={token}"
@@ -306,8 +344,15 @@ class WebSocketUser(User):
     Locust run — see module docstring — otherwise the connection stays open
     but idle (recv() just times out every _WS_RECV_TIMEOUT_SECONDS, which is
     treated as "no event this interval," not a failure).
+
+    Weighted to match RaceDayViewerUser (70): see that class's docstring —
+    the Day 18 spec's "RaceViewerUser" is one conceptual user who both polls
+    /strategy/overview AND holds a WebSocket connection, split across these
+    two Locust classes since HttpUser can't hold a raw websockets connection.
+    Mirroring the weight approximates that same population holding both.
     """
 
+    weight = 70
     wait_time = between(1, 2)
     _ws: ClientConnection
 

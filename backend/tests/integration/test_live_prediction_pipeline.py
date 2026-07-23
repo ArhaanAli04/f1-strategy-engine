@@ -115,7 +115,7 @@ def test_mock_lap_completion_creates_strategy_prediction(
             )
             prediction = prediction_result.scalar_one()
             assert prediction.driver_id == driver.id
-            assert prediction.model_version == "latest"
+            assert prediction.model_version == "production"
             assert prediction.pit_probability == pytest.approx(0.8)
         await get_engine().dispose()
 
