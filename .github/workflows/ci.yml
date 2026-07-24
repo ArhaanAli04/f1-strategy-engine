@@ -81,6 +81,20 @@ jobs:
       # future test reads AuthSettings at collection time (module import),
       # which fixtures can't intercept. Same non-secret placeholder value.
       SECRET_KEY: test-secret-key
+      # This one IS required: backend/workers/celery_app.py reads
+      # get_redis_settings().redis_url at module level (line 20), and 4
+      # integration test files (test_telemetry_ingestion.py,
+      # test_live_prediction_pipeline.py, test_strategy_endpoint.py,
+      # test_race_simulation_serialization.py) import celery_app or
+      # prediction_worker, so this runs at collection time — before
+      # conftest.py's _point_settings_at_containers fixture (which
+      # overwrites REDIS_URL with the real testcontainer address) has run.
+      # Value is never actually used for a connection; just needs to exist
+      # as a valid-shaped string to satisfy RedisSettings at import.
+      # DATABASE_URL doesn't need the same treatment: get_db_settings() is
+      # only called lazily inside core/database.py's get_engine(), never at
+      # module import time anywhere in the codebase.
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
 
