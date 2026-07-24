@@ -312,18 +312,17 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    4
-Day:      18
-Status:   Phase 4 complete. Load test final pass: 100-user baseline 
-          confirmed all pre-Day-14 fixes held. 500-user race-day run 
-          revealed DB pool exhaustion (493x QueuePool timeouts), real 
-          Celery task cost 65-88s under load (not ~10s isolated), 
-          WS fan-out at 98.15% failure rate at 206 viewers. All 
-          findings documented in docs/load_test_results.md and 
-          CLAUDE.md deferred wiring. E2E infrastructure: conftest.py, 
-          test_api_flows.py (passing), test_live_race_flow.py (3 
-          Playwright stubs, skipped until Day 25). 129 tests passing.
-Next:     Day 19 — CI/CD pipeline (GitHub Actions)
+Phase:    5
+Day:      19
+Status:   GitHub Actions CI pipeline complete. 5 jobs: lint (ruff + 
+          mypy), unit-tests (104 passing, coverage.xml artifact), 
+          integration-tests (testcontainers, no services block needed), 
+          e2e-tests (full stack bring-up: postgres + redis + uvicorn + 
+          Celery worker + health check), build-check (both Dockerfiles). 
+          pytest-timeout added to dev deps. CI badge added to README.
+          Known limitation: e2e job skips test_api_flows.py (no seeded 
+          race data in CI) but proves stack boots correctly.
+Next:     GitHub Actions CD pipeline — build, push ECR, Alembic migrate, Helm deploy
 Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
           (fix before Day 22)
 ```
