@@ -30,6 +30,7 @@ def _stub_cache_lock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.unit
 async def test_ttl_applied_correctly(fakeredis: fakeredis_lib.FakeAsyncRedis) -> None:
+    raise AssertionError("deliberate CI failure")
     await cache_service.cache_set(fakeredis, "f1:test:ttl", {"a": 1}, ttl=30)
     await cache_service.cache_set(fakeredis, "f1:test:no_ttl", {"a": 1}, ttl=None)
 
