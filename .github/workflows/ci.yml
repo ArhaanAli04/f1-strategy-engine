@@ -1,0 +1,226 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: mypy --strict
+        run: mypy backend/ --strict
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    env:
+      # test_security.py calls get_auth_settings() directly, which requires
+      # SECRET_KEY with no default (backend/core/config.py's AuthSettings).
+      # Locally this is satisfied by a gitignored .env; CI has no .env, so it
+      # must come from the job env instead. A fixed placeholder, not a real
+      # secret — no unit test does anything with this value beyond a
+      # jwt.encode()/decode() round-trip in-process.
+      SECRET_KEY: ci-unit-test-secret-key-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # python:3.11-slim (the runtime image) strips libgomp1, which lightgbm
+      # dlopen()s at import time (see CLAUDE.md's libgomp1 note). ubuntu-latest
+      # runners carry it via build-essential already, but pin the install here
+      # too so a runner-image change can't silently reintroduce this failure.
+      - name: Install libgomp1
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest backend/tests/unit/ -m unit -v --cov=backend --cov-report=xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  integration-tests:
+    name: Integration tests
+    needs: [unit-tests]
+    runs-on: ubuntu-latest
+    env:
+      # Not strictly required today: conftest.py's session-scoped autouse
+      # fixture already does os.environ.setdefault("SECRET_KEY",
+      # "test-secret-key") before any test runs. Set explicitly anyway so
+      # this job doesn't silently depend on that fixture running first if a
+      # future test reads AuthSettings at collection time (module import),
+      # which fixtures can't intercept. Same non-secret placeholder value.
+      SECRET_KEY: test-secret-key
+      # This one IS required: backend/workers/celery_app.py reads
+      # get_redis_settings().redis_url at module level (line 20), and 4
+      # integration test files (test_telemetry_ingestion.py,
+      # test_live_prediction_pipeline.py, test_strategy_endpoint.py,
+      # test_race_simulation_serialization.py) import celery_app or
+      # prediction_worker, so this runs at collection time — before
+      # conftest.py's _point_settings_at_containers fixture (which
+      # overwrites REDIS_URL with the real testcontainer address) has run.
+      # Value is never actually used for a connection; just needs to exist
+      # as a valid-shaped string to satisfy RedisSettings at import.
+      # DATABASE_URL doesn't need the same treatment: get_db_settings() is
+      # only called lazily inside core/database.py's get_engine(), never at
+      # module import time anywhere in the codebase.
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install libgomp1
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # No services: block and no `alembic upgrade head` step here on purpose:
+      # backend/tests/integration/conftest.py provisions its own Postgres
+      # (timescale/timescaledb:latest-pg15) and Redis (redis:7-alpine) per
+      # session via testcontainers, using the Docker daemon ubuntu-latest
+      # runners already have, then overwrites DATABASE_URL/REDIS_URL itself.
+      # A GHA services: block here would sit unused. test_alembic_migrations.py
+      # runs Alembic itself, against that same testcontainer database.
+      - name: Run integration tests
+        run: pytest backend/tests/integration/ -m integration -v
+
+  e2e-tests:
+    name: E2E tests
+    needs: [integration-tests]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: timescale/timescaledb:latest-pg15
+        env:
+          POSTGRES_USER: f1user
+          POSTGRES_PASSWORD: f1pass
+          POSTGRES_DB: f1db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Ephemeral CI-local database/cache for this job only — deliberately
+      # NOT read from GitHub Secrets. The real secrets (Day 19 checklist in
+      # CLAUDE.md) point at production Supabase/Upstash, and
+      # test_alembic_migrations.py (run transitively via the integration job,
+      # and this job's own migrate step) issues `DROP SCHEMA public CASCADE`.
+      # Wiring a production secret into this workflow would risk dropping a
+      # real database.
+      DATABASE_URL: postgresql+asyncpg://f1user:f1pass@localhost:5432/f1db
+      TIMESCALE_URL: postgresql+asyncpg://f1user:f1pass@localhost:5432/f1db
+      REDIS_URL: redis://localhost:6379
+      SECRET_KEY: ci-e2e-ephemeral-secret-not-for-production
+      E2E_BASE_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install libgomp1
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Apply migrations
+        run: alembic upgrade head
+
+      # Backgrounded: test_api_flows.py (see backend/tests/e2e/conftest.py's
+      # base_url fixture) makes real HTTP calls against a live server, unlike
+      # the integration job's in-process TestClient. /strategy/simulate also
+      # needs a worker actually consuming prediction_queue to complete.
+      - name: Start backend + worker
+        run: |
+          nohup uvicorn backend.main:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+          nohup celery -A backend.workers.celery_app worker --loglevel=info --pool=solo \
+            -Q telemetry_queue,prediction_queue,alert_queue > celery.log 2>&1 &
+
+      - name: Wait for backend health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then
+              echo "backend is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "backend did not become healthy in time"
+          cat uvicorn.log
+          exit 1
+
+      # No historical race data is seeded here (real ingestion hits the live
+      # FastF1/Ergast API — too slow and network-flaky for CI). session_id
+      # (conftest.py) skips gracefully when no races exist, so this test
+      # currently passes via skip rather than exercising the full journey —
+      # this job still proves the real stack (migrations + API + worker)
+      # boots and answers requests correctly.
+      - name: Run e2e tests
+        run: pytest backend/tests/e2e/ -m e2e --timeout=60 -v
+
+      - name: Show service logs on failure
+        if: failure()
+        run: |
+          echo "--- uvicorn.log ---"; cat uvicorn.log || true
+          echo "--- celery.log ---"; cat celery.log || true
+
+  build-check:
+    name: Docker build check
+    needs: [lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -f infra/docker/Dockerfile.backend .
+
+      - name: Build worker image
+        run: docker build -f infra/docker/Dockerfile.worker .

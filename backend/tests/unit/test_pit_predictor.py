@@ -6,6 +6,8 @@ mechanics (threshold crossing, probability shape, imbalance handling), not real
 pit-strategy behavior — that's covered by integration tests against promoted models.
 """
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -83,7 +85,7 @@ def test_class_probabilities_valid() -> None:
 
     model = _build_model(scale_pos_weight=1.0)
     model.fit(features, target)
-    probabilities = model.predict_proba(features)
+    probabilities = cast(np.ndarray, model.predict_proba(features))
 
     assert probabilities.shape == (n, 2)
     assert np.allclose(probabilities.sum(axis=1), 1.0)
@@ -100,9 +102,9 @@ def test_imbalanced_class_handling() -> None:
     assert result.positive_rate == pytest.approx(df["did_pit_this_lap"].mean())
     assert 0 < result.positive_rate < 0.2
 
-    predicted_probabilities = result.model.predict_proba(df[FEATURE_COLUMNS].to_numpy(dtype=float))[
-        :, 1
-    ]
+    predicted_probabilities = cast(
+        np.ndarray, result.model.predict_proba(df[FEATURE_COLUMNS].to_numpy(dtype=float))
+    )[:, 1]
     assert predicted_probabilities.std() > 0
 
 

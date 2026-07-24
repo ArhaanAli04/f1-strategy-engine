@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -169,7 +170,7 @@ def train_pit_predictor(df: pd.DataFrame) -> PitPredictorTrainResult:
     for train_idx, test_idx in gkf.split(features, target, groups):
         fold_model = _build_model(scale_pos_weight)
         fold_model.fit(features[train_idx], target[train_idx])
-        probs = fold_model.predict_proba(features[test_idx])[:, 1]
+        probs = cast(np.ndarray, fold_model.predict_proba(features[test_idx]))[:, 1]
         if len(np.unique(target[test_idx])) > 1:
             fold_auc.append(float(roc_auc_score(target[test_idx], probs)))
 
@@ -202,5 +203,5 @@ def evaluate_holdout(model: LGBMClassifier, df: pd.DataFrame) -> float:
     """
     features = df[FEATURE_COLUMNS].to_numpy(dtype=float)
     target = df[TARGET_COLUMN].to_numpy(dtype=float)
-    preds = model.predict_proba(features)[:, 1]
+    preds = cast(np.ndarray, model.predict_proba(features))[:, 1]
     return float(np.mean(np.abs(preds - target)))

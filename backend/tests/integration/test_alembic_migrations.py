@@ -64,9 +64,25 @@ def _alembic_config() -> Config:
 async def _reset_to_blank_database() -> None:
     """Drop and recreate the public schema — a truly blank database, no
     alembic_version table, no leftover tables from any other test path.
+
+    Other integration test files share the same DB via
+    database_module.get_engine()'s session-scoped pooled connections (see
+    conftest.py's db_session_factory), which can still hold a lock on a
+    public-schema object when this runs, deadlocking DROP SCHEMA ... CASCADE.
+    Terminating every other backend on this database first (safe here: this
+    is testcontainers' throwaway DB, not a real one — same pattern production
+    maintenance scripts use before a destructive schema change) clears those
+    locks before the drop.
     """
     engine = create_async_engine(get_db_settings().database_url)
     async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            )
+        )
+        await asyncio.sleep(0.5)
         await conn.execute(text("DROP SCHEMA public CASCADE"))
         await conn.execute(text("CREATE SCHEMA public"))
     await engine.dispose()
