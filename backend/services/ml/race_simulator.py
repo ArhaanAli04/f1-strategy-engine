@@ -122,7 +122,7 @@ class RaceSimulationResult:
     driver_distributions: list[DriverPositionDistribution]
 
 
-@numba.njit(cache=True)  # type: ignore[untyped-decorator]
+@numba.njit(cache=True)
 def _advance_lap(
     cumulative_time: npt.NDArray[np.float64],
     tyre_age: npt.NDArray[np.int64],
@@ -177,7 +177,7 @@ def _advance_lap(
                     tyre_age[s, d] = 0
 
 
-@numba.njit(cache=True)  # type: ignore[untyped-decorator]
+@numba.njit(cache=True)
 def _seed_numba_rng(seed: int) -> None:
     np.random.seed(seed)
 

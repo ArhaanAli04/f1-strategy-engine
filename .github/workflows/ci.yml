@@ -35,6 +35,14 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    env:
+      # test_security.py calls get_auth_settings() directly, which requires
+      # SECRET_KEY with no default (backend/core/config.py's AuthSettings).
+      # Locally this is satisfied by a gitignored .env; CI has no .env, so it
+      # must come from the job env instead. A fixed placeholder, not a real
+      # secret — no unit test does anything with this value beyond a
+      # jwt.encode()/decode() round-trip in-process.
+      SECRET_KEY: ci-unit-test-secret-key-not-for-production
     steps:
       - uses: actions/checkout@v4
 
@@ -65,6 +73,14 @@ jobs:
     name: Integration tests
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    env:
+      # Not strictly required today: conftest.py's session-scoped autouse
+      # fixture already does os.environ.setdefault("SECRET_KEY",
+      # "test-secret-key") before any test runs. Set explicitly anyway so
+      # this job doesn't silently depend on that fixture running first if a
+      # future test reads AuthSettings at collection time (module import),
+      # which fixtures can't intercept. Same non-secret placeholder value.
+      SECRET_KEY: test-secret-key
     steps:
       - uses: actions/checkout@v4
 
