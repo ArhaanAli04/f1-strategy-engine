@@ -313,18 +313,18 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    5
-Day:      19
-Status:   GitHub Actions CI pipeline complete. 5 jobs: lint (ruff + 
-          mypy), unit-tests (104 passing, coverage.xml artifact), 
-          integration-tests (testcontainers, no services block needed), 
-          e2e-tests (full stack bring-up: postgres + redis + uvicorn + 
-          Celery worker + health check), build-check (both Dockerfiles). 
-          pytest-timeout added to dev deps. CI badge added to README.
-          Known limitation: e2e job skips test_api_flows.py (no seeded 
-          race data in CI) but proves stack boots correctly.
-Next:     GitHub Actions CD pipeline — build, push ECR, Alembic migrate, Helm deploy
+Day:      20
+Status:   CD pipeline skeleton complete. cd.yml: Job 1 (build-and-push 
+          to ECR) fully implemented, Jobs 2-5 placeholders with real 
+          commands commented and TODO-tagged for Days 22-24. 
+          load-test.yml: manual workflow_dispatch with staging_url, 
+          users (100/500), session_id inputs. production GitHub 
+          Environment created. DEPLOYMENT.md added — local-first 
+          deployment strategy, mobile dev build workflow, demo video plan.
+Next:     Day 21 — Model retraining pipeline + rollback strategy
 Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
-          (fix before Day 22)
+          (fix before Day 22), production environment needs ArhaanAli04 as required reviewer 
+          before Day 24
 ```
 
 ---
