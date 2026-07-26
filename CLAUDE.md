@@ -954,3 +954,19 @@ signal implicitly; explicit temperature adds race-specific noise that
 doesn't generalize across seasons. Revisit when 2+ additional holdout
 seasons available, or try temperature deviation from circuit historical
 mean as engineered feature instead of raw temperature.
+
+
+## Deployment Strategy
+
+**Local-first deployment** — all three clients (web/desktop/mobile) 
+connect to the locally hosted Docker stack during development and demos.
+
+- Backend: Docker Compose (all services on localhost)
+- Web app: Vercel (frontend only, points to local backend via ngrok for demos)
+- Desktop app: Tauri native build, connects to local backend
+- Mobile app: Expo Development Build on iPhone, connects to local backend 
+  via LAN IP (same WiFi network required)
+- Demo videos: recorded from each client, stored in demos/ directory
+
+No cloud VM deployment during the build — see DEPLOYMENT.md for full 
+strategy including ngrok demo workflow and future Render deployment plan.
