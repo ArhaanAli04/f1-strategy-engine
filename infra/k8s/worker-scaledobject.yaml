@@ -1,0 +1,47 @@
+# Celery worker KEDA ScaledObject — written Day 21, applied Day 22 once the
+# EKS/Docker Desktop Kubernetes cluster, Helm chart, and KEDA operator exist.
+# Do NOT apply today; requires `keda.sh/v1alpha1` CRDs (KEDA operator install
+# is a Day 22 prerequisite, not covered here).
+#
+# Deployment name (f1-strategy-engine-worker) is a placeholder matching
+# cd.yml's Helm release name (f1-strategy-engine) + "-worker" — confirm and
+# update against the actual generated resource name once the Helm chart is
+# written on Day 22.
+#
+# Scales on prediction_queue's Redis list length (Celery's redis transport
+# implements queues as plain Redis lists — confirmed via `redis-cli llen
+# prediction_queue` in CLAUDE.md's Day 18 load test notes), not CPU: the Day
+# 18 500-user load test found a single --pool=solo worker takes 65-88s per
+# run_race_simulation task, so queue backlog — not worker CPU — is the real
+# signal that more replicas are needed (see CLAUDE.md's "--pool=solo cannot
+# sustain race-day simulate traffic" note).
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: f1-strategy-engine-redis-auth
+  namespace: production
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: f1-strategy-engine-redis-secret # placeholder Secret name, Day 22
+      key: REDIS_PASSWORD
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: f1-strategy-engine-worker
+  namespace: production
+spec:
+  scaleTargetRef:
+    name: f1-strategy-engine-worker
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 120
+  triggers:
+    - type: redis
+      metadata:
+        address: f1-strategy-engine-redis:6379 # placeholder Service name, Day 22
+        listName: prediction_queue
+        listLength: "50"
+      authenticationRef:
+        name: f1-strategy-engine-redis-auth

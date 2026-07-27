@@ -18,11 +18,18 @@ If a tire_deg compound has no holdout-season data (e.g. a dry 2025 means zero
 WET laps), promotion falls back to comparing cv_mae instead of a true holdout
 score — see promotion_basis in that model's metrics.json.
 
-pit_predictor is trained on laps _fetch_laps() returns regardless of is_valid,
+pit_predictor is trained on laps fetch_laps_from_db() returns regardless of is_valid,
 since the pit/in/out laps FastF1 marks invalid are exactly its positive-class
 target. tire_deg_model and safety_car_model still filter to is_valid laps only.
 
 Run via: make train
+
+encode_categoricals, split_train_holdout, s3_client, download_metrics, upload_model,
+serialize_evaluate_and_upload, add_predicted_life_remaining, and add_safety_car_probability
+are public (Day 21) so retrain_incremental.py can reuse the same encode/train/evaluate/
+promote logic against a differently-sourced DataFrame (S3 parquet + live FastF1 fetch,
+no DB) instead of duplicating it. fetch_laps_from_db/fetch_stints_from_db stay DB-specific
+and are only reused by export_training_data.py, which populates that parquet cache.
 """
 
 import asyncio
@@ -65,7 +72,7 @@ COMPOUND_TO_FILENAME = {
 MODEL_DIR = Path("models")
 
 
-async def _fetch_laps() -> pd.DataFrame:
+async def fetch_laps_from_db() -> pd.DataFrame:
     """Fetch all timed laps for 2018-2025 with circuit/season context, including invalid ones.
 
     is_valid is included (not filtered) because pit_predictor's positive class is
@@ -127,7 +134,7 @@ async def _fetch_laps() -> pd.DataFrame:
     )
 
 
-async def _fetch_stints() -> pd.DataFrame:
+async def fetch_stints_from_db() -> pd.DataFrame:
     """Fetch tire_stints rows needed to label pit laps.
 
     Args: None.
@@ -155,7 +162,7 @@ async def _fetch_stints() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["session_id", "driver_id", "stint_number", "start_lap"])
 
 
-def _encode_categoricals(laps: pd.DataFrame) -> pd.DataFrame:
+def encode_categoricals(laps: pd.DataFrame) -> pd.DataFrame:
     """Add circuit/driver/compound integer codes, fit across the full 2018-2025 set.
 
     Encoding across the combined set (rather than fitting on train and applying to
@@ -174,13 +181,34 @@ def _encode_categoricals(laps: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _split(laps: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    train = laps[laps["season"] <= TRAIN_SEASON_END].copy()
-    holdout = laps[laps["season"] == HOLDOUT_SEASON].copy()
+def split_train_holdout(
+    laps: pd.DataFrame,
+    train_seasons: set[int] | None = None,
+    holdout_season: int = HOLDOUT_SEASON,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Split laps into a train set (explicit season list) and a fixed holdout season.
+
+    Args:
+        laps: Combined laps frame with a "season" column.
+        train_seasons: Seasons to include in training. Defaults to
+            {TRAIN_SEASON_START..TRAIN_SEASON_END} (the historical base range) when
+            not given — this preserves train_all()'s original behavior. Callers doing
+            incremental retraining (e.g. retrain_incremental.py) pass an explicit set
+            that also includes the current season's completed rounds.
+        holdout_season: Season held out for MAE comparison. Defaults to HOLDOUT_SEASON
+            so incremental retraining stays comparable against the same benchmark the
+            base production models were evaluated against.
+    Returns:
+        (train, holdout) DataFrames.
+    """
+    if train_seasons is None:
+        train_seasons = set(range(TRAIN_SEASON_START, TRAIN_SEASON_END + 1))
+    train = laps[laps["season"].isin(train_seasons)].copy()
+    holdout = laps[laps["season"] == holdout_season].copy()
     return train, holdout
 
 
-def _s3_client() -> Any:
+def s3_client() -> Any:
     settings = get_aws_settings()
     return boto3.client(
         "s3",
@@ -190,7 +218,7 @@ def _s3_client() -> Any:
     )
 
 
-def _download_metrics(
+def download_metrics(
     client: Any, bucket: str, tag: str, filename: str
 ) -> dict[str, float | str] | None:
     try:
@@ -202,7 +230,7 @@ def _download_metrics(
     return dict(json.loads(obj["Body"].read()))
 
 
-def _upload(
+def upload_model(
     client: Any,
     bucket: str,
     tag: str,
@@ -218,7 +246,7 @@ def _upload(
     )
 
 
-def _serialize_evaluate_and_upload(
+def serialize_evaluate_and_upload(
     client: Any,
     bucket: str,
     version_tag: str,
@@ -241,16 +269,16 @@ def _serialize_evaluate_and_upload(
     local_path = MODEL_DIR / filename
     joblib.dump(model_obj, local_path)
 
-    _upload(client, bucket, version_tag, filename, local_path, metrics)
+    upload_model(client, bucket, version_tag, filename, local_path, metrics)
 
-    current_production = _download_metrics(client, bucket, "production", filename)
+    current_production = download_metrics(client, bucket, "production", filename)
     current_holdout_mae = (
         float(current_production["holdout_mae"]) if current_production is not None else None
     )
     holdout_mae = float(metrics["holdout_mae"])
     should_promote = current_holdout_mae is None or holdout_mae < current_holdout_mae
     if should_promote:
-        _upload(client, bucket, "production", filename, local_path, metrics)
+        upload_model(client, bucket, "production", filename, local_path, metrics)
 
     logger.info(
         "%s: holdout_mae=%.5f promoted=%s basis=%s (previous production holdout_mae=%s)",
@@ -263,7 +291,7 @@ def _serialize_evaluate_and_upload(
     return should_promote
 
 
-def _add_predicted_life_remaining(
+def add_predicted_life_remaining(
     df: pd.DataFrame, tire_deg_results: dict[str, tire_deg_model.TireDegTrainResult]
 ) -> pd.Series:
     """Estimate predicted_life_remaining per row using each row's compound-specific model.
@@ -298,7 +326,7 @@ def _add_predicted_life_remaining(
     return out
 
 
-def _add_safety_car_probability(
+def add_safety_car_probability(
     df: pd.DataFrame, sc_model: safety_car_model.SafetyCarModel
 ) -> pd.Series:
     """Vectorized P(SC/VSC in next 1 lap) for every row, from the fitted rate model.
@@ -329,24 +357,24 @@ async def train_all() -> None:
     MODEL_DIR.mkdir(exist_ok=True)
 
     logger.info("Fetching laps and stints (%d-%d)...", TRAIN_SEASON_START, HOLDOUT_SEASON)
-    raw_laps = await _fetch_laps()
-    stints = await _fetch_stints()
+    raw_laps = await fetch_laps_from_db()
+    stints = await fetch_stints_from_db()
     await get_engine().dispose()
 
     # Pace-based models (tire_deg, safety_car) only want is_valid laps.
     laps = raw_laps[raw_laps["is_valid"]].drop(columns=["is_valid"]).copy()
     laps["laps_in_session"] = laps.groupby("session_id")["lap_number"].transform("max")
-    laps = _encode_categoricals(laps)
-    train_laps, holdout_laps = _split(laps)
+    laps = encode_categoricals(laps)
+    train_laps, holdout_laps = split_train_holdout(laps)
     logger.info("Train laps: %d, holdout laps: %d", len(train_laps), len(holdout_laps))
 
     # pit_predictor needs the pit/in/out laps is_valid excludes — they're its label.
     pit_laps = raw_laps.drop(columns=["is_valid"]).copy()
     pit_laps["laps_in_session"] = pit_laps.groupby("session_id")["lap_number"].transform("max")
-    pit_laps = _encode_categoricals(pit_laps)
-    pit_train_laps, pit_holdout_laps = _split(pit_laps)
+    pit_laps = encode_categoricals(pit_laps)
+    pit_train_laps, pit_holdout_laps = split_train_holdout(pit_laps)
 
-    client = _s3_client()
+    client = s3_client()
     bucket = get_aws_settings().aws_bucket_name
     version_tag = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
@@ -383,7 +411,7 @@ async def train_all() -> None:
             holdout_mae = tire_deg_model.evaluate_holdout(result.pipeline, c_holdout)
             promotion_basis = "holdout"
 
-        _serialize_evaluate_and_upload(
+        serialize_evaluate_and_upload(
             client,
             bucket,
             version_tag,
@@ -404,7 +432,7 @@ async def train_all() -> None:
     sc_holdout = safety_car_model.build_lap_flags(holdout_laps)
     sc_model = safety_car_model.train_safety_car_model(sc_train)
     sc_holdout_mae = safety_car_model.evaluate_holdout(sc_model, sc_holdout)
-    _serialize_evaluate_and_upload(
+    serialize_evaluate_and_upload(
         client,
         bucket,
         version_tag,
@@ -420,18 +448,18 @@ async def train_all() -> None:
     pit_train = tire_deg_model.add_engineered_features(pit_train)
     pit_holdout = tire_deg_model.add_engineered_features(pit_holdout)
 
-    pit_train["predicted_life_remaining"] = _add_predicted_life_remaining(
+    pit_train["predicted_life_remaining"] = add_predicted_life_remaining(
         pit_train, tire_deg_results
     )
-    pit_holdout["predicted_life_remaining"] = _add_predicted_life_remaining(
+    pit_holdout["predicted_life_remaining"] = add_predicted_life_remaining(
         pit_holdout, tire_deg_results
     )
-    pit_train["safety_car_probability"] = _add_safety_car_probability(pit_train, sc_model)
-    pit_holdout["safety_car_probability"] = _add_safety_car_probability(pit_holdout, sc_model)
+    pit_train["safety_car_probability"] = add_safety_car_probability(pit_train, sc_model)
+    pit_holdout["safety_car_probability"] = add_safety_car_probability(pit_holdout, sc_model)
 
     pit_result = pit_predictor.train_pit_predictor(pit_train)
     pit_holdout_mae = pit_predictor.evaluate_holdout(pit_result.model, pit_holdout)
-    _serialize_evaluate_and_upload(
+    serialize_evaluate_and_upload(
         client,
         bucket,
         version_tag,

@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def _load_session(season: int, round_number: int, session_type: str) -> fastf1.core.Session:
+def load_session(season: int, round_number: int, session_type: str) -> fastf1.core.Session:
     settings = get_ml_settings()
     os.makedirs(settings.fastf1_cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(settings.fastf1_cache_dir)
@@ -82,7 +82,7 @@ def _load_session(season: int, round_number: int, session_type: str) -> fastf1.c
     return session
 
 
-def _lap_time_to_seconds(value: pd.Timedelta) -> float | None:
+def lap_time_to_seconds(value: pd.Timedelta) -> float | None:
     if pd.isna(value):
         return None
     return float(value.total_seconds())
@@ -113,7 +113,7 @@ async def _upsert_lap_data(
                     "session_id": session_id,
                     "driver_id": driver_id,
                     "lap_number": int(lap["LapNumber"]),
-                    "lap_time_seconds": _lap_time_to_seconds(lap["LapTime"]),
+                    "lap_time_seconds": lap_time_to_seconds(lap["LapTime"]),
                     "compound": or_default(lap["Compound"], "UNKNOWN"),
                     "tyre_age_laps": (int(lap["TyreLife"]) if not pd.isna(lap["TyreLife"]) else 0),
                     "is_valid": (
@@ -123,9 +123,9 @@ async def _upsert_lap_data(
                     "track_status": (
                         str(lap["TrackStatus"]) if not pd.isna(lap["TrackStatus"]) else None
                     ),
-                    "sector1_seconds": _lap_time_to_seconds(lap["Sector1Time"]),
-                    "sector2_seconds": _lap_time_to_seconds(lap["Sector2Time"]),
-                    "sector3_seconds": _lap_time_to_seconds(lap["Sector3Time"]),
+                    "sector1_seconds": lap_time_to_seconds(lap["Sector1Time"]),
+                    "sector2_seconds": lap_time_to_seconds(lap["Sector2Time"]),
+                    "sector3_seconds": lap_time_to_seconds(lap["Sector3Time"]),
                 }
             )
         except Exception as exc:  # noqa: BLE001 — corrupt lap row, skip and continue
@@ -193,7 +193,7 @@ async def _upsert_tire_stints(
 
 
 async def ingest(season: int, round_number: int, session_type: str) -> None:
-    fastf1_session = _load_session(season, round_number, session_type)
+    fastf1_session = load_session(season, round_number, session_type)
 
     engine = get_engine()
     session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(

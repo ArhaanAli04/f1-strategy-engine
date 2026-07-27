@@ -725,6 +725,30 @@ Kubernetes deployment.
   a longer, rate-limit-paced provisioning pass) or give the rate-limit
   budget more headroom accounted for in the pool-size formula itself.
 
+- **One-time manual action required before train-models.yml can run
+  end-to-end:** Run export_training_data.py once against the local Docker
+  Postgres to upload the 2018-2025 base training corpus to S3:
+
+  ```bash
+  docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+  python -m backend.scripts.export_training_data
+  ```
+
+  This uploads laps.parquet and stints.parquet to
+  s3://f1-strategy-models/training-data/base/. Only needs to run once — the
+  CI workflow reads from S3 on every training run. Re-run only if the base
+  corpus changes (new historical seasons added). Do this before triggering
+  train-models.yml manually for the first time.
+
+- **kubectl apply --dry-run=client not yet validated:**
+  infra/k8s/hpa.yaml, worker-scaledobject.yaml, and
+  race-weekend-cronjob.yaml were validated with a YAML parser only —
+  kubectl dry-run requires an API server connection which needs a running
+  cluster. Full validation with kubectl apply --dry-run=client will happen
+  on Day 22 when Docker Desktop Kubernetes is enabled. At that point also
+  confirm Deployment names match what the Helm chart generates and update
+  placeholder names if needed.
+
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
 pyproject.toml lower-bound-only pins caused a silent compatibility 
