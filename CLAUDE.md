@@ -313,18 +313,20 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    5
-Day:      20
-Status:   CD pipeline skeleton complete. cd.yml: Job 1 (build-and-push 
-          to ECR) fully implemented, Jobs 2-5 placeholders with real 
-          commands commented and TODO-tagged for Days 22-24. 
-          load-test.yml: manual workflow_dispatch with staging_url, 
-          users (100/500), session_id inputs. production GitHub 
-          Environment created. DEPLOYMENT.md added — local-first 
-          deployment strategy, mobile dev build workflow, demo video plan.
-Next:     Day 21 — Model retraining pipeline + rollback strategy
+Day:      21
+Status:   Model retraining pipeline complete. export_training_data.py 
+          (one-time S3 parquet export), retrain_incremental.py (CI 
+          entrypoint — base parquet + live FastF1 2026 fetch, no DB 
+          needed), train-models.yml (workflow_dispatch live, cron TODO 
+          Day 23), per-model promotion to :production tag. docs/runbook.md 
+          written. K8s manifests written but not applied: hpa.yaml, 
+          worker-scaledobject.yaml, race-weekend-cronjob.yaml. 
+          pyarrow added to deps. 104 tests passing, 113 files mypy clean.
+Next:     Day 22 — Kubernetes manifests, Helm chart, Docker Desktop K8s
 Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
           (fix before Day 22), production environment needs ArhaanAli04 as required reviewer 
-          before Day 24
+          before Day 24, Run export_training_data.py once locally before triggering 
+          train-models.yml (see CLAUDE.md deferred wiring)
 ```
 
 ---
