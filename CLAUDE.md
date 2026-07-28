@@ -489,97 +489,6 @@ Slack webhook handling.
   short-lived WebSocket ticket — exchange via REST before connection, 
   use one-time token for WS auth instead of the full JWT.
 
-- **WS telemetry broadcast: redundant per-connection enrichment fan-out —
-  fix before Day 22 Kubernetes deployment.** `_forward_lap_events` in
-  `backend/apis/v1/telemetry.py` runs one `pubsub.listen()` loop per WS
-  connection, and on every lap-completion message each loop independently
-  calls `telemetry_service.get_live_car_channels(...)` — the same Redis GET,
-  for the same cache key, once per connected client, per event. At N
-  concurrent viewers that's Nx redundant Redis round trips per event instead
-  of one. Measured via `tests/load/ws_load_test.py --connections 200
-  --messages 50 --rate 20` (2026-07-16, after the two pool fixes below were
-  already applied): only ~24/50 messages delivered per connection on average
-  before the test's drain window closed, p50 latency ~2.2s, p95 ~3.6s, max
-  ~4.0s — versus a clean 20-connection run at the same rate (p50 16ms, p99
-  47ms, 0 loss). Bumping Redis `max_connections` further would only raise the
-  ceiling, not remove the redundancy, since every extra viewer still adds
-  another full copy of the same lookup work per event.
-
-  Required fix: replace the one-pubsub-per-connection model with a single
-  shared listener per session — one `pubsub.listen()` task (keyed by
-  `session_id`) that receives each lap-completion message once, calls
-  `get_live_car_channels` once, builds one `TelemetryStreamMessage`, and
-  fans it out by iterating the set of WebSocket connections currently
-  attached to that session (a session_id -> set[WebSocket] registry, started
-  on first subscriber and torn down when the last one disconnects — same
-  lifecycle shape as a per-session singleton, not a per-request dependency).
-  `_watch_for_disconnect` per-connection can stay as-is for detecting client
-  disconnects; only the listen+enrich+send path needs to move from
-  per-connection to per-session. Re-run `ws_load_test.py` at
-  `--connections 200` after the change and confirm delivery returns to ~0
-  loss with sub-100ms p99, matching the 20-connection baseline above.
-
-  Two related pool-sizing fixes already landed alongside this finding
-  (2026-07-16, pre-Day-14 load testing pass) and should NOT be re-litigated
-  when the fan-out fix lands — they're independent, already-verified issues:
-  - `websocket_telemetry` used to take `db: Annotated[AsyncSession,
-    Depends(get_db)]`, which FastAPI keeps open for the WS connection's
-    entire lifetime even though the DB is only needed once at connect time
-    (`resolve_season_round`). With `pool_size=10 + max_overflow=20` (30
-    total, `core/database.py`), this capped concurrent viewers at ~30
-    regardless of pod scaling. Fixed by resolving season/round through a
-    short-lived module-local session factory (same pattern as
-    `workers/*.py`'s `_get_session_factory`) before entering the streaming
-    loop, instead of a request-scoped dependency held for the connection.
-  - Redis pub/sub subscriptions pin a dedicated connection from the shared
-    pool for the subscription's lifetime (a redis-py constraint, not a bug).
-    `core/redis_client.py`'s pool was `max_connections=50`, capping
-    concurrent viewers there too. Raised to 250 to give the 200-connection
-    load test headroom on top of ordinary REST-route command traffic. This
-    number will need revisiting once the fan-out fix above lands and
-    replaces N pubsub connections with 1 per session.
-
-  **Corroborating evidence, pre-Day-14 fix pass (2026-07-18):** a combined
-  Locust run (`-u 100 -r 10 --run-time 2m`, `RaceDayViewerUser` +
-  `StrategyUser` + `WebSocketUser` together, `replay_publisher.py --rate 5`
-  feeding real WS traffic) — run to verify the `/races/current` single-flight
-  lock and the `/strategy/simulate` dedicated-executor fix below — showed
-  `POST /strategy/{session_id}/simulate`'s enqueue latency regress back to
-  ~12s p50, even though both of those fixes were independently confirmed
-  working in isolated (WS-free) runs on the same day (p50 630-2400ms).
-  `redis-cli slowlog get` during the combined run showed the rate limiter's
-  own `EVALSHA` check — normally sub-millisecond — taking 12-16ms, consistent
-  with Redis's single-threaded command queue backing up under load rather
-  than any one code path being newly slow. Given `redis-1` is the same
-  instance serving cache reads/writes, the Celery broker, rate-limit checks,
-  and every WS pub/sub subscription, this fan-out's Nx-per-event redundant
-  `get_live_car_channels` GETs (up to ~33 concurrent `WebSocketUser`s at
-  5 events/sec in this run) is the most likely source of the extra command
-  volume dragging down unrelated Redis-adjacent paths — not a new bottleneck,
-  the same one already scoped above, now visible because this was the first
-  load test to run WS + overview + simulate + races/current simultaneously
-  (Day 13's baseline and this session's earlier re-tests each isolated a
-  subset). Supports doing this fix before Day 22 as planned, rather than
-  deferring further — its blast radius already reaches beyond `/ws/telemetry`
-  itself once real WS traffic is in the mix.
-
-  **Corroborating evidence, Day 18 (2026-07-23), at the strongest scale
-  yet:** the 500-user race-day load test (`locust -u 500 -r 20 --run-time
-  10m`, `WebSocketUser` weighted to ~206 concurrent connections,
-  `replay_publisher.py --rate 5`) showed 13139/13387 (98.15%) of WS
-  connections failing outright with `ConnectionClosedError` (`keepalive
-  ping timeout`, close code 1011) — a step up from the pre-Day-14 combined
-  run's milder degradation (~24/50 messages delivered per connection at
-  200 connections, not outright failure). At this connection count the
-  per-connection redundant `get_live_car_channels` Redis GETs back up the
-  server badly enough that it can no longer service WS keepalive pings in
-  time at all. No new root cause — this is the same fan-out already scoped
-  above, now demonstrated at a scale close to real race-day viewer counts.
-  See `docs/load_test_results.md`'s 2026-07-23 500-user run entry for the
-  full per-endpoint breakdown. Supports fixing this before Day 22 as one of
-  the two highest-priority items alongside the DB connection pool
-  exhaustion finding below — both block any real race-day-scale deployment.
-
 - **Cache stampede fix does not address the underlying 16-17s compute
   floor:** the single-flight lock added to `cache_service.cacheable` (see
   Notes: "Cache stampede single-flight lock") removes the *redundant*
@@ -619,10 +528,12 @@ Slack webhook handling.
   same enqueue latency regress back to ~12s p50 even with the
   dedicated-executor fix in place, traced to Redis's single-threaded
   command queue backing up under the WS telemetry fan-out's
-  Nx-redundant-per-event `get_live_car_channels` GETs (see the "WS
-  telemetry broadcast: redundant per-connection enrichment fan-out" bullet
-  above for the full analysis and required fix). No separate action needed
-  on this bullet — fixing the fan-out should resolve this regression too.
+  Nx-redundant-per-event `get_live_car_channels` GETs (see Notes: "WS
+  telemetry broadcast fan-out redundancy" for the fix). **Confirmed
+  resolved:** the 2026-07-28 100-user combined-load re-run (after the
+  fan-out fix landed) showed this enqueue latency back to p50=1900ms,
+  matching the isolated dedicated-executor fix's 630-2400ms range — fixing
+  the fan-out did resolve this regression as predicted.
 
 - **get_competitor_predicted_strategy 16-17s cold compute floor:**
   `/strategy/{session_id}/overview` has p50=55ms (cache hits) but 
@@ -646,9 +557,9 @@ Slack webhook handling.
   16-17s concurrent-load floor above: an isolated single call finishes in
   under 1s even on the pre-refactor code, so that floor is DB-pool/
   concurrency-bound (queuing under ~100 concurrent Locust users), not pure
-  per-call model overhead. The remaining floor will be addressed alongside
-  item #4 (WS fan-out) and item #5 (DB connection pool sizing) below, once
-  the WS fan-out fix lands and a clean load test can attribute the rest.
+  per-call model overhead. The WS fan-out fix has since landed (see Notes:
+  "WS telemetry broadcast fan-out redundancy") — the remaining floor is DB
+  connection pool sizing (below), still open.
 
 - **DB connection pool exhaustion at 500 concurrent users — fix before
   Day 22 Kubernetes deployment.** `core/database.py`'s
@@ -686,6 +597,15 @@ Slack webhook handling.
   a faster-failing timeout so an overloaded request returns a clean 503
   instead of hanging up to 30s per attempt. Fix before Day 22 Kubernetes
   deployment — this blocks any real race-day-scale traffic today.
+
+  **Recurred, 2026-07-28, at 100-user combined load after the WS fan-out
+  fix landed:** `/strategy/{session_id}/overview` showed 5 failures (4
+  `RemoteDisconnected`, 1 `ConnectionAbortedError`) — the same symptom
+  pattern this bullet already attributes to pool exhaustion, not a new
+  cause. With the WS fan-out no longer masking/compounding it (see Notes:
+  "WS telemetry broadcast fan-out redundancy" — that fix landed the same
+  day and is confirmed working), this is now the clearest remaining
+  bottleneck and the next priority before Day 22.
 
 - **Single `--pool=solo` Celery worker cannot sustain race-day simulate
   traffic — fix via multiple worker pods on Day 22.** This project's
@@ -904,6 +824,49 @@ that even an account unlucky enough to back only the heaviest user type
 (RaceDayViewerUser, up to ~15/min) stays under half of `core/rate_limit.py`'s
 60/min authenticated bucket — see `_MAX_SIMULATED_USERS_PER_ACCOUNT`'s
 derivation in the module for the exact math.
+
+**WS telemetry broadcast fan-out redundancy (✅ fixed, 2026-07-28):**
+Replaced the one-`pubsub.listen()`-loop-per-connection model in
+`backend/apis/v1/telemetry.py` with a single shared `_SessionBroadcaster`
+per `session_id`: one instance is created on the first subscriber and torn
+down on the last disconnect (a module-level `_broadcasters` registry
+guarded by one `asyncio.Lock` — the same per-session-singleton lifecycle
+originally scoped, not a per-request dependency). Its one `pubsub.listen()`
+loop calls `get_live_car_channels` exactly once per lap-completion event,
+builds one `TelemetryStreamMessage`, and fans it out to every connection
+currently registered on that broadcaster — eliminating the Nx-redundant-
+per-event Redis GET this entry originally tracked. The broadcaster owns its
+own Redis client, built from the connecting request's `connection_pool`
+rather than its DI-scoped client, since that specific client can be
+`aclose()`'d by a *different* viewer's disconnect while the broadcaster
+itself is still serving other connections. Per-connection disconnect
+detection (`_watch_for_disconnect`) is unchanged — only the
+listen+enrich+send path moved from per-connection to per-session. A
+per-connection `websocket.send_text()` inside the shared loop is wrapped in
+its own try/except so one dead connection can't break delivery to the rest.
+
+Verified:
+- `tests/load/ws_load_test.py --connections 200 --messages 50 --rate 20`:
+  50/50 messages delivered per connection (was ~24/50), p50=31ms (was
+  ~2200ms), p95=47ms, p99=63ms, max=78ms, 0 connection failures — beats the
+  original clean 20-connection baseline (p50 16ms, p99 47ms).
+- Confirmed under combined load: 100-user Locust run (`-u 100 -r 10
+  --run-time 2m`, `replay_publisher.py --rate 5`) — 3090 WS messages
+  delivered, 0 failures, p99=94ms. `POST /strategy/{session_id}/simulate`
+  enqueue latency was back to p50=1900ms (matching the isolated
+  dedicated-executor fix's 630-2400ms range), not the ~12,000ms
+  combined-load regression this same redundancy previously caused via
+  Redis's single-threaded command queue backing up. See
+  `docs/load_test_results.md`'s 2026-07-28 entry for the full breakdown.
+- New regression test: `test_ws_fans_out_from_one_shared_broadcaster` in
+  `tests/integration/test_websocket.py` — two simultaneous connections to
+  one session_id, one publish, asserts both receive the identical envelope
+  and `get_live_car_channels` is called exactly once.
+- `core/redis_client.py`'s `max_connections=250` was sized for the old
+  N-pubsub-connections-per-session model; now only one pubsub connection is
+  pinned per active session regardless of viewer count, so this ceiling has
+  headroom to spare. Left unchanged — no evidence yet it needs lowering,
+  and lowering it isn't necessary for correctness.
 
 ## Deferred Telemetry Features
 

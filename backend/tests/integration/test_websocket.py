@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from datetime import date
+from typing import Any
 
 import pytest
 import redis as sync_redis
@@ -18,6 +19,7 @@ from backend.core.metrics import f1_active_websocket_connections
 from backend.models.driver import Driver
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
+from backend.services import telemetry_service
 from backend.tests.integration.conftest import seed_via_test_client
 
 
@@ -109,6 +111,73 @@ async def test_ws_receives_message_on_lap_completion(
     assert envelope["data"]["driver_id"] == str(driver_id)
     assert envelope["data"]["lap_number"] == 12
     assert envelope["data"]["compound"] == "MEDIUM"
+
+
+@pytest.mark.integration
+async def test_ws_fans_out_from_one_shared_broadcaster(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    redis_container: RedisContainer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two connections to the same session_id must share one _SessionBroadcaster:
+    a single publish should reach both connections with the identical
+    envelope, and get_live_car_channels — the per-message enrichment lookup —
+    must be called exactly once, not once per connection. This is the core
+    regression test for the WS fan-out fix (see CLAUDE.md's "WS telemetry
+    broadcast: redundant per-connection enrichment fan-out" deferred-wiring
+    entry): before the fix, each connection ran its own pubsub loop and
+    independently re-ran this lookup on every event.
+    """
+    session_id, driver_id = _seed_session(authenticated_client, db_session_factory)
+    access_token = authenticated_client.headers["Authorization"].split(" ", 1)[1]
+
+    call_count = 0
+    original_get_live_car_channels = telemetry_service.get_live_car_channels
+
+    async def _counting_get_live_car_channels(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        return await original_get_live_car_channels(*args, **kwargs)
+
+    monkeypatch.setattr(telemetry_service, "get_live_car_channels", _counting_get_live_car_channels)
+
+    publisher = sync_redis.Redis(
+        host=redis_container.get_container_host_ip(),
+        port=int(redis_container.get_exposed_port(6379)),
+    )
+    try:
+        with (
+            authenticated_client.websocket_connect(
+                f"/api/v1/ws/telemetry/{session_id}?token={access_token}"
+            ) as ws_a,
+            authenticated_client.websocket_connect(
+                f"/api/v1/ws/telemetry/{session_id}?token={access_token}"
+            ) as ws_b,
+        ):
+            lap_summary = {
+                "driver_id": str(driver_id),
+                "session_id": str(session_id),
+                "lap_number": 7,
+                "lap_time_seconds": 88.5,
+                "compound": "HARD",
+                "sector1_seconds": 29.0,
+                "sector2_seconds": 30.0,
+                "sector3_seconds": 29.5,
+            }
+            publisher.publish(f"f1:telemetry:{session_id}:laps", json.dumps(lap_summary))
+
+            raw_a = await asyncio.wait_for(asyncio.to_thread(ws_a.receive_text), timeout=2.0)
+            raw_b = await asyncio.wait_for(asyncio.to_thread(ws_b.receive_text), timeout=2.0)
+    finally:
+        publisher.close()
+
+    assert raw_a == raw_b
+    envelope = json.loads(raw_a)
+    assert envelope["event"] == "lap_completed"
+    assert envelope["data"]["driver_id"] == str(driver_id)
+    assert envelope["data"]["lap_number"] == 7
+    assert call_count == 1
 
 
 @pytest.mark.integration
