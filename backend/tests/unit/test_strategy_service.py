@@ -263,7 +263,7 @@ async def test_get_competitor_predicted_strategy_returns_prediction_per_driver(
     # Constant high pit probability — crosses ALERT_THRESHOLD on the very first
     # offset, giving a deterministic predicted_pit_lap for every driver.
     pit_model = MagicMock()
-    pit_model.predict_proba.return_value = np.array([[0.2, 0.8]])
+    pit_model.predict_proba.side_effect = lambda features: np.tile([0.2, 0.8], (len(features), 1))
     tire_pipeline = _fit_slope_pipeline(slope=0.2, seed=9)
     monkeypatch.setattr(
         strategy_service,

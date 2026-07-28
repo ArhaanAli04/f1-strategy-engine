@@ -796,71 +796,105 @@ async def get_overcut_score(
 # --- get_competitor_predicted_strategy ---
 
 
-def _first_pit_lap_over_threshold(
+def _first_pit_laps_over_threshold_batch(
     pit_model: Any,
-    tire_deg_pipeline: Any | None,
-    compound_encoded: int,
-    driver_code: int,
+    models: dict[str, Any],
+    driver_codes: np.ndarray,
+    compounds: list[str],
     circuit_code: int,
-    current_lap: int,
-    tyre_age_laps: int,
-    position: int,
-    gap_to_ahead: float,
-    gap_to_behind: float,
-    safety_car_probability: float,
+    current_laps: np.ndarray,
+    tyre_ages: np.ndarray,
+    positions: np.ndarray,
+    gaps_to_ahead: np.ndarray,
+    gaps_to_behind: np.ndarray,
+    safety_car_probabilities: np.ndarray,
     total_laps: int,
-) -> tuple[int, float]:
-    """Roll pit_predictor forward lap-by-lap until it crosses pit_predictor.ALERT_THRESHOLD.
+) -> tuple[np.ndarray, np.ndarray]:
+    """Roll pit_predictor forward lap-by-lap, for every driver at once, until each
+    crosses pit_predictor.ALERT_THRESHOLD.
+
+    Same per-driver math as the single-driver version this replaces, just
+    vectorised across drivers at each lap offset instead of looping
+    driver-then-offset: with ~20 drivers and up to COMPETITOR_STRATEGY_HORIZON_LAPS
+    offsets, the old one-row-per-call approach made up to 300 separate
+    pit_model.predict_proba/tire_deg predict_life_remaining_batch calls, each
+    paying fixed per-call model overhead — the confirmed dominant cost behind
+    get_competitor_predicted_strategy's 16-17s cold-compute floor (see
+    CLAUDE.md's Deferred Wiring). This makes at most COMPETITOR_STRATEGY_HORIZON_LAPS
+    batched pit_model calls (fewer once some drivers cross the threshold and
+    drop out of the active set), further grouped by compound for the tire_deg
+    life-remaining sub-call — a different pipeline object per compound, so
+    those can't be merged across compounds the way pit_model's single unified
+    model can be.
 
     gap_to_ahead/behind and safety_car_probability are held constant at the
     caller-supplied values — see module docstring for why no forward gap/SC
     model is available here.
 
-    Args: see pit_predictor.FEATURE_COLUMNS for feature semantics.
+    Args: one entry per driver (arrays/list all the same length n, in the
+        same order); see pit_predictor.FEATURE_COLUMNS for feature semantics.
     Returns:
-        (predicted_pit_lap, pit_probability_at_that_lap). If the threshold is
-        never crossed within the horizon, returns the horizon's last lap and
-        its probability.
+        (predicted_pit_lap, pit_probability_at_that_lap) arrays, one entry
+        per driver. For any driver who never crosses the threshold within
+        their horizon, holds that driver's horizon-final lap and probability
+        — same fallback as the single-driver version.
     """
-    horizon = min(COMPETITOR_STRATEGY_HORIZON_LAPS, max(total_laps - current_lap, 1))
-    last_lap, last_prob = current_lap, 0.0
-    for offset in range(1, horizon + 1):
-        lap_number = current_lap + offset
-        future_tyre_age = tyre_age_laps + offset
-        life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
-        if tire_deg_pipeline is not None:
-            life_remaining = float(
-                tire_deg_model.predict_life_remaining_batch(
-                    tire_deg_pipeline,
-                    np.array([lap_number]),
-                    np.array([compound_encoded]),
-                    np.array([future_tyre_age]),
-                    np.array([0.0]),
-                    np.array([circuit_code]),
-                    np.array([driver_code]),
-                )[0]
-            )
-        fuel_load_est = max(
-            tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1)), 0.0
+    n = len(current_laps)
+    horizon = np.minimum(COMPETITOR_STRATEGY_HORIZON_LAPS, np.maximum(total_laps - current_laps, 1))
+    last_lap = current_laps.copy()
+    last_prob = np.zeros(n, dtype=np.float64)
+    crossed = np.zeros(n, dtype=bool)
+    compound_encoded = np.array(
+        [_COMPOUND_ENCODING.get(c, _COMPOUND_ENCODING["MEDIUM"]) for c in compounds]
+    )
+
+    max_horizon = int(horizon.max()) if n else 0
+    for offset in range(1, max_horizon + 1):
+        active = (~crossed) & (offset <= horizon)
+        if not active.any():
+            continue
+        idx = np.nonzero(active)[0]
+        lap_number = current_laps[idx] + offset
+        future_tyre_age = tyre_ages[idx] + offset
+        fuel_load_est = np.clip(
+            tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1)), 0.0, None
         )
-        features = np.array(
+
+        life_remaining = np.full(len(idx), float(tire_deg_model.MAX_LOOKAHEAD_LAPS))
+        for compound in {compounds[i] for i in idx}:
+            pipeline = _pipeline_for_compound(models, compound)
+            if pipeline is None:
+                continue
+            group_mask = np.array([compounds[i] == compound for i in idx])
+            group_idx = idx[group_mask]
+            life_remaining[group_mask] = tire_deg_model.predict_life_remaining_batch(
+                pipeline,
+                current_laps[group_idx] + offset,
+                compound_encoded[group_idx],
+                tyre_ages[group_idx] + offset,
+                np.zeros(len(group_idx)),
+                np.full(len(group_idx), circuit_code),
+                driver_codes[group_idx],
+            )
+
+        features = np.column_stack(
             [
-                [
-                    future_tyre_age,
-                    life_remaining,
-                    gap_to_ahead,
-                    gap_to_behind,
-                    safety_car_probability,
-                    total_laps - lap_number,
-                    position,
-                    fuel_load_est,
-                ]
+                future_tyre_age,
+                life_remaining,
+                gaps_to_ahead[idx],
+                gaps_to_behind[idx],
+                safety_car_probabilities[idx],
+                total_laps - lap_number,
+                positions[idx],
+                fuel_load_est,
             ]
         )
-        probability = float(pit_model.predict_proba(features)[0][1])
-        last_lap, last_prob = lap_number, probability
-        if probability >= pit_predictor.ALERT_THRESHOLD:
-            return lap_number, probability
+        probabilities = np.asarray(pit_model.predict_proba(features))[:, 1]
+
+        last_lap[idx] = lap_number
+        last_prob[idx] = probabilities
+        crossed[idx[probabilities >= pit_predictor.ALERT_THRESHOLD]] = True
+
     return last_lap, last_prob
 
 
@@ -920,32 +954,31 @@ async def get_competitor_predicted_strategy(
     circuit_id = (await db.execute(circuit_query)).scalar_one()
     circuit_code = _stable_code(str(circuit_id))
 
-    results: list[dict[str, Any]] = []
-    for lap in latest_laps:
-        compound_encoded = _COMPOUND_ENCODING.get(lap.compound, _COMPOUND_ENCODING["MEDIUM"])
-        tire_deg_pipeline = _pipeline_for_compound(models, lap.compound)
-        predicted_lap, probability = _first_pit_lap_over_threshold(
-            pit_model,
-            tire_deg_pipeline,
-            compound_encoded,
-            _stable_code(str(lap.driver_id)),
-            circuit_code,
-            lap.lap_number,
-            lap.tyre_age_laps,
-            lap.position or len(latest_laps),
-            pit_predictor.MAX_GAP_SECONDS,
-            pit_predictor.MAX_GAP_SECONDS,
-            0.0,
-            total_laps,
-        )
-        results.append(
-            {
-                "driver_id": str(lap.driver_id),
-                "predicted_pit_lap": predicted_lap,
-                "pit_probability": probability,
-            }
-        )
-    return results
+    driver_ids = [str(lap.driver_id) for lap in latest_laps]
+    compounds = [lap.compound for lap in latest_laps]
+    n = len(latest_laps)
+    predicted_laps, probabilities = _first_pit_laps_over_threshold_batch(
+        pit_model,
+        models,
+        np.array([_stable_code(d) for d in driver_ids]),
+        compounds,
+        circuit_code,
+        np.array([lap.lap_number for lap in latest_laps]),
+        np.array([lap.tyre_age_laps for lap in latest_laps]),
+        np.array([lap.position or n for lap in latest_laps]),
+        np.full(n, pit_predictor.MAX_GAP_SECONDS),
+        np.full(n, pit_predictor.MAX_GAP_SECONDS),
+        np.zeros(n),
+        total_laps,
+    )
+    return [
+        {
+            "driver_id": driver_ids[i],
+            "predicted_pit_lap": int(predicted_laps[i]),
+            "pit_probability": float(probabilities[i]),
+        }
+        for i in range(n)
+    ]
 
 
 # --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---

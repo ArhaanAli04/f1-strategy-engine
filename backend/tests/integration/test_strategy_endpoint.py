@@ -117,7 +117,7 @@ def _seed_session_with_lap(
 
 @pytest.mark.integration
 def test_pit_window_endpoint_returns_valid_schema(
-    test_client: TestClient,
+    authenticated_client: TestClient,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,9 +128,11 @@ def test_pit_window_endpoint_returns_valid_schema(
     }
     monkeypatch.setattr(strategy_service, "_load_models", lambda: stub_models)
 
-    session_id, driver_id = _seed_session_with_lap(test_client, db_session_factory, "MEDIUM")
+    session_id, driver_id = _seed_session_with_lap(
+        authenticated_client, db_session_factory, "MEDIUM"
+    )
 
-    response = test_client.get(f"/api/v1/strategy/{session_id}/{driver_id}/pit-window")
+    response = authenticated_client.get(f"/api/v1/strategy/{session_id}/{driver_id}/pit-window")
 
     assert response.status_code == 200
     body = response.json()
@@ -228,7 +230,7 @@ def _stub_simulation_models(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.integration
 @pytest.mark.usefixtures("_eager_celery_with_stored_results", "_stub_simulation_models")
 def test_simulate_returns_task_id(
-    test_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
+    authenticated_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     circuit = Circuit(id=uuid.uuid4(), name="Test Circuit", country="Testland", track_length_km=5.0)
     race = Race(
@@ -243,7 +245,9 @@ def test_simulate_returns_task_id(
         id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=date(2025, 3, 1)
     )
     driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
-    seed_via_test_client(test_client, db_session_factory, circuit, race, session_row, driver)
+    seed_via_test_client(
+        authenticated_client, db_session_factory, circuit, race, session_row, driver
+    )
 
     # simulate_strategy's .delay() call runs (in eager mode) on a brand-new
     # event loop inside _SIMULATE_ENQUEUE_EXECUTOR's thread, via
@@ -256,7 +260,7 @@ def test_simulate_returns_task_id(
     # Disposing here (still on the portal loop, so it can close them
     # gracefully) empties the pool first, forcing the executor thread to open
     # its own fresh, correctly-loop-bound connection.
-    test_client.portal.call(get_engine().dispose)  # type: ignore[union-attr]
+    authenticated_client.portal.call(get_engine().dispose)  # type: ignore[union-attr]
 
     payload = {
         "driver_id": str(driver.id),
@@ -267,13 +271,15 @@ def test_simulate_returns_task_id(
         "pit_laps": [],
         "compounds": [],
     }
-    response = test_client.post(f"/api/v1/strategy/{session_row.id}/simulate", json=payload)
+    response = authenticated_client.post(
+        f"/api/v1/strategy/{session_row.id}/simulate", json=payload
+    )
 
     assert response.status_code == 202
     task_id = response.json()["task_id"]
     assert task_id
 
-    poll_response = test_client.get(f"/api/v1/strategy/simulate/{task_id}")
+    poll_response = authenticated_client.get(f"/api/v1/strategy/simulate/{task_id}")
 
     assert poll_response.status_code == 200
     poll_body = poll_response.json()

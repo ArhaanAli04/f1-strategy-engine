@@ -484,13 +484,6 @@ use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD}
 into prometheus.yml at container startup, same pattern as alertmanager.yml's 
 Slack webhook handling.
 
-- Strategy endpoints missing authentication: POST /strategy/simulate 
-and GET /strategy/{session_id}/{driver_id}/pit-window should require 
-Depends(get_current_user) before production deployment. Currently 
-public — rate limiting (10 req/min unauth) provides minimal protection 
-but compute-heavy endpoints are exploitable. Fix before Day 22 
-Kubernetes deployment.
-
 - **WebSocket JWT in query param (?token=):** access token appears in 
   server logs and browser history. Acceptable for now. Production fix: 
   short-lived WebSocket ticket — exchange via REST before connection, 
@@ -638,7 +631,24 @@ Kubernetes deployment.
   Candidate fixes: parallelise with asyncio.gather() across drivers, 
   or batch the tire_deg/pit_predictor calls across all 20 drivers 
   simultaneously. Profile _first_pit_lap_over_threshold first — 
-  redundant per-lap looping may be the dominant cost. Fix before Day 22.
+  redundant per-lap looping may be the dominant cost.
+
+  **Update, pre-Day-22 fix pass:** batching applied.
+  `get_competitor_predicted_strategy` (via the new
+  `_first_pit_laps_over_threshold_batch`) now calls
+  `pit_model.predict_proba` and `tire_deg_model.predict_life_remaining_batch`
+  once per lap-offset across all still-active drivers (grouped by compound
+  for the tire_deg call, since that pipeline is compound-specific), instead
+  of once per driver per offset. Verified 35% per-call improvement
+  (0.937s → 0.612s, models-warm) via a git-stash A/B against a real
+  20-driver session (`00b4f598-40ec-4792-8687-6eae51257977`). This is a
+  real, verified improvement — but does not reproduce or explain the full
+  16-17s concurrent-load floor above: an isolated single call finishes in
+  under 1s even on the pre-refactor code, so that floor is DB-pool/
+  concurrency-bound (queuing under ~100 concurrent Locust users), not pure
+  per-call model overhead. The remaining floor will be addressed alongside
+  item #4 (WS fan-out) and item #5 (DB connection pool sizing) below, once
+  the WS fan-out fix lands and a clean load test can attribute the rest.
 
 - **DB connection pool exhaustion at 500 concurrent users — fix before
   Day 22 Kubernetes deployment.** `core/database.py`'s
@@ -706,26 +716,6 @@ Kubernetes deployment.
   per-task cost (65-88s) needed to size that pool count properly instead of
   guessing. Fix on Day 22 Kubernetes deployment alongside the DB pool
   sizing fix above, since both block real race-day-scale traffic.
-
-- **Load-test harness account-pool-size formula doesn't scale past ~100
-  simulated users — fix before the next 500+-user load test.**
-  `tests/load/locustfile.py`'s `_target_pool_size` caps the shared test
-  account pool at `min(users, 30)` regardless of population (see its
-  docstring's rate-limit rationale, sized against Day 13's 100-user
-  baseline where 30 accounts meant ~3.3 simulated users per account). At
-  500 users this is unchanged at 30 accounts, so each account now backs
-  ~17 simulated users, pushing each shared account's request rate well past
-  the documented 60/min authenticated rate-limit bucket. Confirmed in the
-  Day 18 500-user run (2026-07-23): 1385 of 15242 total failures were
-  `429 Too Many Requests` (1257 on `/strategy/overview`, 88 on `/simulate`,
-  40 on `/drivers/laps`) — the rate limiter correctly protecting the
-  server, not a server-side bug. This is a load-test harness limitation,
-  not application code, but it meaningfully dilutes the failure count and
-  makes real server-side bottlenecks (DB pool exhaustion, WS fan-out, both
-  above) harder to isolate from the aggregate numbers. Fix before the next
-  500+-user run: either raise the pool-size cap for larger runs (accepting
-  a longer, rate-limit-paced provisioning pass) or give the rate-limit
-  budget more headroom accounted for in the pool-size formula itself.
 
 - **One-time manual action required before train-models.yml can run
   end-to-end:** Run export_training_data.py once against the local Docker
@@ -893,6 +883,27 @@ Docker Postgres: `GET /drivers` returns correct `team`/`contracts` for all
   under `backend/services/` imports `backend/workers/`, so this is a one-way
   dependency, not a violation of the "services must not import other services"
   rule (that rule is about services importing services).
+
+**Strategy endpoint authentication (✅ fixed pre-Day-22 fix pass):**
+All four business-logic strategy routes — `POST /simulate`, `GET pit-window`,
+`GET undercut`, `GET overview` — now require `Depends(get_current_user)`,
+matching the pattern already used in `alerts.py`/`auth.py`. Originally scoped
+to just `POST /simulate` and `GET pit-window`; extended to all four during
+the fix pass since `/overview` is the single most compute-expensive endpoint
+measured (16-17s cold) and leaving it public while locking the other three
+would have been an inconsistent gap in the same file. `GET
+/simulate/{task_id}` stays unauthenticated — it's a cheap Celery result
+lookup keyed by an unguessable task UUID, not a computation itself.
+`tests/integration/test_strategy_endpoint.py` updated to use the
+`authenticated_client` fixture.
+
+**Load-test harness account-pool-size formula (✅ fixed pre-Day-22 fix pass):**
+`tests/load/locustfile.py`'s `_target_pool_size` no longer caps at a flat 30
+regardless of population. Pool size now scales with `num_users`, sized so
+that even an account unlucky enough to back only the heaviest user type
+(RaceDayViewerUser, up to ~15/min) stays under half of `core/rate_limit.py`'s
+60/min authenticated bucket — see `_MAX_SIMULATED_USERS_PER_ACCOUNT`'s
+derivation in the module for the exact math.
 
 ## Deferred Telemetry Features
 

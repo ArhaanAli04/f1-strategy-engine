@@ -10,12 +10,18 @@ is infrastructure glue at the API boundary, not business logic).
 Every route carries @limiter.limit(rate_limit_value) — see core/rate_limit.py
 for why this must be a per-route decorator rather than one global middleware
 default, and why each handler below needs a `request: Request` parameter.
+
+All routes except GET /simulate/{task_id} require Depends(get_current_user):
+these are the compute-heavy ML inference/simulation endpoints (previously
+public — see CLAUDE.md's Deferred Wiring). GET /simulate/{task_id} stays
+unauthenticated: it's a cheap Celery result lookup keyed by an unguessable
+task UUID, not a computation itself.
 """
 
 import asyncio
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from typing import Annotated
+from typing import Annotated, Any
 
 import redis.asyncio as aioredis
 from celery.result import AsyncResult
@@ -25,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.database import get_db
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
+from backend.core.security import get_current_user
 from backend.schemas.simulate_schema import (
     SimulateStrategyRequest,
     SimulateStrategyResponse,
@@ -76,7 +83,10 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
 )
 @limiter.limit(rate_limit_value)
 async def simulate_strategy(
-    request: Request, session_id: uuid.UUID, payload: SimulateStrategyRequest
+    request: Request,
+    session_id: uuid.UUID,
+    payload: SimulateStrategyRequest,
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> SimulateTaskAccepted:
     task_payload = {"session_id": str(session_id), **payload.model_dump(mode="json")}
     # .delay() is a quick synchronous Redis broker call, not the simulation
@@ -99,6 +109,7 @@ async def get_pit_window(
     driver_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> list[PitWindowResponse]:
     return await strategy_service.get_pit_window_for_session(
         redis_client, db, session_id, driver_id
@@ -113,6 +124,7 @@ async def get_undercut(
     driver_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
     target: uuid.UUID = Query(..., description="Rival driver_id being undercut"),  # noqa: B008
 ) -> UndercutThreatResponse:
     return await strategy_service.get_undercut_for_session(
@@ -127,5 +139,6 @@ async def get_strategy_overview(
     session_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> StrategyOverviewResponse:
     return await strategy_service.get_strategy_overview_for_session(redis_client, db, session_id)
