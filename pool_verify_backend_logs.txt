@@ -1,0 +1,1090 @@
+backend-1  | INFO:     Will watch for changes in these directories: ['/app']
+backend-1  | INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+backend-1  | INFO:     Started reloader process [1] using WatchFiles
+backend-1  | INFO:     Started server process [7]
+backend-1  | INFO:     Waiting for application startup.
+backend-1  | INFO:     Application startup complete.
+backend-1  | INFO:     172.20.0.9:59284 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:44434 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59854 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:51862 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:41742 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:56622 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:37036 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | req         WARNING 	DEFAULT CACHE ENABLED! (24.0 KB) /home/f1/.cache/fastf1
+backend-1  | INFO:     172.20.0.1:59920 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlNDRjNGNiOS1mYjJhLTQ2MjEtODEzMC1hNWY0ZmI5YTViOTciLCJleHAiOjE3ODU0MDUyNDYsInR5cGUiOiJhY2Nlc3MifQ.H2LRZMSF4k80LMDQ_9AVyRgaQt4s7Y_poXLw7e2Qg7s" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:59970 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59946 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59956 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMDlkY2I3Mi1kNTdlLTQxZmQtOTgxMy04MGJhOWVkN2IxYWEiLCJleHAiOjE3ODU0MDUyMzksInR5cGUiOiJhY2Nlc3MifQ.YdsAynnmGyn4vLFk7d0Vx1xj06uyTjUx0Q2kcmX7WAU" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:59952 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMzk3ZjJiOC01YmUzLTRjM2MtODIwZi01MWVjMjIyMjA4MTIiLCJleHAiOjE3ODU0MDUyMjYsInR5cGUiOiJhY2Nlc3MifQ.czxmhZqIKr_cDdgXfcpTL6z9LbGweGBd-txus4Sm8bY" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:59962 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3YTEyMjkwMy04MTUwLTQwMGMtOGM3MS0yNGYwODUwMTJmM2MiLCJleHAiOjE3ODU0MDUyMzMsInR5cGUiOiJhY2Nlc3MifQ.figU27e4Ya1u52oq18A7_t5tkKNIs7D8vKFHMfW-dFM" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60004 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60032 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4Zjg0ZWE2ZS00ZTNlLTQyZjMtOGRlNS1iOWM1ZDJkNTA2MWMiLCJleHAiOjE3ODU0MDUyOTQsInR5cGUiOiJhY2Nlc3MifQ.TnBSrfDCek8HB8D5kpxKaxF6OP_9NGEhtLCcjQbrJMw" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60098 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60094 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60100 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60044 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YWFiYzdmNC00NzMwLTQzMmQtYWZiYS0zMjYyMGFmYmM2NzUiLCJleHAiOjE3ODU0MDUzNjgsInR5cGUiOiJhY2Nlc3MifQ._h7pDwvO2kFpNRe8gEHl9EcEDwVXwE3cEQB6W-i2_Lk" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60120 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMTA2NzRlYy1lZTY3LTRkZjItYTNjOC0zZTk0Y2M2Nzk4NjciLCJleHAiOjE3ODU0MDU0MzUsInR5cGUiOiJhY2Nlc3MifQ.CahWdG8gP_pOCmLy2RM53R25iFuv6WoOCJihs7I0bYI" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60060 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4MzM4ZTRmMS03Y2Q5LTQwZmYtOGZjMC1mMDExY2ZlNmE0YmYiLCJleHAiOjE3ODU0MDUzNTUsInR5cGUiOiJhY2Nlc3MifQ.N6vmmnlFCF05wz0SXjxRtfYusIHso3_OYkO2VT-UdRE" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60162 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4ZWY5ZmViMS0wZmI3LTQxOTItYjBjMS1hNDczMTkxMmQ2NTciLCJleHAiOjE3ODU0MDU0NTUsInR5cGUiOiJhY2Nlc3MifQ.nv32OdJvtwSoaEnpj5kdb130d2dURGG1UeyBPbCru1Q" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60148 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1MmQzMTAxMi1mMzE3LTQ0NzMtOWNhMi03OTJmNGM3M2Y0MzYiLCJleHAiOjE3ODU0MDU0NDEsInR5cGUiOiJhY2Nlc3MifQ.QDKFIal_JL0rf0ShiXYtyxmP6WvN-cUdvGCyDyZhXy8" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60114 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60158 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3NGRiMjlhYS04ZWEyLTRhMTQtYWIyMS03ZDMzZTRhOTJmZmEiLCJleHAiOjE3ODU0MDU0NDgsInR5cGUiOiJhY2Nlc3MifQ.wxLc5cglfH-kJuXOT6DRiEzIwlnFRwCxsT3MZQMyejA" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60134 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60086 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlODY3MzEwZS0wOTk4LTRlOWItYjAxMy1mNTVhYjU4OWNkYmYiLCJleHAiOjE3ODU0MDUzNjEsInR5cGUiOiJhY2Nlc3MifQ.nOwbTngyGGI9YJOsCS4lj8JVkXFqf2brR8X4KAaY42Y" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:59888 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:59988 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:59976 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | /usr/local/lib/python3.11/pickle.py:1718: UserWarning: [09:37:30] WARNING: /__w/xgboost/xgboost/src/collective/../data/../common/error_msg.h:83: If you are loading a serialized model (like pickle in Python, RDS in R) or
+backend-1  | configuration generated by an older version of XGBoost, please export the model by calling
+backend-1  | `Booster.save_model` from that version first, then load it back in current version. See:
+backend-1  | 
+backend-1  |     https://xgboost.readthedocs.io/en/stable/tutorials/saving_model.html
+backend-1  | 
+backend-1  | for more details about differences between saving model and serializing.
+backend-1  | 
+backend-1  |   setstate(state)
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60076 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60220 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60238 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5ZWZkZGUzYi0xYWZiLTQ1NTktYjg5My0wODZhODRkMzgzYTIiLCJleHAiOjE3ODU0MDU1MTMsInR5cGUiOiJhY2Nlc3MifQ.IEbLWjydUOdFhDEEmG2AmZPFs9gG-VGvJcRgo48Wb-c" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60172 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60232 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0NjI3YTJjMS1mOWNiLTRmMzEtYWI1Zi0zOGYyNDhkMWU0MjMiLCJleHAiOjE3ODU0MDU1MDYsInR5cGUiOiJhY2Nlc3MifQ.wrFwBL5eKCo44V413gqzKC8F7SEcK_At6LPIkPmrQ3o" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60200 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60208 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60218 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60310 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60290 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60250 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGUzNDM5ZC03Yjk4LTQ1NjctOTFhNS1lYTc4NjdkOTRmMmMiLCJleHAiOjE3ODU0MDU1MjEsInR5cGUiOiJhY2Nlc3MifQ.GFburhuiEZB6hY52D773M808Rm9r9KeVb7254nPziS0" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60274 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60258 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNzk5ODliNC0xZGI1LTQyMDYtOTViNC1hMDhmNmMyOTIxYmUiLCJleHAiOjE3ODU0MDU1MjgsInR5cGUiOiJhY2Nlc3MifQ.Cw34PEYvg9k4l9dlRoWUycuddsSzDRuk0J3sYV0Li8Q" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60286 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60014 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60304 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60328 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiYzMxZDZmYy1jY2E2LTQ2ZmUtYjU2OS0xMTdkZGZjMzZiMjQiLCJleHAiOjE3ODU0MDU2MDMsInR5cGUiOiJhY2Nlc3MifQ.ZHQRqzfzSBQna-jLKQ_uk1GHOdSZvvdOnBiuTQ2_Ecs" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60346 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OWZkMzAwNC1jNzVkLTQ5M2EtYWZiYS1hMDIyY2RlN2M4MWIiLCJleHAiOjE3ODU0MDU1OTYsInR5cGUiOiJhY2Nlc3MifQ.DTPR8PRXvnTOBfLb2ArUtRQp-RaQKWaVLkUV51DRD_0" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57358 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60332 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYzVmMGRhZi0xZjUxLTQwOGItODZjZS02M2MzZWI0MmZjNDciLCJleHAiOjE3ODU0MDU1ODgsInR5cGUiOiJhY2Nlc3MifQ.nahHeT6Qxr08sYhAIs1Jev0kUcvozOyrmjxluVhikVw" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57372 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3YTEyMjkwMy04MTUwLTQwMGMtOGM3MS0yNGYwODUwMTJmM2MiLCJleHAiOjE3ODU0MDUyMzMsInR5cGUiOiJhY2Nlc3MifQ.figU27e4Ya1u52oq18A7_t5tkKNIs7D8vKFHMfW-dFM" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57366 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMzk3ZjJiOC01YmUzLTRjM2MtODIwZi01MWVjMjIyMjA4MTIiLCJleHAiOjE3ODU0MDUyMjYsInR5cGUiOiJhY2Nlc3MifQ.czxmhZqIKr_cDdgXfcpTL6z9LbGweGBd-txus4Sm8bY" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60326 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60358 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyZGY1OGQ2MS1hYzhiLTQyZjYtYTA5Mi1hOTcwMDJlMDU1ZTgiLCJleHAiOjE3ODU0MDU1ODEsInR5cGUiOiJhY2Nlc3MifQ.cjZDbFAmqYvEPW4yJscc1E8mu6pvBPG2wKjS5Eu1B48" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57304 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60114 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57388 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlNDRjNGNiOS1mYjJhLTQ2MjEtODEzMC1hNWY0ZmI5YTViOTciLCJleHAiOjE3ODU0MDUyNDYsInR5cGUiOiJhY2Nlc3MifQ.H2LRZMSF4k80LMDQ_9AVyRgaQt4s7Y_poXLw7e2Qg7s" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57318 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57324 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57432 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:57382 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlMDlkY2I3Mi1kNTdlLTQxZmQtOTgxMy04MGJhOWVkN2IxYWEiLCJleHAiOjE3ODU0MDUyMzksInR5cGUiOiJhY2Nlc3MifQ.YdsAynnmGyn4vLFk7d0Vx1xj06uyTjUx0Q2kcmX7WAU" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57342 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60076 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57470 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1YWFiYzdmNC00NzMwLTQzMmQtYWZiYS0zMjYyMGFmYmM2NzUiLCJleHAiOjE3ODU0MDUzNjgsInR5cGUiOiJhY2Nlc3MifQ._h7pDwvO2kFpNRe8gEHl9EcEDwVXwE3cEQB6W-i2_Lk" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57454 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4MzM4ZTRmMS03Y2Q5LTQwZmYtOGZjMC1mMDExY2ZlNmE0YmYiLCJleHAiOjE3ODU0MDUzNTUsInR5cGUiOiJhY2Nlc3MifQ.N6vmmnlFCF05wz0SXjxRtfYusIHso3_OYkO2VT-UdRE" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57472 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlODY3MzEwZS0wOTk4LTRlOWItYjAxMy1mNTVhYjU4OWNkYmYiLCJleHAiOjE3ODU0MDUzNjEsInR5cGUiOiJhY2Nlc3MifQ.nOwbTngyGGI9YJOsCS4lj8JVkXFqf2brR8X4KAaY42Y" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57460 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4Zjg0ZWE2ZS00ZTNlLTQyZjMtOGRlNS1iOWM1ZDJkNTA2MWMiLCJleHAiOjE3ODU0MDUyOTQsInR5cGUiOiJhY2Nlc3MifQ.TnBSrfDCek8HB8D5kpxKaxF6OP_9NGEhtLCcjQbrJMw" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57394 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57410 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57418 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57438 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiZmM2NzcxMS0zMTJkLTRhNGMtOWJlNy0xZjk5MmM4YjFiNDIiLCJleHAiOjE3ODU0MDUyODcsInR5cGUiOiJhY2Nlc3MifQ.703sZH3kooqy8PkQE-IKKl3GD_PwGwgZGweyCHQ0K5Q" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57510 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyMTA2NzRlYy1lZTY3LTRkZjItYTNjOC0zZTk0Y2M2Nzk4NjciLCJleHAiOjE3ODU0MDU0MzUsInR5cGUiOiJhY2Nlc3MifQ.CahWdG8gP_pOCmLy2RM53R25iFuv6WoOCJihs7I0bYI" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57424 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57544 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4ZWY5ZmViMS0wZmI3LTQxOTItYjBjMS1hNDczMTkxMmQ2NTciLCJleHAiOjE3ODU0MDU0NTUsInR5cGUiOiJhY2Nlc3MifQ.nv32OdJvtwSoaEnpj5kdb130d2dURGG1UeyBPbCru1Q" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57558 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57528 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1MmQzMTAxMi1mMzE3LTQ0NzMtOWNhMi03OTJmNGM3M2Y0MzYiLCJleHAiOjE3ODU0MDU0NDEsInR5cGUiOiJhY2Nlc3MifQ.QDKFIal_JL0rf0ShiXYtyxmP6WvN-cUdvGCyDyZhXy8" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57568 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3NGRiMjlhYS04ZWEyLTRhMTQtYWIyMS03ZDMzZTRhOTJmZmEiLCJleHAiOjE3ODU0MDU0NDgsInR5cGUiOiJhY2Nlc3MifQ.wxLc5cglfH-kJuXOT6DRiEzIwlnFRwCxsT3MZQMyejA" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.9:60268 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57474 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57488 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57504 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57588 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5ZWZkZGUzYi0xYWZiLTQ1NTktYjg5My0wODZhODRkMzgzYTIiLCJleHAiOjE3ODU0MDU1MTMsInR5cGUiOiJhY2Nlc3MifQ.IEbLWjydUOdFhDEEmG2AmZPFs9gG-VGvJcRgo48Wb-c" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60172 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57502 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57618 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:57602 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGUzNDM5ZC03Yjk4LTQ1NjctOTFhNS1lYTc4NjdkOTRmMmMiLCJleHAiOjE3ODU0MDU1MjEsInR5cGUiOiJhY2Nlc3MifQ.GFburhuiEZB6hY52D773M808Rm9r9KeVb7254nPziS0" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60286 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57524 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60208 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57600 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0NjI3YTJjMS1mOWNiLTRmMzEtYWI1Zi0zOGYyNDhkMWU0MjMiLCJleHAiOjE3ODU0MDU1MDYsInR5cGUiOiJhY2Nlc3MifQ.wrFwBL5eKCo44V413gqzKC8F7SEcK_At6LPIkPmrQ3o" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57654 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:57640 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNzk5ODliNC0xZGI1LTQyMDYtOTViNC1hMDhmNmMyOTIxYmUiLCJleHAiOjE3ODU0MDU1MjgsInR5cGUiOiJhY2Nlc3MifQ.Cw34PEYvg9k4l9dlRoWUycuddsSzDRuk0J3sYV0Li8Q" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:60274 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60218 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57688 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60108 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57720 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYzVmMGRhZi0xZjUxLTQwOGItODZjZS02M2MzZWI0MmZjNDciLCJleHAiOjE3ODU0MDU1ODgsInR5cGUiOiJhY2Nlc3MifQ.nahHeT6Qxr08sYhAIs1Jev0kUcvozOyrmjxluVhikVw" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57714 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyZGY1OGQ2MS1hYzhiLTQyZjYtYTA5Mi1hOTcwMDJlMDU1ZTgiLCJleHAiOjE3ODU0MDU1ODEsInR5cGUiOiJhY2Nlc3MifQ.cjZDbFAmqYvEPW4yJscc1E8mu6pvBPG2wKjS5Eu1B48" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57574 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60014 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57584 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57724 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5OWZkMzAwNC1jNzVkLTQ5M2EtYWZiYS1hMDIyY2RlN2M4MWIiLCJleHAiOjE3ODU0MDU1OTYsInR5cGUiOiJhY2Nlc3MifQ.DTPR8PRXvnTOBfLb2ArUtRQp-RaQKWaVLkUV51DRD_0" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57616 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57324 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57630 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:60304 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57658 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57318 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:60326 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57674 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57736 - "WebSocket /api/v1/ws/telemetry/00b4f598-40ec-4792-8687-6eae51257977?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJiYzMxZDZmYy1jY2E2LTQ2ZmUtYjU2OS0xMTdkZGZjMzZiMjQiLCJleHAiOjE3ODU0MDU2MDMsInR5cGUiOiJhY2Nlc3MifQ.ZHQRqzfzSBQna-jLKQ_uk1GHOdSZvvdOnBiuTQ2_Ecs" [accepted]
+backend-1  | INFO:     connection open
+backend-1  | INFO:     172.20.0.1:57676 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57704 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57410 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57746 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57394 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57418 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57342 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57756 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57424 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59976 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57488 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57524 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57502 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60108 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57574 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57616 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57630 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:57676 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59916 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:57704 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57674 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60134 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60018 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | F1StrategyError [NOT_FOUND] on /api/v1/races/current: Season 2026 round 12 is Ergast's current race but hasn't been ingested yet
+backend-1  | INFO:     172.20.0.1:59900 - "GET /api/v1/races/current HTTP/1.1" 404 Not Found
+backend-1  | INFO:     172.20.0.1:59916 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59888 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59988 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60018 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59900 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:59670 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60114 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60076 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60172 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60274 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57318 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60286 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57502 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57574 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60304 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60326 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60208 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:44918 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57630 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59976 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57394 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59916 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33776 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60018 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33780 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33782 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33786 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33794 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33798 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59988 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33808 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33822 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33838 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33852 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33860 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33870 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33878 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33894 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33906 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33920 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33934 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33948 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60274 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33964 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60286 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57502 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33968 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59976 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33994 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33978 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34004 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34016 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34022 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34028 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33786 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33780 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34030 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34040 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34048 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34070 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33776 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34072 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34058 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34054 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59988 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33860 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33808 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34076 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33878 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34090 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33870 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34106 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33906 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55246 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33894 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55256 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55264 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55270 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55282 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55298 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55314 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60274 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59976 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57502 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33978 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55324 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55332 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33994 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33780 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:52018 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33786 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33878 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34076 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55352 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34106 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55366 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34030 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33860 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33870 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34072 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55410 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55424 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55426 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55428 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55436 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55298 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55448 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55452 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55462 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55464 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55478 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55490 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55492 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55520 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55504 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55530 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55534 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55538 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55544 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55552 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55564 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55572 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33994 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59934 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55352 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33878 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55606 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55624 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33780 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55622 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:34106 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33860 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55634 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55650 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55652 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55410 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55656 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55298 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55658 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55670 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55684 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55698 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55462 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55710 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55490 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55436 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55478 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60576 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60578 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60606 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60622 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60636 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60660 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60674 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33994 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60676 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:39262 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60678 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60684 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60688 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60696 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55710 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60712 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55698 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60722 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60732 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60748 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55670 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55490 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60762 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60188 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60770 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60786 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60774 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55478 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60788 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60576 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60790 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60830 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60684 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60676 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60674 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60816 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60786 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60834 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:33994 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60874 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60696 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60882 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:57680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60898 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60712 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60732 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60926 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55670 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55710 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60976 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60680 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60636 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60860 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60660 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60910 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60912 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60770 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58108 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60810 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60794 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60956 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60762 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60942 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60850 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60958 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58120 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58116 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58124 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55478 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58150 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58170 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:35518 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60974 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58136 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:54926 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58180 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60684 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60676 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60674 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60696 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60770 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60810 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58124 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58186 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55670 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60958 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60794 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60974 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60712 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60956 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58208 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60762 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58224 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58226 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60850 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58230 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58238 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58250 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58264 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58284 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58270 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58308 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58310 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58318 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58334 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58352 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58342 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58358 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58360 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60676 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53598 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53608 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60974 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60794 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53620 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60712 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60958 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53636 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53632 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53652 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58124 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53662 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58186 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58208 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58238 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60850 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53678 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58226 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53684 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53686 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53698 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53704 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58270 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58284 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53714 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53726 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58318 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53740 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53744 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58310 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53754 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53760 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58352 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53778 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53776 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58342 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58358 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53782 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:37634 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53598 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53798 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58186 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53826 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:60958 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53686 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53840 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53848 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53860 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53870 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53886 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53888 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53896 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53698 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58226 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53754 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53900 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53912 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53930 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53918 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53926 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53778 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53936 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58358 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53740 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58342 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53948 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:53960 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53972 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53978 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53976 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53990 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53782 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60648 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:54004 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:54018 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:54030 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:54032 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:54042 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:60702 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59072 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59084 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59094 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59098 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53840 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53848 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59110 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59114 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53886 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59124 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53912 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59134 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59146 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59156 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53740 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53978 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59172 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58358 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59178 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59176 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59196 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53960 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53782 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59210 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59244 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59218 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59226 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59230 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59258 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59264 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59278 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59292 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:47786 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59304 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59308 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59322 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59332 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59368 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53840 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59372 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53912 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53886 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59380 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53740 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59396 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59172 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | Failed to deliver lap event to one WS client in session 00b4f598-40ec-4792-8687-6eae51257977 (its own disconnect-detection will clean it up)
+backend-1  | Failed to deliver lap event to one WS client in session 00b4f598-40ec-4792-8687-6eae51257977 (its own disconnect-detection will clean it up)
+backend-1  | INFO:     172.20.0.1:59198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59176 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | Failed to deliver lap event to one WS client in session 00b4f598-40ec-4792-8687-6eae51257977 (its own disconnect-detection will clean it up)
+backend-1  | INFO:     172.20.0.1:59432 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59278 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59444 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59446 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59450 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59304 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59458 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59464 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59466 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59308 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59344 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59488 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59506 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59396 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59380 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59176 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59368 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53840 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55400 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55408 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59278 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53740 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55424 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:53912 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58300 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55450 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59444 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55456 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55460 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59372 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55474 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59356 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53886 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55434 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55484 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55492 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59432 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:46228 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55502 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59450 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59494 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55378 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59508 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55542 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55510 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59200 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55526 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55534 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55546 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59308 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55554 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59464 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55556 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55566 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55582 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:59002 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59488 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59396 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59176 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59368 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59380 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59444 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53840 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55534 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59464 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55526 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55554 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59432 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55546 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55378 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:58198 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59450 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55582 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59494 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55596 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59508 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55604 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55610 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44158 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44168 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44170 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44172 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44180 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44202 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44208 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44204 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44210 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59368 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59164 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55526 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44218 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44230 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:45402 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:53814 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44244 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44258 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44272 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44278 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44290 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44292 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44168 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44298 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44306 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44322 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44336 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59494 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44350 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44158 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44364 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44370 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44378 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44390 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44400 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44436 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44440 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44454 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44472 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44456 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44476 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44488 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44516 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44524 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44528 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44544 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:44560 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:59212 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44230 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44292 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44564 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44580 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44306 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44588 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44158 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59494 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44604 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44614 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44624 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44298 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44628 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44400 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44642 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40238 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40252 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40260 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40272 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40286 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40294 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40302 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40308 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:44516 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40316 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40320 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40338 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40340 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40354 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40362 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40372 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40374 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40376 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44580 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:60578 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40398 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44614 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40422 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40428 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44306 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40438 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40444 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40448 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44628 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44624 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44194 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40462 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40302 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40260 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40468 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40272 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40472 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40252 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40484 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40486 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40512 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40336 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40514 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40518 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40520 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40534 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40542 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40546 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40560 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40362 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40354 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40564 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40566 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:55584 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40376 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59420 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44614 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40582 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40448 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44628 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40462 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40586 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40438 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40302 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40598 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44624 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40272 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40602 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40252 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40512 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37394 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40520 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37412 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37416 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40354 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37430 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37454 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40560 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37456 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37472 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44562 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40376 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40566 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37476 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37488 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:59442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37492 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:37496 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37516 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37506 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:44628 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37520 - "GET /api/v1/drivers/51570271-6e22-4ce1-8d0a-0f758e618115/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44614 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40302 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40582 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37564 - "GET /api/v1/drivers/004b755f-afb1-40e8-837e-015608e2c6fa/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40598 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40462 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37576 - "GET /api/v1/drivers/290ea818-3529-402d-9e98-f494288eba7a/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:34830 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37544 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:37560 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:40448 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40602 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44624 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37578 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:40586 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40272 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40438 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37606 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:37616 - "POST /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/simulate HTTP/1.1" 202 Accepted
+backend-1  | INFO:     172.20.0.1:40252 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40512 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37398 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37412 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37430 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44408 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37582 - "GET /api/v1/drivers/30e7258e-a3fa-4c1c-bbe0-7a69104fdd1e/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37596 - "GET /api/v1/drivers/2209d728-abaa-4458-a8e5-5124f5b99a17/laps?session_id=00b4f598-40ec-4792-8687-6eae51257977&page=1&page_size=20 HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37394 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37392 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37454 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40354 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40520 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37528 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44500 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37456 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37496 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40560 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37476 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37442 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40550 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40376 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37624 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:40382 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37472 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37620 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37646 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:37632 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:48668 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:49998 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.1:44474 - "GET /api/v1/strategy/00b4f598-40ec-4792-8687-6eae51257977/overview HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:34830 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:42112 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:45424 - "GET /metrics HTTP/1.1" 200 OK
+backend-1  | INFO:     127.0.0.1:60670 - "GET /health HTTP/1.1" 200 OK
+backend-1  | INFO:     172.20.0.9:55344 - "GET /metrics HTTP/1.1" 200 OK

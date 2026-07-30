@@ -10,6 +10,8 @@ class DatabaseSettings(BaseSettings):
 
     database_url: str
     timescale_url: str
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
 
 
 class RedisSettings(BaseSettings):
