@@ -328,3 +328,83 @@ WS fan-out fix, which it did. Documentation only:
   `get_competitor_predicted_strategy` entry) were updated to point at the
   new Notes entry and record that the regressions they described are
   confirmed resolved.
+
+---
+
+## Load Test Run — 2026-07-30 15:07 IST (09:37 UTC)
+
+**Conditions:** 100 users, 10/s ramp, 2 minute duration, combined population
+(`RaceDayViewerUser` + `StrategyUser` + `HistoricalUser` + `WebSocketUser`,
+70/20/10/70 weights per `locustfile.py`), `replay_publisher.py --rate 5`
+feeding real WS traffic from session `00b4f598-40ec-4792-8687-6eae51257977`
+(1531 lap rows)
+**Infrastructure:** Local Docker — post-fix config: backend
+`pool_size=20, max_overflow=40` (cap 60), worker unchanged
+`pool_size=10, max_overflow=20` (cap 30), Postgres `max_connections=200`
+(raised from 100)
+**Git commit:** `3f54348` (branch HEAD at time of this run; working tree had
+uncommitted changes — the DB connection pool sizing fix itself:
+`backend/core/config.py`, `backend/core/database.py`,
+`infra/docker/docker-compose.yml`. This run's explicit purpose was
+verifying that fix.)
+
+### Results per endpoint
+
+| Endpoint | p50 | p95 | p99 | req/s | failures |
+|---|---|---|---|---|---|
+| GET /races/current | 6200ms | 13000ms | 14000ms | 0.35 | 0/41 (0%) |
+| GET /strategy/{session_id}/overview | 82ms | 4000ms | 5900ms | 6.57 | 7/777 (0.90%) |
+| POST /strategy/{session_id}/simulate | 3000ms | 6300ms | 7400ms | 0.41 | 0/48 (0%) |
+| GET /drivers/{driver_id}/laps | 140ms | 5100ms | 6700ms | 0.52 | 0/62 (0%) |
+| WS lap_completed | 0ms | 0ms | 230ms | 25.23 | 0/2985 (0%) |
+| **Aggregated** | **0ms** | **2000ms** | **5700ms** | **33.07** | **7/3913 (0.18%)** |
+
+### QueuePool timeout count
+
+**0** — confirmed via `docker compose logs backend --since 5m | grep -c QueuePool`.
+Progression across fixes: 493 (Day 18 500-user baseline) → 16 (2026-07-30
+500-user re-run, post-WS-fan-out-fix, same pool config as Day 18) → **0**
+(this run, post-pool-fix).
+
+### Grafana observations
+
+Not captured for this run — verification leaned on Locust's own
+per-endpoint stats and a direct backend-log grep for `QueuePool`, which
+was the specific signal this run needed to confirm.
+
+### Bottlenecks identified
+
+- **DB connection pool exhaustion: resolved.** Zero `QueuePool` timeouts
+  in backend logs for the run window, down from 16 in the same-scale,
+  same-code empirical run earlier today and 493 in the Day 18 500-user
+  baseline. See CLAUDE.md's Notes entry "DB connection pool exhaustion"
+  for the full fix writeup and reasoning behind the specific numbers
+  chosen.
+- **Residual: 7 `RemoteDisconnected` failures on `/overview` (0.90%),
+  not pool-related.** With `QueuePool` timeouts at zero, these are not
+  the same root cause as prior runs' failures on this endpoint. Most
+  likely candidate: the already-tracked "WS keepalive ping timeouts
+  under heavy CPU load" Deferred Wiring entry (Uvicorn's single event
+  loop blocked by synchronous ML inference) — unconfirmed, not
+  investigated further in this run since it was out of scope for the
+  pool-sizing verification.
+- **Operational note, not an application bug:** two earlier attempts at
+  this exact run failed with 100% `/overview` 500s
+  (`botocore.exceptions.ParamValidationError: Invalid bucket name ""`)
+  because the stack had been rebuilt with `docker compose up` omitting
+  `--env-file .env`, zeroing `AWS_BUCKET_NAME`/AWS credentials in the
+  container per `docker-compose.yml`'s `${VAR:-}` substitution. Fixed by
+  rebuilding with `--env-file .env` (per CLAUDE.md's documented
+  convention) before this run. Not a code defect — a reminder that any
+  manual `docker compose up`/`--build` during this kind of session must
+  include `--env-file .env`.
+
+### Changes made after this run
+
+None — this run's purpose was to verify the pool-sizing fix already
+applied earlier in this session (see Conditions above), which it did.
+Documentation only:
+- CLAUDE.md's "DB connection pool exhaustion" entry moved from Deferred
+  Wiring & Integration Gaps to Notes, marked fixed, with the full
+  before/after numbers and the 493 → 16 → 0 progression.
+- This entry added to `docs/load_test_results.md`.

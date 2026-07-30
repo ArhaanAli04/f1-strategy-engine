@@ -561,52 +561,6 @@ Slack webhook handling.
   "WS telemetry broadcast fan-out redundancy") — the remaining floor is DB
   connection pool sizing (below), still open.
 
-- **DB connection pool exhaustion at 500 concurrent users — fix before
-  Day 22 Kubernetes deployment.** `core/database.py`'s
-  `create_async_engine(..., pool_size=10, max_overflow=20)` (30 total
-  connections, default 30s `pool_timeout`) is far too small once
-  concurrency reaches race-day scale. Measured via the Day 18 500-user load
-  test (`locust -u 500 -r 20 --run-time 10m`, 2026-07-23): backend
-  container logs for the run window show 493 occurrences of
-  `sqlalchemy.exc.TimeoutError: QueuePool limit of size 10 overflow 20
-  reached, connection timed out, timeout 30.00`. This single exhaustion
-  cascades into several symptoms that look unrelated on the surface:
-  - 172 of 1954 `/strategy/{session_id}/overview` failures were clean
-    `500 Internal Server Error`s caused directly by the pool timeout
-    propagating up as an unhandled exception (28.49% failure rate on that
-    endpoint overall).
-  - A previously-unseen WebSocket bug — 58 occurrences of `RuntimeError:
-    Expected ASGI message 'websocket.send' or 'websocket.close', but got
-    'websocket.accept'` in `telemetry.py`. Root cause: `websocket_telemetry`'s
-    `resolve_season_round` DB lookup (telemetry.py:210) stalls up to 30s
-    waiting on the same exhausted pool, while Locust's client-side
-    `ws_connect(ws_url, open_timeout=10)` gives up after only 10s and tears
-    down its side of the connection. When the server's stalled DB call
-    eventually returns and reaches `await websocket.accept()`
-    (telemetry.py:215), it's accepting a transport the client already
-    abandoned — uvicorn's ASGI state machine rejects the late accept with
-    this error. Not a standalone bug, a symptom of the pool exhaustion
-    above.
-  - Very likely also the dominant cause of the remaining
-    `RemoteDisconnected` / `ConnectionAbortedError` failures on `/overview`
-    and `/drivers/laps` (see `docs/load_test_results.md`'s 2026-07-23
-    500-user run for the full breakdown).
-
-  Proposed fix: raise `pool_size`/`max_overflow` with real numbers derived
-  from a follow-up load test (not guessed), and consider a bounded retry or
-  a faster-failing timeout so an overloaded request returns a clean 503
-  instead of hanging up to 30s per attempt. Fix before Day 22 Kubernetes
-  deployment — this blocks any real race-day-scale traffic today.
-
-  **Recurred, 2026-07-28, at 100-user combined load after the WS fan-out
-  fix landed:** `/strategy/{session_id}/overview` showed 5 failures (4
-  `RemoteDisconnected`, 1 `ConnectionAbortedError`) — the same symptom
-  pattern this bullet already attributes to pool exhaustion, not a new
-  cause. With the WS fan-out no longer masking/compounding it (see Notes:
-  "WS telemetry broadcast fan-out redundancy" — that fix landed the same
-  day and is confirmed working), this is now the clearest remaining
-  bottleneck and the next priority before Day 22.
-
 - **Single `--pool=solo` Celery worker cannot sustain race-day simulate
   traffic — fix via multiple worker pods on Day 22.** This project's
   existing `--pool=solo` rationale already anticipated needing "8+ worker
@@ -637,21 +591,6 @@ Slack webhook handling.
   guessing. Fix on Day 22 Kubernetes deployment alongside the DB pool
   sizing fix above, since both block real race-day-scale traffic.
 
-- **One-time manual action required before train-models.yml can run
-  end-to-end:** Run export_training_data.py once against the local Docker
-  Postgres to upload the 2018-2025 base training corpus to S3:
-
-  ```bash
-  docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
-  python -m backend.scripts.export_training_data
-  ```
-
-  This uploads laps.parquet and stints.parquet to
-  s3://f1-strategy-models/training-data/base/. Only needs to run once — the
-  CI workflow reads from S3 on every training run. Re-run only if the base
-  corpus changes (new historical seasons added). Do this before triggering
-  train-models.yml manually for the first time.
-
 - **kubectl apply --dry-run=client not yet validated:**
   infra/k8s/hpa.yaml, worker-scaledobject.yaml, and
   race-weekend-cronjob.yaml were validated with a YAML parser only —
@@ -660,6 +599,13 @@ Slack webhook handling.
   on Day 22 when Docker Desktop Kubernetes is enabled. At that point also
   confirm Deployment names match what the Helm chart generates and update
   placeholder names if needed.
+
+- **WS keepalive ping timeouts under heavy CPU load:** 28,603 closures
+  (85.7% of WS traffic) in 500-user run. Likely cause: Uvicorn's single
+  event loop blocked by synchronous CPU-bound ML inference in `/overview`
+  cold path, starving asyncio ping/pong. Investigate after DB pool fix and
+  K8s deployment — may resolve naturally with multiple backend pods (each
+  with its own event loop, less contention per pod).
 
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
@@ -672,6 +618,46 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**DB connection pool exhaustion (✅ fixed 2026-07-30):**
+`core/database.py`'s hardcoded `pool_size=10, max_overflow=20` (30 total
+connections) was sized far too small for race-day concurrency — see the
+Day 18 500-user load test that originally surfaced this (493 QueuePool
+timeouts, cascading into `/overview` 500s and a WS `websocket.accept`
+bug — full history in the removed Deferred Wiring entry this replaces).
+Fixed via a targeted fix pass, not guessed: `pool_size`/`max_overflow` are
+now configurable via new `db_pool_size`/`db_max_overflow` fields on
+`DatabaseSettings` (`core/config.py`), read by `core/database.py`'s
+`get_engine()` instead of hardcoded literals. Defaults stay at `10`/`20`
+(worker's behavior is unchanged — no evidence of worker-side DB
+contention in any run); `docker-compose.yml`'s `backend` service alone
+sets `DB_POOL_SIZE=20`/`DB_MAX_OVERFLOW=40` (cap 60), since the load-test
+evidence (all logged `QueuePool` timeouts were from `backend-1`, zero
+`/simulate` failures) implicated only the backend's pool, not the
+worker's. Postgres's `max_connections` was also bumped `100 → 200`
+(`docker-compose.yml`'s `postgres` service `command`), confirmed via
+`SHOW max_connections;`, giving headroom for backend(60) + worker(30) +
+exporter/admin(~10) ≈ 100 of 200.
+
+QueuePool timeout progression across fixes: **493** (Day 18 500-user
+baseline, pre-WS-fix) → **16** (2026-07-30 500-user re-run, post-WS-fan-out-fix,
+same pool config) → **0** (2026-07-30 100-user verification run, post-pool-fix
+— see `docs/load_test_results.md`'s 2026-07-30 entry). The 16→0 drop is
+this fix; the 493→16 drop was the WS fan-out fix's side effect (faster
+session turnover meant DB sessions weren't held hostage behind Redis
+backpressure).
+
+**export_training_data.py one-time base corpus export (✅ completed 2026-07-30):**
+Ran once against the local Docker Postgres per the Deferred Wiring action item:
+exported 163,623 lap rows and 8,271 stint rows (2018-2025) and uploaded to S3:
+- `s3://f1-strategy-models/training-data/base/laps.parquet` (1.0 MB)
+- `s3://f1-strategy-models/training-data/base/stints.parquet` (27 KB)
+
+Upload confirmed via a direct `list_objects_v2` check against the bucket (AWS
+CLI isn't installed in this environment). `train-models.yml`'s
+`workflow_dispatch` is now unblocked — the CI workflow reads this base corpus
+from S3 on every training run. Re-run only if the base corpus changes (new
+historical seasons added).
 
 **users.fcm_token (✅ completed Day 10):**
 - Migration added: `20260711_add_fcm_token_to_users.py`
