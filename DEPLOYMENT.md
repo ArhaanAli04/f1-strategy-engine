@@ -12,7 +12,8 @@ This document covers how the F1 Strategy Engine is run, demonstrated, and develo
 4. [Demo Videos](#demo-videos)
 5. [Mobile App — Development Build](#mobile-app--development-build)
 6. [General Development Workflow](#general-development-workflow)
-7. [Future Cloud Deployment](#future-cloud-deployment)
+7. [Local Kubernetes Deployment (Docker Desktop)](#local-kubernetes-deployment-docker-desktop)
+8. [Future Cloud Deployment](#future-cloud-deployment)
 
 ---
 
@@ -405,6 +406,130 @@ ngrok http 8000
 ```
 
 The ngrok URL is active as long as your laptop is on and ngrok is running.
+
+---
+
+## Local Kubernetes Deployment (Docker Desktop)
+
+This runs the backend + worker on a real local Kubernetes cluster (Docker
+Desktop's built-in Kubernetes) via the Helm chart in `infra/helm-chart/` —
+proving the deployment path works before any cloud cluster exists. **It
+runs alongside docker-compose, not instead of it** — docker-compose keeps
+owning Postgres/Redis/monitoring, and the K8s backend/worker pods reach
+those same containers over the host network. Do not stop docker-compose
+before or during this.
+
+### Prerequisites
+
+- Docker Desktop with Kubernetes enabled (Settings → Kubernetes → Enable
+  Kubernetes). Verify: `kubectl cluster-info` should show a `127.0.0.1:<port>`
+  control plane and `kubectl config current-context` should read
+  `docker-desktop`.
+- Helm installed (`helm version`). Install via `winget install Helm.Helm`
+  if missing.
+- docker-compose stack already running (`docker compose -f
+  infra/docker/docker-compose.yml ps` — postgres and redis must be healthy),
+  since this deployment does not include its own Postgres/Redis.
+
+### 1. Build and Verify Images
+
+```bash
+docker build -f infra/docker/Dockerfile.backend -t f1-backend:local .
+docker build -f infra/docker/Dockerfile.worker -t f1-worker:local .
+```
+
+No `kind load` step is needed here — despite Docker Desktop's Kubernetes
+node running on a kind-style provisioner internally, it is not a cluster
+the `kind` CLI manages, and it shares its containerd image store directly
+with the Docker daemon. Images built above are already visible to the
+cluster; `values.local.yaml` sets `imagePullPolicy: IfNotPresent` so pods
+use the local image instead of attempting a registry pull.
+
+### 2. Create the Namespace and Secrets
+
+```bash
+kubectl create namespace local
+
+# Reads DATABASE_URL/TIMESCALE_URL/REDIS_URL/SECRET_KEY/AWS credentials from
+# .env at repo root, rewriting "localhost" to "host.docker.internal" so
+# pods in the cluster can reach docker-compose's Postgres/Redis over the
+# host network.
+./infra/k8s/create-secrets.sh local --rewrite-localhost
+```
+
+`create-secrets.sh` is gitignored (never committed) — it's a local-only
+helper, present on disk from setup but not tracked in git. Re-run it any
+time `.env` changes; it's idempotent.
+
+### 3. Deploy with Helm
+
+```bash
+helm lint infra/helm-chart
+helm template infra/helm-chart --values infra/helm-chart/values.local.yaml
+
+helm upgrade --install f1-strategy-engine ./infra/helm-chart \
+  --values infra/helm-chart/values.local.yaml \
+  --namespace local
+
+kubectl rollout status deployment/f1-strategy-engine-backend -n local --timeout=300s
+kubectl get pods -n local
+```
+
+All pods should show `Running` with readiness passing (backend's `/health`
+probe, worker's `celery inspect ping` probe).
+
+### 4. Access the Backend
+
+Docker Desktop's Kubernetes is **local-only, not publicly accessible** —
+use `kubectl port-forward` to reach it. Host port 8000 is already taken by
+docker-compose's own backend container, so this uses 8080:
+
+```bash
+kubectl port-forward svc/f1-strategy-engine-backend 8080:8000 -n local
+
+# In another terminal:
+curl http://localhost:8080/health   # expect 200 OK
+```
+
+For a demo that needs a public URL, use ngrok against the docker-compose
+backend as documented above (`ngrok http 8000`) — the K8s deployment here
+is a deployment-path proof, not the demo path.
+
+### 5. Worker Autoscaling — KEDA
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda --create-namespace
+
+kubectl apply -f infra/k8s/worker-scaledobject.yaml -n local
+kubectl get scaledobject -n local
+```
+
+`worker-scaledobject.yaml` scales on `prediction_queue`'s Redis list length
+(see CLAUDE.md's `--pool=solo` scaling note), not CPU. Its `namespace:
+local` and `address: host.docker.internal:6379` are local-validation
+overrides — the file notes production restores its own namespace and adds
+Redis auth back once a real cluster exists.
+
+### 6. Race Weekend Pre-Scaling CronJob
+
+```bash
+kubectl apply -f infra/k8s/race-weekend-cronjob.yaml -n local
+kubectl get cronjob -n local
+```
+
+Applying this only proves the CronJob/RBAC objects register correctly —
+`backend/scripts/prescale_for_session.py` (the command it runs) doesn't
+exist yet, so a scheduled run will fail until that script is written.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Pods stuck `ImagePullBackOff` | Confirm `docker build` used the exact tag in `values.local.yaml` (`f1-backend:local` / `f1-worker:local`); rebuild if stale |
+| Backend pods not `Ready` | `kubectl logs -n local deploy/f1-strategy-engine-backend` — usually a DB/Redis connectivity issue; confirm docker-compose's postgres/redis are healthy and reachable at `host.docker.internal` |
+| `create-secrets.sh` fails "namespace does not exist" | Run `kubectl create namespace local` first |
+| `helm upgrade` fails on an existing release in a bad state | `helm status f1-strategy-engine -n local` to see what's wrong before retrying |
 
 ---
 

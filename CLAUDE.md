@@ -164,6 +164,69 @@ ENVIRONMENT           development | staging | production
 
 ## Architecture Decisions (understand these before proposing alternatives)
 
+**Backend cold start is ~88s (xgboost/lightgbm/shap imports) — Kubernetes
+startupProbe required:**
+Kubernetes startupProbe set to 30×10s=300s budget in
+`infra/helm-chart/templates/backend-deployment.yaml` — do not reduce this
+without re-timing the cold start. Standard livenessProbe budget of 75s is
+insufficient and causes CrashLoopBackOff. Confirmed empirically Day 22 via
+a standalone `docker run` (no other pods competing for CPU): the container
+took 88s from start to first successful `/health` response, all spent
+before uvicorn ever binds the port (importing xgboost/lightgbm/shap/numpy/
+scipy). The original `livenessProbe` (`initialDelaySeconds: 15,
+periodSeconds: 20, failureThreshold: 3` = 75s budget) killed the container
+via SIGKILL every time, before it ever logged a single line — `kubectl
+logs` and `--previous` were both completely empty, which is the tell for
+this class of bug (not a DB/Redis connectivity failure, not an app crash).
+The worker Deployment has no `livenessProbe` at all, which is exactly why
+worker pods reached `1/1 Ready` on the same node while backend pods
+crash-looped forever — slow startup there only delayed readiness, nothing
+killed the container mid-import. Fix: `startupProbe` (same `/health`
+endpoint, `failureThreshold: 30, periodSeconds: 10`) gates liveness/
+readiness until the app is actually up — the standard Kubernetes pattern
+for slow-starting containers, rather than inflating livenessProbe's own
+initialDelaySeconds.
+
+**Docker Desktop Kubernetes shares its image store directly — no `kind
+load` needed:**
+Despite Docker Desktop's Kubernetes node (`desktop-control-plane`) running
+on a kind-style provisioner internally, it is not a cluster the `kind` CLI
+manages (confirmed Day 22: `kind` isn't even installed, and `kind load
+docker-image` only works on clusters the kind CLI itself created). The
+node uses containerd directly and shares that image store with the Docker
+daemon, so a plain `docker build -t f1-backend:local .` is immediately
+visible to the cluster — confirmed via `kubectl describe pod` showing
+`Successfully pulled image "f1-backend:local" in 2.166s` (a local
+containerd-store hit, not a network pull). `values.local.yaml` sets
+`imagePullPolicy: IfNotPresent` accordingly.
+
+**Local Kubernetes deployment reaches docker-compose's Postgres/Redis via
+`host.docker.internal`, not its own DB/cache:**
+`infra/helm-chart/` deliberately does not template Postgres/Redis — the
+Day 22 local deploy runs *alongside* docker-compose (see Deployment
+Strategy), not instead of it. `infra/k8s/create-secrets.sh
+--rewrite-localhost` rewrites `.env`'s `DATABASE_URL`/`TIMESCALE_URL`/
+`REDIS_URL` from `localhost` to `host.docker.internal` before creating the
+cluster Secret, since the K8s pods are not on docker-compose's Docker
+network but can reach the host's exposed ports. `worker-scaledobject.yaml`
+follows the same pattern for KEDA's Redis trigger address. A real cloud
+cluster (Supabase/Upstash) needs no such rewriting — real hostnames go in
+directly.
+
+**`worker-scaledobject.yaml` / `race-weekend-cronjob.yaml` carry
+local-validation overrides, not their final production shape:**
+Both files were written Day 21 targeting `namespace: production`; Day 22
+changed them to `namespace: local` (plus `f1-backend:local` image and
+Redis address) so they could actually be applied and verified against the
+local Docker Desktop cluster. Each file's own header comment states what
+production must restore: `worker-scaledobject.yaml` needs its
+`TriggerAuthentication`/Redis-password `authenticationRef` added back
+(dropped locally since docker-compose's Redis has no password);
+`race-weekend-cronjob.yaml` needs its ECR image reference restored and
+still requires `backend/scripts/prescale_for_session.py` to be implemented
+— applying it today only proves the CronJob/RBAC objects register
+correctly, not that a scheduled run succeeds.
+
 **WebSocket pubsub cleanup — fire-and-forget aclose():**
 redis-py 6.4.0's `PubSub.aclose()` hangs indefinitely on disconnect 
 when `forward_task` is cancelled mid-read inside `conn.read_response()` 

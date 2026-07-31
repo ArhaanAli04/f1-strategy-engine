@@ -223,3 +223,7 @@ fastf1_cache/
 # Load test auth token cache (backend/tests/load/locustfile.py) — live
 # access/refresh tokens for locally-provisioned test users, never commit.
 backend/tests/load/.token_cache.json
+
+# Kubernetes local secrets helper (infra/k8s/create-secrets.sh) — reads
+# .env and creates cluster Secrets at runtime; never committed.
+infra/k8s/create-secrets.sh

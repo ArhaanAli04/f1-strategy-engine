@@ -1,0 +1,90 @@
+# Default values for f1-strategy-engine.
+# Local Docker Desktop defaults live here; values.local.yaml only overrides
+# what actually differs (image tags/pull policy, host names). Environment
+# split (dev/staging/prod) matches core/config.py's AppSettings.environment.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  # Shared pull policy — IfNotPresent works both for images already loaded
+  # into the local Docker Desktop cluster's containerd store and for
+  # immutable :sha-tagged images in a real registry.
+  pullPolicy: IfNotPresent
+
+backend:
+  image:
+    repository: f1-backend
+    tag: local
+  replicaCount: 3
+  port: 8000
+  # Only the backend gets these two — matches docker-compose.yml, where the
+  # worker service never sets DB_POOL_SIZE/DB_MAX_OVERFLOW and relies on
+  # DatabaseSettings' defaults (10/20). See CLAUDE.md's DB pool sizing note.
+  dbPoolSize: "20"
+  dbMaxOverflow: "40"
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  service:
+    type: ClusterIP
+    port: 8000
+
+worker:
+  image:
+    repository: f1-worker
+    tag: local
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Non-secret env vars shared by backend + worker (rendered into
+# configmap.yaml). Anything sensitive (DATABASE_URL, REDIS_URL, SECRET_KEY,
+# AWS credentials) is never listed here — it comes from the Secret created
+# by infra/k8s/create-secrets.sh (see secrets.name below).
+env:
+  environment: development
+  fastf1CacheDir: /tmp/fastf1_cache
+  awsBucketName: f1-strategy-models
+  awsRegion: ap-south-1
+
+secrets:
+  # Name of the Secret pre-created by infra/k8s/create-secrets.sh. Never
+  # inline secret values in any values file.
+  name: f1-strategy-engine-secrets
+
+ingress:
+  enabled: true
+  className: nginx
+  host: f1-strategy-engine.local
+  tls:
+    # Annotations + tls: block are always rendered (see ingress.yaml) so the
+    # shape is ready for a real cluster — locally there's no cert-manager
+    # controller and no ingress-nginx controller installed, so this stays
+    # inert regardless of these values. clusterIssuer/secretName are
+    # placeholders until a real one exists.
+    clusterIssuer: letsencrypt-prod
+    secretName: f1-strategy-engine-tls
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 60
+
+pdb:
+  minAvailable: 1
