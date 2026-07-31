@@ -376,20 +376,20 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    5
-Day:      21
-Status:   Model retraining pipeline complete. export_training_data.py 
-          (one-time S3 parquet export), retrain_incremental.py (CI 
-          entrypoint — base parquet + live FastF1 2026 fetch, no DB 
-          needed), train-models.yml (workflow_dispatch live, cron TODO 
-          Day 23), per-model promotion to :production tag. docs/runbook.md 
-          written. K8s manifests written but not applied: hpa.yaml, 
-          worker-scaledobject.yaml, race-weekend-cronjob.yaml. 
-          pyarrow added to deps. 104 tests passing, 113 files mypy clean.
-Next:     Day 22 — Kubernetes manifests, Helm chart, Docker Desktop K8s
-Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
-          (fix before Day 22), production environment needs ArhaanAli04 as required reviewer 
-          before Day 24, Run export_training_data.py once locally before triggering 
-          train-models.yml (see CLAUDE.md deferred wiring)
+Day:      22
+Status:   Helm chart complete (infra/helm-chart/ — 8 templates, 
+          values.yaml/local/staging/production). Local Docker Desktop 
+          Kubernetes deployment verified: 3 backend + 2 worker pods 
+          Running 1/1 Ready, /health 200 OK via port-forward. Fixed 
+          startupProbe bug (88s ML cold start vs 75s probe budget — 
+          now 300s). KEDA installed, ScaledObject READY:True. CronJob 
+          registered. create-secrets.sh written (gitignored). 
+          host.docker.internal confirmed for DB/Redis connectivity. 
+          cd.yml Jobs 3/4 comments updated to reflect local K8s strategy.
+Next:     Day 23 — Supabase + Upstash cloud databases
+Blockers: production environment needs ArhaanAli04 as required reviewer 
+          before Day 24, Cloud deployment target undecided (Render/GKE) — 
+          cd.yml Jobs 3-5 remain placeholders
 ```
 
 ---
