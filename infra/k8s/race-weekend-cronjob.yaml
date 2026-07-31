@@ -1,6 +1,12 @@
-# Race weekend pre-scaling CronJob — written Day 21, applied Day 22 once the
-# EKS/Docker Desktop Kubernetes cluster and Helm chart exist. Do NOT apply
-# today; there is no cluster yet.
+# Race weekend pre-scaling CronJob — written Day 21, applied Day 22 against
+# local Docker Desktop Kubernetes (see infra/helm-chart/, DEPLOYMENT.md's
+# "Local Kubernetes Deployment" section).
+#
+# namespace below is a LOCAL-VALIDATION override: a real cluster restores
+# namespace: production (both in metadata and the CronJob's --namespace
+# arg). image is also local-only (f1-backend:local, matching
+# values.local.yaml) — production points this at the same ECR backend
+# image cd.yml builds/pushes.
 #
 # Session start times vary weekend-to-weekend, so a single fixed `schedule:`
 # cron expression can't itself mean "30 min before the next session" — this
@@ -10,31 +16,30 @@
 # HTTP to ergast.com has been dead since 2024) for whether any session starts
 # within the next 30 minutes; if so, it scales the backend Deployment to 5
 # replicas, otherwise it's a no-op. Scaling back down after a session ends is
-# handled by the HPA's own scaleDown behavior (infra/k8s/hpa.yaml) once
-# viewer-driven traffic (f1_active_websocket_connections) drops, not by this
-# CronJob.
+# handled by the HPA's own scaleDown behavior (infra/helm-chart/templates/hpa.yaml)
+# once viewer-driven traffic (f1_active_websocket_connections) drops, not by
+# this CronJob.
 #
-# The actual session-time-check script (backend/scripts/prescale_for_session.py,
-# referenced below) is a Day 22 implementation detail — this manifest wires
-# the CronJob's shape, schedule, and RBAC permissions so the real command can
-# drop in on Day 22 without restructuring this file (same pattern cd.yml's
-# Jobs 2-5 already use for their deferred steps).
+# backend/scripts/prescale_for_session.py (referenced below) does not exist
+# yet — applying this manifest only proves the CronJob/RBAC objects register
+# correctly; a scheduled run will fail until that script is written (see
+# DEPLOYMENT.md's Local Kubernetes Deployment troubleshooting table).
 #
-# Deployment name (f1-strategy-engine-backend) is a placeholder matching
-# cd.yml's Helm release name (f1-strategy-engine) + "-backend" — confirm and
-# update against the actual generated resource name once the Helm chart is
-# written on Day 22.
+# Deployment name (f1-strategy-engine-backend) matches the name the Helm
+# chart generates (release name == chart name, confirmed via `helm template
+# f1-strategy-engine infra/helm-chart` — see infra/helm-chart/templates/
+# backend-deployment.yaml).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: f1-strategy-engine-race-scaler
-  namespace: production
+  namespace: local
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: f1-strategy-engine-race-scaler
-  namespace: production
+  namespace: local
 rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "deployments/scale"]
@@ -45,11 +50,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: f1-strategy-engine-race-scaler
-  namespace: production
+  namespace: local
 subjects:
   - kind: ServiceAccount
     name: f1-strategy-engine-race-scaler
-    namespace: production
+    namespace: local
 roleRef:
   kind: Role
   name: f1-strategy-engine-race-scaler
@@ -59,7 +64,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: f1-strategy-engine-race-weekend-prescale
-  namespace: production
+  namespace: local
 spec:
   schedule: "*/10 * * * *"
   concurrencyPolicy: Forbid
@@ -74,13 +79,8 @@ spec:
           restartPolicy: Never
           containers:
             - name: race-weekend-prescale
-              # Placeholder image ref — Day 22 should point this at the same
-              # ECR backend image cd.yml builds/pushes, so this script ships
-              # with the rest of backend/scripts/ rather than a separate image.
-              image: "${ECR_REGISTRY}/${ECR_BACKEND_REPO}:latest"
-              # TODO Day 22: implement backend/scripts/prescale_for_session.py
-              # (checks Ergast calendar, scales f1-strategy-engine-backend to
-              # 5 replicas if any session starts within --lead-minutes).
+              image: f1-backend:local
+              imagePullPolicy: IfNotPresent
               command:
                 - python
                 - -m
@@ -92,4 +92,4 @@ spec:
                 - --deployment
                 - f1-strategy-engine-backend
                 - --namespace
-                - production
+                - local

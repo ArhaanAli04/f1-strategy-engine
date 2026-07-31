@@ -13,8 +13,15 @@ name: CD
 # real command, so the real command can drop in on its scheduled day without
 # restructuring this file.
 #
-# cosign image signing is deferred to Day 22, when the EKS cluster (and an
-# admission-time verification target) exists — no signing step below yet.
+# Day 22 built and validated infra/helm-chart/ against a local Docker
+# Desktop Kubernetes cluster only (see DEPLOYMENT.md's "Local Kubernetes
+# Deployment" section) — no cloud cluster exists yet, and which one
+# (EKS/GKE/Render, see DEPLOYMENT.md's "Future Cloud Deployment") is still
+# an open decision. Jobs 3-5 below stay deferred until that decision is
+# made and a real cluster/kubeconfig exists.
+#
+# cosign image signing is deferred until a real cloud cluster exists (an
+# admission-time verification target) — no signing step below yet.
 
 on:
   push:
@@ -104,26 +111,29 @@ jobs:
         #   run: alembic upgrade head
 
   deploy-staging:
-    name: Deploy to staging (EKS)
+    name: Deploy to staging (cloud target TBD)
     needs: [migrate]
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to staging (deferred)
-        run: echo "Staging deploy deferred — EKS provisioned Day 22"
-        # TODO Day 22: replace the echo above with the real staging deploy,
-        # once the EKS cluster and Helm chart (infra/k8s/) exist:
+        run: echo "Staging deploy deferred — no cloud cluster provisioned yet; Day 22 validated the Helm chart against local Docker Desktop Kubernetes only (see DEPLOYMENT.md)"
+        # TODO: replace the echo above with the real staging deploy, once a
+        # cloud cluster (EKS/GKE/Render — still an open decision, see
+        # DEPLOYMENT.md's "Future Cloud Deployment") and its kubeconfig
+        # exist. The Helm chart itself (infra/helm-chart/) is ready — Day 22
+        # proved `helm upgrade --install` works end-to-end locally:
         #
         # - uses: actions/checkout@v4
         # - name: Configure kubeconfig
         #   run: echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
         # - name: Helm upgrade (staging)
         #   run: |
-        #     helm upgrade --install f1-strategy-engine infra/k8s/helm \
+        #     helm upgrade --install f1-strategy-engine infra/helm-chart \
         #       --namespace staging --create-namespace \
         #       --kubeconfig kubeconfig \
         #       --set backend.image.tag=${{ github.sha }} \
         #       --set worker.image.tag=${{ github.sha }} \
-        #       --values infra/k8s/helm/values-staging.yaml \
+        #       --values infra/helm-chart/values.staging.yaml \
         #       --wait --timeout 5m
 
   load-test-staging:
@@ -132,9 +142,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Load test staging (deferred)
-        run: echo "Load test deferred — staging URL available Day 22"
-        # TODO Day 22: once deploy-staging is real, trigger load-test.yml
-        # against the resulting staging URL, e.g.:
+        run: echo "Load test deferred — no staging URL yet; deploy-staging remains an echo placeholder until a cloud cluster exists (see DEPLOYMENT.md)"
+        # TODO: once deploy-staging is real, trigger load-test.yml against
+        # the resulting staging URL, e.g.:
         #
         # - name: Trigger load-test workflow
         #   env:

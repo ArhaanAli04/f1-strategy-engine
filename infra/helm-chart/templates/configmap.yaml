@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "f1-strategy-engine.fullname" . }}-config
+  labels:
+    {{- include "f1-strategy-engine.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: {{ .Values.env.environment | quote }}
+  FASTF1_CACHE_DIR: {{ .Values.env.fastf1CacheDir | quote }}
+  AWS_BUCKET_NAME: {{ .Values.env.awsBucketName | quote }}
+  AWS_REGION: {{ .Values.env.awsRegion | quote }}

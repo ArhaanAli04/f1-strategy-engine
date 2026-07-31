@@ -1,0 +1,39 @@
+# Local Docker Desktop Kubernetes overrides.
+#
+# DB/Redis: the Helm chart intentionally does not deploy Postgres/Redis —
+# this deployment runs *alongside* the existing docker-compose stack (see
+# CLAUDE.md's Deployment Strategy: "don't shut down docker-compose, run K8s
+# alongside it"), not replacing it. So the Secret created by
+# infra/k8s/create-secrets.sh for local use must point DATABASE_URL/
+# TIMESCALE_URL/REDIS_URL at host.docker.internal instead of localhost —
+# that's done by create-secrets.sh's --rewrite-localhost flag, not here
+# (these values never carry secret connection strings).
+#
+# Images: built locally as f1-backend:local / f1-worker:local
+# (docker build -f infra/docker/Dockerfile.backend -t f1-backend:local .).
+# Docker Desktop Kubernetes shares its image store directly with the Docker
+# daemon (containerd-backed), so these are visible to the cluster with no
+# extra load step — imagePullPolicy: IfNotPresent, not Never (would refuse
+# a future real pull) and not Always (would force a registry lookup that
+# doesn't exist for a local-only tag).
+image:
+  pullPolicy: IfNotPresent
+
+backend:
+  image:
+    repository: f1-backend
+    tag: local
+
+worker:
+  image:
+    repository: f1-worker
+    tag: local
+
+env:
+  environment: development
+
+# No ingress-nginx controller installed locally — the Ingress resource
+# still renders (kept enabled for template/lint verification) but is inert.
+# Access is via kubectl port-forward, per DEPLOYMENT.md.
+ingress:
+  enabled: true
