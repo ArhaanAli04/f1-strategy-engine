@@ -376,17 +376,17 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    5
-Day:      22
-Status:   Helm chart complete (infra/helm-chart/ — 8 templates, 
-          values.yaml/local/staging/production). Local Docker Desktop 
-          Kubernetes deployment verified: 3 backend + 2 worker pods 
-          Running 1/1 Ready, /health 200 OK via port-forward. Fixed 
-          startupProbe bug (88s ML cold start vs 75s probe budget — 
-          now 300s). KEDA installed, ScaledObject READY:True. CronJob 
-          registered. create-secrets.sh written (gitignored). 
-          host.docker.internal confirmed for DB/Redis connectivity. 
-          cd.yml Jobs 3/4 comments updated to reflect local K8s strategy.
-Next:     Day 23 — Supabase + Upstash cloud databases
+Day:      23
+Status:   Supabase PostgreSQL connected — 8 migrations ran clean, 
+          TimescaleDB gracefully skipped, 14 tables verified, 
+          24 circuits + 11 teams + 22 drivers + 22 contracts seeded. 
+          Upstash Redis configured (Mumbai, allkeys-lru). S3 verified: 
+          7 production models + metrics JSONs + training-data parquet. 
+          cd.yml Job 2 (migrate) filled in — alembic upgrade head 
+          against SUPABASE_DIRECT_URL, Slack alert on failure. 
+          IPv6 blocker resolved: session-mode pooler (port 5432) 
+          used instead of direct connection.
+Next:     Day 24 — Production deployment + smoke tests
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
