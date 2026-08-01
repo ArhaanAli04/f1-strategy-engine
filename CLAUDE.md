@@ -387,8 +387,7 @@ Status:   Helm chart complete (infra/helm-chart/ — 8 templates,
           host.docker.internal confirmed for DB/Redis connectivity. 
           cd.yml Jobs 3/4 comments updated to reflect local K8s strategy.
 Next:     Day 23 — Supabase + Upstash cloud databases
-Blockers: production environment needs ArhaanAli04 as required reviewer 
-          before Day 24, Cloud deployment target undecided (Render/GKE) — 
+Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
 

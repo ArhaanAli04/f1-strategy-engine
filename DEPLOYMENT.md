@@ -13,7 +13,9 @@ This document covers how the F1 Strategy Engine is run, demonstrated, and develo
 5. [Mobile App — Development Build](#mobile-app--development-build)
 6. [General Development Workflow](#general-development-workflow)
 7. [Local Kubernetes Deployment (Docker Desktop)](#local-kubernetes-deployment-docker-desktop)
-8. [Future Cloud Deployment](#future-cloud-deployment)
+8. [Production Deployment — Fly.io (After Day 40)](#production-deployment--flyio-after-day-40)
+9. [Local Kubernetes — When to Use It](#local-kubernetes--when-to-use-it)
+
 
 ---
 
@@ -533,19 +535,128 @@ exist yet, so a scheduled run will fail until that script is written.
 
 ---
 
-## Future Cloud Deployment
+## Production Deployment — Fly.io (After Day 40)
 
-When cloud deployment is needed (job demo, always-on access):
+The recommended production deployment after all three clients are built. 
+Fly.io runs the backend and worker containers publicly at $0-4/month. 
+All features work including WebSockets — no compromises.
+
+### Production Stack
 
 | Component | Platform | Cost |
 |---|---|---|
-| FastAPI backend | Render Starter | $7/month |
-| Celery worker | Render Background Worker | $7/month |
-| PostgreSQL | Supabase free tier | $0 |
-| Redis | Upstash free tier | $0 |
-| S3 models | AWS S3 (existing) | ~$1/month |
-| Web frontend | Vercel (existing) | $0 |
-| **Total** | | **~$15/month** |
+| FastAPI backend | Fly.io | $0-2/month |
+| Celery worker | Fly.io | $0-2/month |
+| PostgreSQL | Supabase (Day 23) | $0 |
+| Redis | Upstash (Day 23) | $0 |
+| ML Models | AWS S3 (Day 7) | ~$1/month |
+| Web frontend | Vercel | $0 |
+| **Total** | | **~$1-5/month** |
+
+### One-Time Setup (After Day 40)
+
+```bash
+# Install Fly CLI
+curl -L https://fly.io/install.sh | sh
+
+# Login
+fly auth login
+
+# Deploy backend
+fly launch --dockerfile infra/docker/Dockerfile.backend \
+  --name f1-strategy-engine-backend \
+  --region sin  # Singapore — closest to Mumbai
+fly deploy
+
+# Deploy worker
+fly launch --dockerfile infra/docker/Dockerfile.worker \
+  --name f1-strategy-engine-worker \
+  --region sin
+fly deploy
+```
+
+### Environment Variables to Set on Fly.io
+
+```bash
+# Set for both backend and worker apps
+fly secrets set \
+  DATABASE_URL=<supabase-pooler-url> \
+  REDIS_URL=<upstash-rediss-url> \
+  SECRET_KEY=<your-secret-key> \
+  AWS_ACCESS_KEY_ID=<key> \
+  AWS_SECRET_ACCESS_KEY=<secret> \
+  AWS_BUCKET_NAME=f1-strategy-models \
+  AWS_REGION=ap-south-1 \
+  SENTRY_DSN=<your-dsn> \
+  ENVIRONMENT=production \
+  --app f1-strategy-engine-backend
+```
+
+### After Deployment
+
+```bash
+# Verify backend is healthy
+curl https://f1-strategy-engine-backend.fly.dev/health
+
+# Update frontend .env to point at Fly.io
+# VITE_API_URL=https://f1-strategy-engine-backend.fly.dev
+# VITE_WS_URL=wss://f1-strategy-engine-backend.fly.dev
+
+# Deploy frontend to Vercel (points at Fly.io backend)
+vercel deploy
+```
+
+### RAM Note
+
+Fly.io free VMs are 256MB shared. Your backend loads XGBoost + LightGBM + 
+SHAP at startup (~512MB needed). Upgrade to 512MB if needed:
+
+```bash
+fly scale memory 512 --app f1-strategy-engine-backend
+# Cost: ~$1.94/month — still nearly free
+```
+
+### What Works on Fly.io
+
+- ✅ All REST API endpoints
+- ✅ WebSocket live telemetry
+- ✅ ML inference (XGBoost, LightGBM, Monte Carlo)
+- ✅ Celery background tasks
+- ✅ SHAP explanations
+- ✅ Push notifications
+- ✅ Authentication (JWT)
+- ✅ Always-on (no spin-down)
+- ✅ Public permanent URL
+
+---
+
+## Local Kubernetes — When to Use It
+
+Local Kubernetes (Docker Desktop) remains available for:
+
+**Portfolio demonstrations:**
+- Show Helm chart deployment to interviewers
+- Demonstrate HPA auto-scaling behavior
+- Show KEDA worker scaling based on Redis queue depth
+- Prove zero-downtime rolling deployments
+
+**Load testing with auto-scaling:**
+- Run Locust at 100-500 users against local K8s
+- Watch KEDA scale workers in real time
+- Compare single-instance vs multi-replica performance
+
+**Future cloud migration:**
+- The same Helm chart in `infra/helm-chart/` deploys to GKE/EKS unchanged
+- If real traffic ever demands it, migrate from Fly.io to GKE in one afternoon
+- Same Docker images, same configuration, different cluster endpoint
+
+```bash
+# Resume local Kubernetes deployment any time
+docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+helm upgrade --install f1-strategy-engine ./infra/helm-chart \
+  --values infra/helm-chart/values.local.yaml --namespace local
+kubectl get pods -n local
+```
 
 The Kubernetes manifests and Helm charts in `infra/helm-chart/` are ready for GKE/EKS deployment when needed — same Docker images, same configuration, pointed at cloud infrastructure instead of local.
 
