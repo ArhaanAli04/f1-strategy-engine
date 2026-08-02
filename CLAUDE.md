@@ -415,13 +415,13 @@ Update this list as each service is configured.
 | F1TV Subscription | Authenticated live timing feed | ⬜ Not set up | Live testing |
 | AWS S3 (f1-strategy-models) | ML model storage | ✅ set up | Day 7 |
 | AWS IAM credentials | S3 read/write access | ✅  set up | Day 7 |
-| Supabase (production DB) | Cloud PostgreSQL + TimescaleDB | ⬜ Not set up | Day 23 |
-| Upstash Redis (production) | Cloud Redis cache + broker | ⬜ Not set up | Day 23 |
-| Kubernetes cluster (EKS/GKE) | Production container orchestration | ⬜ Not set up | Day 22 |
+| Supabase (production DB) | Cloud PostgreSQL | ✅ set up day 23 | Day 23 |
+| Upstash Redis (production) | Cloud Redis cache + broker | ✅ set up day 23 | Day 23 |
+| Kubernetes cluster (local Docker Desktop) | Local container orchestration | ✅ set up day 22 | Day 22 |
 | Sentry | Exception tracking + performance | ✅ set up | Day 12 |
 | Slack (F1 Strategy Engine workspace) | Alertmanager notifications | ✅ Set up | Day 12 |
 | Vercel | Web frontend deployment | ⬜ Not set up | Day 33 |
-| GitHub Secrets | CD pipeline credentials | ⬜ Not set up | Day 19 |
+| GitHub Secrets | CD pipeline credentials | ✅ set up day 19 | Day 19 |
 
 ### Setup Notes
 
