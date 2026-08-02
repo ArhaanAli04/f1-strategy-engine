@@ -16,9 +16,17 @@ def _get_pool() -> aioredis.ConnectionPool:  # type: ignore[type-arg]
         from backend.core.config import get_redis_settings
 
         settings = get_redis_settings()
+        # rediss:// (Upstash) defaults to an unverified TLS connection with a
+        # logged warning unless ssl_cert_reqs is explicit — CERT_REQUIRED
+        # verifies against the system CA bundle. Plain redis:// (local
+        # docker-compose) ignores this kwarg.
+        ssl_kwargs = (
+            {"ssl_cert_reqs": "required"} if settings.redis_url.startswith("rediss://") else {}
+        )
         _pool = aioredis.ConnectionPool.from_url(
             settings.redis_url,
             decode_responses=True,
+            **ssl_kwargs,
             # A pub/sub subscription (see /ws/telemetry/{session_id}) pins a
             # dedicated connection from this pool for the entire WS
             # connection's lifetime, unlike a plain command which borrows and

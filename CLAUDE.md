@@ -200,6 +200,31 @@ visible to the cluster — confirmed via `kubectl describe pod` showing
 containerd-store hit, not a network pull). `values.local.yaml` sets
 `imagePullPolicy: IfNotPresent` accordingly.
 
+**Correction (Day 24): the above only holds for a tag's *first* build —
+rebuilding an already-cached tag does not get picked up.** Under
+`IfNotPresent`, once containerd has resolved `f1-backend:local`/
+`f1-worker:local` to a real image at least once, it treats that tag as
+"already present" and never re-resolves it, even after `docker build -t
+f1-backend:local .` retags the same name to genuinely new content on the
+host. `docker images` on the host correctly shows the new digest — the
+node just doesn't look again. Confirmed Day 24: after rebuilding
+`f1-worker:local` to pick up a real code fix, `kubectl get pod ... -o
+jsonpath='{.status.containerStatuses[0].imageID}'` still showed the
+pre-rebuild digest on a pod created *after* the rebuild, and the pod kept
+failing with the pre-fix bug — restarting/recreating the pod did not help,
+since pod recreation still resolves the same stale tag. Workaround used:
+retag to a build-specific name (`docker tag f1-backend:local
+f1-backend:day24fix`, same for worker) and point the Helm release at it
+(`helm upgrade ... --set backend.image.tag=day24fix --set
+worker.image.tag=day24fix`) — a name the node has never cached forces a
+real re-resolution. The alternative, `imagePullPolicy: Always`, forces a
+fresh resolution on every pod restart (always current, no manual retagging
+needed) but is slower per pod start and was not adopted here since
+`values.local.yaml` already documents why `Always` is wrong for a
+local-only tag never pushed to a registry — a real fix would need a
+per-build unique tag (e.g. a git SHA or timestamp) wired into the local
+dev workflow, not just a one-off manual retag.
+
 **Local Kubernetes deployment reaches docker-compose's Postgres/Redis via
 `host.docker.internal`, not its own DB/cache:**
 `infra/helm-chart/` deliberately does not template Postgres/Redis — the
@@ -915,6 +940,93 @@ Verified:
   pinned per active session regardless of viewer count, so this ceiling has
   headroom to spare. Left unchanged — no evidence yet it needs lowering,
   and lowering it isn't necessary for correctness.
+
+**SENTRY_DSN never reached a running process (✅ fixed Day 24):**
+`.env` had a real `SENTRY_DSN` since Day 12, but neither
+`infra/docker/docker-compose.yml`'s `backend`/`worker` `environment:`
+blocks nor the Helm chart's Secret/ConfigMap ever passed it through — so
+`AppSettings.sentry_dsn` was always `""` and `main.py`'s lifespan never
+called `sentry_sdk.init()`, in both docker-compose and every Kubernetes
+deployment to date. Only surfaced when a Day 24 smoke test tried to
+verify Sentry actually receives errors. Fixed: `SENTRY_DSN:
+"${SENTRY_DSN:-}"` added to both compose services;
+`infra/k8s/create-secrets.sh` now includes `SENTRY_DSN` in the Secret it
+creates (flows to both Deployments automatically via their existing
+`envFrom.secretRef`, no template changes needed). Added a permanent
+ops-only `GET /api/v1/debug/trigger-error` route (`main.py`) — 404s when
+`ENVIRONMENT=production` — for verifying Sentry wiring after any future
+deploy without needing a real bug. Verified live: event landed in
+`arhaanali.sentry.io` within 3 seconds, correct project, correct
+`environment` tag.
+
+**`create-secrets.sh` was sourcing the wrong DB/Redis URLs for a
+Kubernetes Secret (✅ fixed Day 24):** `.env`'s own `DATABASE_URL`/
+`TIMESCALE_URL`/`REDIS_URL` point at docker-compose's local Postgres/Redis
+(`localhost`) — they're for docker-compose's own `backend`/`worker`
+services, not for anything reaching Supabase/Upstash. The real cloud
+endpoints live in separate `SUPABASE_DATABASE_URL`/`SUPABASE_DIRECT_URL`/
+`UPSTASH_REDIS_URL` vars (added Day 23). `create-secrets.sh` read the
+former, so re-running it against the current `.env` silently wrote
+`localhost` URLs into the Kubernetes Secret — invisible until a pod
+actually restarted and picked them up (secrets aren't hot-reloaded),
+at which point it failed with `Connection refused` to `localhost:5432`/
+`6379` from inside the cluster network. Fixed: the script now builds
+`DATABASE_URL`/`TIMESCALE_URL` from `SUPABASE_DATABASE_URL` (with the
+`postgresql://` → `postgresql+asyncpg://` conversion `cd.yml`'s migrate
+job already does) and `REDIS_URL` from `UPSTASH_REDIS_URL` directly. The
+now-obsolete `--rewrite-localhost` flag (for reaching docker-compose's
+Postgres/Redis via `host.docker.internal`) was removed along with it,
+since a Kubernetes pod now always talks to the real Supabase/Upstash
+endpoints — there is no longer a "local-only" DB/cache target for it to
+reach. See [[docs/runbook.md]]'s Secret rotation procedure, corrected to
+match.
+
+**asyncpg + Supabase's transaction-mode pooler → intermittent
+`DuplicatePreparedStatementError` (✅ fixed Day 24):** Once
+`create-secrets.sh` above was fixed to actually point Kubernetes pods at
+Supabase, backend pods started failing `/health` — some only at startup
+(self-recovered on retry), one persistently on every request. Root cause:
+`SUPABASE_DATABASE_URL` (port 6543) is PgBouncer in transaction-pooling
+mode, which is incompatible with asyncpg's default prepared-statement
+caching — a connection can be handed to a different session mid-cache,
+producing `asyncpg.exceptions.DuplicatePreparedStatementError`. This is
+asyncpg's own documented PgBouncer caveat, not app-specific. Fixed:
+`core/database.py`'s `get_engine()` now passes
+`connect_args={"statement_cache_size": 0}` to `create_async_engine()`,
+unconditionally (harmless against docker-compose's local Postgres too,
+which has no pooler in front of it). Verified: 5 consecutive `/races`
+calls with zero errors post-fix, versus reproducing on ~1 in 3 fresh pods
+pre-fix.
+
+**Celery + Upstash's `rediss://` → hard crash at worker boot (✅ fixed Day
+24):** Once real Upstash traffic hit the worker (same Day 24 fix pass
+above), every worker pod crash-looped immediately:
+`ValueError: A rediss:// URL must have parameter ssl_cert_reqs...`.
+Celery's redis transport (`celery/backends/redis.py`) requires this
+stated explicitly for a `rediss://` broker/backend URL — unlike the
+FastAPI side's plain `redis.asyncio` client, which merely logs a warning
+and falls back to an unverified TLS connection. `workers/celery_app.py`
+now sets `broker_use_ssl`/`redis_backend_use_ssl` to
+`{"ssl_cert_reqs": ssl.CERT_REQUIRED}` whenever `REDIS_URL` starts with
+`rediss://` (a no-op against docker-compose's plain `redis://`). Also
+tightened `_poll_queue_depth`'s own `redis.Redis.from_url(...)` call and
+`core/redis_client.py`'s `aioredis.ConnectionPool.from_url(...)` to pass
+`ssl_cert_reqs="required"` under the same condition, closing the same
+unverified-TLS gap everywhere `rediss://` is used, not just where it was
+fatal. Verified: worker pods reach `celery@... ready.` and mingle with
+their peers against real Upstash.
+
+**Docker Desktop Kubernetes does not pick up a rebuilt image under an
+already-cached tag (⚠️ workaround only, not fixed — see Architecture
+Decisions' correction to the Day 22 image-caching note):** hit while
+verifying the two fixes above — rebuilding `f1-backend:local`/
+`f1-worker:local` and restarting pods kept reproducing the pre-fix
+behavior, traced to the node running a stale image digest under the same
+tag. Worked around Day 24 by retagging to a build-specific name
+(`f1-backend:day24fix`) and pointing the Helm release at it via `--set
+backend.image.tag=...`; not a lasting fix — local iteration on `:local`
+images should move to a per-build unique tag (git SHA or timestamp)
+rather than reusing one tag repeatedly.
 
 ## Deferred Telemetry Features
 

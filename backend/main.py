@@ -161,3 +161,17 @@ async def health() -> JSONResponse:
             "redis": "ok" if redis_ok else "error",
         },
     )
+
+
+@app.get("/api/v1/debug/trigger-error", tags=["ops"])
+async def trigger_error() -> None:
+    """Deliberately raise to verify Sentry captures unhandled exceptions end-to-end.
+
+    404s when ENVIRONMENT=production — an ops-only verification route for
+    confirming Sentry wiring after a deploy, not for probing a real deployment.
+    """
+    if get_app_settings().environment == "production":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    raise ZeroDivisionError(
+        "Deliberate error to verify Sentry integration (GET /api/v1/debug/trigger-error)"
+    )
