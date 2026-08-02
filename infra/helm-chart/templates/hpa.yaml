@@ -1,0 +1,46 @@
+{{- if .Values.hpa.enabled }}
+# Moved from infra/k8s/hpa.yaml (written Day 21) now that the Helm chart
+# exists. Simplified to the CPU-only rule for this move: the original
+# file's second metric (Pods/f1_active_websocket_connections) requires
+# prometheus-adapter, which is not installed in any cluster yet — that
+# file's own comment already treated the CPU rule as the only one active
+# until the adapter exists. Re-add the custom metric here once
+# prometheus-adapter is wired up.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "f1-strategy-engine.fullname" . }}-backend
+  labels:
+    {{- include "f1-strategy-engine.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "f1-strategy-engine.fullname" . }}-backend
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hpa.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      # Race day traffic arrives as a step change at each session's green
+      # light (see docs/runbook.md) — scale up fast rather than gradually.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      # Scale down slowly — avoid flapping between sessions when viewer
+      # count dips briefly (e.g. a red flag).
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+{{- end }}

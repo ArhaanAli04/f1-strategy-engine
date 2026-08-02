@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "f1-strategy-engine.fullname" . }}-backend
+  labels:
+    {{- include "f1-strategy-engine.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "f1-strategy-engine.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend

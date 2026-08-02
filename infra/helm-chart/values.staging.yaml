@@ -1,0 +1,33 @@
+# Placeholder for a future cloud staging deployment (EKS/GKE or Render —
+# see CLAUDE.md's Deployment Strategy: "no cloud VM deployment during the
+# build"). Not validated against any real cluster. Mirrors cd.yml's
+# deploy-staging job's commented-out real steps, which reference this file
+# as infra/k8s/helm/values-staging.yaml — path will need to be reconciled
+# with the actual chart location (infra/helm-chart/) once a real cloud
+# target is chosen; do not treat these values as usable today.
+
+backend:
+  image:
+    repository: "${ECR_REGISTRY}/${ECR_BACKEND_REPO}"
+    tag: latest
+  replicaCount: 2
+
+worker:
+  image:
+    repository: "${ECR_REGISTRY}/${ECR_WORKER_REPO}"
+    tag: latest
+  replicaCount: 2
+
+image:
+  pullPolicy: IfNotPresent
+
+env:
+  environment: staging
+
+secrets:
+  name: f1-strategy-engine-secrets
+
+ingress:
+  host: staging.f1-strategy-engine.internal
+  tls:
+    secretName: f1-strategy-engine-staging-tls

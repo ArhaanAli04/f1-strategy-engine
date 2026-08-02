@@ -1,4 +1,5 @@
 import logging
+import ssl
 import threading
 import time
 from typing import Any
@@ -18,6 +19,12 @@ from backend.core.metrics import (
 logger = logging.getLogger(__name__)
 
 _redis_url = get_redis_settings().redis_url
+# Upstash's REDIS_URL is rediss:// (TLS) — Celery's redis transport raises
+# ValueError('A rediss:// URL must have parameter ssl_cert_reqs ...') at boot
+# without an explicit value (confirmed Day 24: every worker pod crash-looped
+# on this against production Upstash). Local docker-compose's REDIS_URL is
+# plain redis://, so this stays inert there.
+_redis_url_is_tls = _redis_url.startswith("rediss://")
 
 app = Celery(
     "f1_worker",
@@ -55,6 +62,16 @@ app.conf.update(
     },
 )
 
+if _redis_url_is_tls:
+    # CERT_REQUIRED verifies Upstash's certificate against the system CA
+    # bundle — the same trust level redis-py/aioredis already default to
+    # elsewhere in this app; Celery's redis transport just requires it stated
+    # explicitly rather than assuming a default.
+    app.conf.update(
+        broker_use_ssl={"ssl_cert_reqs": ssl.CERT_REQUIRED},
+        redis_backend_use_ssl={"ssl_cert_reqs": ssl.CERT_REQUIRED},
+    )
+
 # --- Prometheus instrumentation (Day 12) ---
 #
 # Relies on the worker running with --pool=solo (see Dockerfile.worker) —
@@ -72,7 +89,11 @@ _task_start_times: dict[str, float] = {}
 
 def _poll_queue_depth() -> None:
     """Background loop: set f1_celery_queue_depth from each monitored queue's Redis LLEN."""
-    client = redis.Redis.from_url(_redis_url, decode_responses=True)
+    client = (
+        redis.Redis.from_url(_redis_url, decode_responses=True, ssl_cert_reqs="required")
+        if _redis_url_is_tls
+        else redis.Redis.from_url(_redis_url, decode_responses=True)
+    )
     while True:
         for queue in _MONITORED_QUEUES:
             try:

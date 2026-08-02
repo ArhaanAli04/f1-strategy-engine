@@ -213,6 +213,17 @@ __marimo__/
 # FastF1 local cache
 fastf1_cache/
 
+# Training data exports (backend/scripts/export_training_data.py,
+# backend/scripts/retrain_incremental.py) — local parquet files uploaded
+# to / downloaded from S3, never committed.
+*.parquet
+/training_data_export/
+/training_data_cache/
+
 # Load test auth token cache (backend/tests/load/locustfile.py) — live
 # access/refresh tokens for locally-provisioned test users, never commit.
 backend/tests/load/.token_cache.json
+
+# Kubernetes local secrets helper (infra/k8s/create-secrets.sh) — reads
+# .env and creates cluster Secrets at runtime; never committed.
+infra/k8s/create-secrets.sh

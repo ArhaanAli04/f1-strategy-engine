@@ -1,0 +1,7 @@
+Method,Name,Error,Occurrences,First Seen,Last Seen
+GET,/strategy/[session_id]/overview,"ConnectionAbortedError(10053, 'An established connection was aborted by the software in your host machine', None, 10053, None)",136,2026-07-30T08:48:01Z,2026-07-30T08:56:47Z
+WS,lap_completed,"ConnectionClosedError(None, Close(code=<CloseCode.INTERNAL_ERROR: 1011>, reason='keepalive ping timeout'), None)",28546,2026-07-30T08:48:19Z,2026-07-30T08:57:28Z
+GET,/strategy/[session_id]/overview,HTTPError('500 Server Error: Internal Server Error for url: /strategy/[session_id]/overview'),3,2026-07-30T08:48:24Z,2026-07-30T08:48:33Z
+GET,/strategy/[session_id]/overview,HTTPError('429 Client Error: Too Many Requests for url: /strategy/[session_id]/overview'),2854,2026-07-30T08:49:13Z,2026-07-30T08:57:28Z
+GET,/strategy/[session_id]/overview,RemoteDisconnected('Remote end closed connection without response'),925,2026-07-30T08:47:59Z,2026-07-30T08:57:24Z
+GET,/drivers/[driver_id]/laps,RemoteDisconnected('Remote end closed connection without response'),2,2026-07-30T08:48:16Z,2026-07-30T08:53:43Z

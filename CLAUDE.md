@@ -164,6 +164,94 @@ ENVIRONMENT           development | staging | production
 
 ## Architecture Decisions (understand these before proposing alternatives)
 
+**Backend cold start is ~88s (xgboost/lightgbm/shap imports) — Kubernetes
+startupProbe required:**
+Kubernetes startupProbe set to 30×10s=300s budget in
+`infra/helm-chart/templates/backend-deployment.yaml` — do not reduce this
+without re-timing the cold start. Standard livenessProbe budget of 75s is
+insufficient and causes CrashLoopBackOff. Confirmed empirically Day 22 via
+a standalone `docker run` (no other pods competing for CPU): the container
+took 88s from start to first successful `/health` response, all spent
+before uvicorn ever binds the port (importing xgboost/lightgbm/shap/numpy/
+scipy). The original `livenessProbe` (`initialDelaySeconds: 15,
+periodSeconds: 20, failureThreshold: 3` = 75s budget) killed the container
+via SIGKILL every time, before it ever logged a single line — `kubectl
+logs` and `--previous` were both completely empty, which is the tell for
+this class of bug (not a DB/Redis connectivity failure, not an app crash).
+The worker Deployment has no `livenessProbe` at all, which is exactly why
+worker pods reached `1/1 Ready` on the same node while backend pods
+crash-looped forever — slow startup there only delayed readiness, nothing
+killed the container mid-import. Fix: `startupProbe` (same `/health`
+endpoint, `failureThreshold: 30, periodSeconds: 10`) gates liveness/
+readiness until the app is actually up — the standard Kubernetes pattern
+for slow-starting containers, rather than inflating livenessProbe's own
+initialDelaySeconds.
+
+**Docker Desktop Kubernetes shares its image store directly — no `kind
+load` needed:**
+Despite Docker Desktop's Kubernetes node (`desktop-control-plane`) running
+on a kind-style provisioner internally, it is not a cluster the `kind` CLI
+manages (confirmed Day 22: `kind` isn't even installed, and `kind load
+docker-image` only works on clusters the kind CLI itself created). The
+node uses containerd directly and shares that image store with the Docker
+daemon, so a plain `docker build -t f1-backend:local .` is immediately
+visible to the cluster — confirmed via `kubectl describe pod` showing
+`Successfully pulled image "f1-backend:local" in 2.166s` (a local
+containerd-store hit, not a network pull). `values.local.yaml` sets
+`imagePullPolicy: IfNotPresent` accordingly.
+
+**Correction (Day 24): the above only holds for a tag's *first* build —
+rebuilding an already-cached tag does not get picked up.** Under
+`IfNotPresent`, once containerd has resolved `f1-backend:local`/
+`f1-worker:local` to a real image at least once, it treats that tag as
+"already present" and never re-resolves it, even after `docker build -t
+f1-backend:local .` retags the same name to genuinely new content on the
+host. `docker images` on the host correctly shows the new digest — the
+node just doesn't look again. Confirmed Day 24: after rebuilding
+`f1-worker:local` to pick up a real code fix, `kubectl get pod ... -o
+jsonpath='{.status.containerStatuses[0].imageID}'` still showed the
+pre-rebuild digest on a pod created *after* the rebuild, and the pod kept
+failing with the pre-fix bug — restarting/recreating the pod did not help,
+since pod recreation still resolves the same stale tag. Workaround used:
+retag to a build-specific name (`docker tag f1-backend:local
+f1-backend:day24fix`, same for worker) and point the Helm release at it
+(`helm upgrade ... --set backend.image.tag=day24fix --set
+worker.image.tag=day24fix`) — a name the node has never cached forces a
+real re-resolution. The alternative, `imagePullPolicy: Always`, forces a
+fresh resolution on every pod restart (always current, no manual retagging
+needed) but is slower per pod start and was not adopted here since
+`values.local.yaml` already documents why `Always` is wrong for a
+local-only tag never pushed to a registry — a real fix would need a
+per-build unique tag (e.g. a git SHA or timestamp) wired into the local
+dev workflow, not just a one-off manual retag.
+
+**Local Kubernetes deployment reaches docker-compose's Postgres/Redis via
+`host.docker.internal`, not its own DB/cache:**
+`infra/helm-chart/` deliberately does not template Postgres/Redis — the
+Day 22 local deploy runs *alongside* docker-compose (see Deployment
+Strategy), not instead of it. `infra/k8s/create-secrets.sh
+--rewrite-localhost` rewrites `.env`'s `DATABASE_URL`/`TIMESCALE_URL`/
+`REDIS_URL` from `localhost` to `host.docker.internal` before creating the
+cluster Secret, since the K8s pods are not on docker-compose's Docker
+network but can reach the host's exposed ports. `worker-scaledobject.yaml`
+follows the same pattern for KEDA's Redis trigger address. A real cloud
+cluster (Supabase/Upstash) needs no such rewriting — real hostnames go in
+directly.
+
+**`worker-scaledobject.yaml` / `race-weekend-cronjob.yaml` carry
+local-validation overrides, not their final production shape:**
+Both files were written Day 21 targeting `namespace: production`; Day 22
+changed them to `namespace: local` (plus `f1-backend:local` image and
+Redis address) so they could actually be applied and verified against the
+local Docker Desktop cluster. Each file's own header comment states what
+production must restore: `worker-scaledobject.yaml` needs its
+`TriggerAuthentication`/Redis-password `authenticationRef` added back
+(dropped locally since docker-compose's Redis has no password);
+`race-weekend-cronjob.yaml` needs its ECR image reference restored and
+still requires `backend/scripts/prescale_for_session.py` to be implemented
+— applying it today only proves the CronJob/RBAC objects register
+correctly, not that a scheduled run succeeds.
+
 **WebSocket pubsub cleanup — fire-and-forget aclose():**
 redis-py 6.4.0's `PubSub.aclose()` hangs indefinitely on disconnect 
 when `forward_task` is cancelled mid-read inside `conn.read_response()` 
@@ -312,20 +400,21 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    4
-Day:      18
-Status:   Phase 4 complete. Load test final pass: 100-user baseline 
-          confirmed all pre-Day-14 fixes held. 500-user race-day run 
-          revealed DB pool exhaustion (493x QueuePool timeouts), real 
-          Celery task cost 65-88s under load (not ~10s isolated), 
-          WS fan-out at 98.15% failure rate at 206 viewers. All 
-          findings documented in docs/load_test_results.md and 
-          CLAUDE.md deferred wiring. E2E infrastructure: conftest.py, 
-          test_api_flows.py (passing), test_live_race_flow.py (3 
-          Playwright stubs, skipped until Day 25). 129 tests passing.
-Next:     Day 19 — CI/CD pipeline (GitHub Actions)
-Blockers: Strategy endpoints missing auth (noted in deferred wiring),DB pool           exhaustion (fix before Day 22), WS fan-out 
-          (fix before Day 22)
+Phase:    5
+Day:      24
+Status:   All smoke tests passed against local K8s + Supabase + 
+          Upstash. 4 production bugs found and fixed: SENTRY_DSN 
+          not wired (docker-compose + Helm), create-secrets.sh 
+          wrong URL source (localhost vs Supabase/Upstash), asyncpg 
+          prepared-statement collision on PgBouncer (statement_cache_size=0), 
+          Celery rediss:// crash (ssl_cert_reqs). Monitoring verified: 
+          Grafana, Prometheus, Sentry (3s delivery), Alertmanager → Slack. 
+          train-models.yml weekly cron enabled. cd.yml Job 5 updated to 
+          Fly.io plan. runbook.md corrected for real deployment target. 
+          Docker image tag caching behavior corrected in CLAUDE.md.
+Next:     Day 25 — React web app setup
+Blockers: Cloud deployment target undecided (Render/GKE) — 
+          cd.yml Jobs 3-5 remain placeholders
 ```
 
 ---
@@ -352,13 +441,13 @@ Update this list as each service is configured.
 | F1TV Subscription | Authenticated live timing feed | ⬜ Not set up | Live testing |
 | AWS S3 (f1-strategy-models) | ML model storage | ✅ set up | Day 7 |
 | AWS IAM credentials | S3 read/write access | ✅  set up | Day 7 |
-| Supabase (production DB) | Cloud PostgreSQL + TimescaleDB | ⬜ Not set up | Day 23 |
-| Upstash Redis (production) | Cloud Redis cache + broker | ⬜ Not set up | Day 23 |
-| Kubernetes cluster (EKS/GKE) | Production container orchestration | ⬜ Not set up | Day 22 |
+| Supabase (production DB) | Cloud PostgreSQL | ✅ set up day 23 | Day 23 |
+| Upstash Redis (production) | Cloud Redis cache + broker | ✅ set up day 23 | Day 23 |
+| Kubernetes cluster (local Docker Desktop) | Local container orchestration | ✅ set up day 22 | Day 22 |
 | Sentry | Exception tracking + performance | ✅ set up | Day 12 |
 | Slack (F1 Strategy Engine workspace) | Alertmanager notifications | ✅ Set up | Day 12 |
 | Vercel | Web frontend deployment | ⬜ Not set up | Day 33 |
-| GitHub Secrets | CD pipeline credentials | ⬜ Not set up | Day 19 |
+| GitHub Secrets | CD pipeline credentials | ✅ set up day 19 | Day 19 |
 
 ### Setup Notes
 
@@ -483,108 +572,10 @@ use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD}
 into prometheus.yml at container startup, same pattern as alertmanager.yml's 
 Slack webhook handling.
 
-- Strategy endpoints missing authentication: POST /strategy/simulate 
-and GET /strategy/{session_id}/{driver_id}/pit-window should require 
-Depends(get_current_user) before production deployment. Currently 
-public — rate limiting (10 req/min unauth) provides minimal protection 
-but compute-heavy endpoints are exploitable. Fix before Day 22 
-Kubernetes deployment.
-
 - **WebSocket JWT in query param (?token=):** access token appears in 
   server logs and browser history. Acceptable for now. Production fix: 
   short-lived WebSocket ticket — exchange via REST before connection, 
   use one-time token for WS auth instead of the full JWT.
-
-- **WS telemetry broadcast: redundant per-connection enrichment fan-out —
-  fix before Day 22 Kubernetes deployment.** `_forward_lap_events` in
-  `backend/apis/v1/telemetry.py` runs one `pubsub.listen()` loop per WS
-  connection, and on every lap-completion message each loop independently
-  calls `telemetry_service.get_live_car_channels(...)` — the same Redis GET,
-  for the same cache key, once per connected client, per event. At N
-  concurrent viewers that's Nx redundant Redis round trips per event instead
-  of one. Measured via `tests/load/ws_load_test.py --connections 200
-  --messages 50 --rate 20` (2026-07-16, after the two pool fixes below were
-  already applied): only ~24/50 messages delivered per connection on average
-  before the test's drain window closed, p50 latency ~2.2s, p95 ~3.6s, max
-  ~4.0s — versus a clean 20-connection run at the same rate (p50 16ms, p99
-  47ms, 0 loss). Bumping Redis `max_connections` further would only raise the
-  ceiling, not remove the redundancy, since every extra viewer still adds
-  another full copy of the same lookup work per event.
-
-  Required fix: replace the one-pubsub-per-connection model with a single
-  shared listener per session — one `pubsub.listen()` task (keyed by
-  `session_id`) that receives each lap-completion message once, calls
-  `get_live_car_channels` once, builds one `TelemetryStreamMessage`, and
-  fans it out by iterating the set of WebSocket connections currently
-  attached to that session (a session_id -> set[WebSocket] registry, started
-  on first subscriber and torn down when the last one disconnects — same
-  lifecycle shape as a per-session singleton, not a per-request dependency).
-  `_watch_for_disconnect` per-connection can stay as-is for detecting client
-  disconnects; only the listen+enrich+send path needs to move from
-  per-connection to per-session. Re-run `ws_load_test.py` at
-  `--connections 200` after the change and confirm delivery returns to ~0
-  loss with sub-100ms p99, matching the 20-connection baseline above.
-
-  Two related pool-sizing fixes already landed alongside this finding
-  (2026-07-16, pre-Day-14 load testing pass) and should NOT be re-litigated
-  when the fan-out fix lands — they're independent, already-verified issues:
-  - `websocket_telemetry` used to take `db: Annotated[AsyncSession,
-    Depends(get_db)]`, which FastAPI keeps open for the WS connection's
-    entire lifetime even though the DB is only needed once at connect time
-    (`resolve_season_round`). With `pool_size=10 + max_overflow=20` (30
-    total, `core/database.py`), this capped concurrent viewers at ~30
-    regardless of pod scaling. Fixed by resolving season/round through a
-    short-lived module-local session factory (same pattern as
-    `workers/*.py`'s `_get_session_factory`) before entering the streaming
-    loop, instead of a request-scoped dependency held for the connection.
-  - Redis pub/sub subscriptions pin a dedicated connection from the shared
-    pool for the subscription's lifetime (a redis-py constraint, not a bug).
-    `core/redis_client.py`'s pool was `max_connections=50`, capping
-    concurrent viewers there too. Raised to 250 to give the 200-connection
-    load test headroom on top of ordinary REST-route command traffic. This
-    number will need revisiting once the fan-out fix above lands and
-    replaces N pubsub connections with 1 per session.
-
-  **Corroborating evidence, pre-Day-14 fix pass (2026-07-18):** a combined
-  Locust run (`-u 100 -r 10 --run-time 2m`, `RaceDayViewerUser` +
-  `StrategyUser` + `WebSocketUser` together, `replay_publisher.py --rate 5`
-  feeding real WS traffic) — run to verify the `/races/current` single-flight
-  lock and the `/strategy/simulate` dedicated-executor fix below — showed
-  `POST /strategy/{session_id}/simulate`'s enqueue latency regress back to
-  ~12s p50, even though both of those fixes were independently confirmed
-  working in isolated (WS-free) runs on the same day (p50 630-2400ms).
-  `redis-cli slowlog get` during the combined run showed the rate limiter's
-  own `EVALSHA` check — normally sub-millisecond — taking 12-16ms, consistent
-  with Redis's single-threaded command queue backing up under load rather
-  than any one code path being newly slow. Given `redis-1` is the same
-  instance serving cache reads/writes, the Celery broker, rate-limit checks,
-  and every WS pub/sub subscription, this fan-out's Nx-per-event redundant
-  `get_live_car_channels` GETs (up to ~33 concurrent `WebSocketUser`s at
-  5 events/sec in this run) is the most likely source of the extra command
-  volume dragging down unrelated Redis-adjacent paths — not a new bottleneck,
-  the same one already scoped above, now visible because this was the first
-  load test to run WS + overview + simulate + races/current simultaneously
-  (Day 13's baseline and this session's earlier re-tests each isolated a
-  subset). Supports doing this fix before Day 22 as planned, rather than
-  deferring further — its blast radius already reaches beyond `/ws/telemetry`
-  itself once real WS traffic is in the mix.
-
-  **Corroborating evidence, Day 18 (2026-07-23), at the strongest scale
-  yet:** the 500-user race-day load test (`locust -u 500 -r 20 --run-time
-  10m`, `WebSocketUser` weighted to ~206 concurrent connections,
-  `replay_publisher.py --rate 5`) showed 13139/13387 (98.15%) of WS
-  connections failing outright with `ConnectionClosedError` (`keepalive
-  ping timeout`, close code 1011) — a step up from the pre-Day-14 combined
-  run's milder degradation (~24/50 messages delivered per connection at
-  200 connections, not outright failure). At this connection count the
-  per-connection redundant `get_live_car_channels` Redis GETs back up the
-  server badly enough that it can no longer service WS keepalive pings in
-  time at all. No new root cause — this is the same fan-out already scoped
-  above, now demonstrated at a scale close to real race-day viewer counts.
-  See `docs/load_test_results.md`'s 2026-07-23 500-user run entry for the
-  full per-endpoint breakdown. Supports fixing this before Day 22 as one of
-  the two highest-priority items alongside the DB connection pool
-  exhaustion finding below — both block any real race-day-scale deployment.
 
 - **Cache stampede fix does not address the underlying 16-17s compute
   floor:** the single-flight lock added to `cache_service.cacheable` (see
@@ -625,10 +616,12 @@ Kubernetes deployment.
   same enqueue latency regress back to ~12s p50 even with the
   dedicated-executor fix in place, traced to Redis's single-threaded
   command queue backing up under the WS telemetry fan-out's
-  Nx-redundant-per-event `get_live_car_channels` GETs (see the "WS
-  telemetry broadcast: redundant per-connection enrichment fan-out" bullet
-  above for the full analysis and required fix). No separate action needed
-  on this bullet — fixing the fan-out should resolve this regression too.
+  Nx-redundant-per-event `get_live_car_channels` GETs (see Notes: "WS
+  telemetry broadcast fan-out redundancy" for the fix). **Confirmed
+  resolved:** the 2026-07-28 100-user combined-load re-run (after the
+  fan-out fix landed) showed this enqueue latency back to p50=1900ms,
+  matching the isolated dedicated-executor fix's 630-2400ms range — fixing
+  the fan-out did resolve this regression as predicted.
 
 - **get_competitor_predicted_strategy 16-17s cold compute floor:**
   `/strategy/{session_id}/overview` has p50=55ms (cache hits) but 
@@ -637,44 +630,24 @@ Kubernetes deployment.
   Candidate fixes: parallelise with asyncio.gather() across drivers, 
   or batch the tire_deg/pit_predictor calls across all 20 drivers 
   simultaneously. Profile _first_pit_lap_over_threshold first — 
-  redundant per-lap looping may be the dominant cost. Fix before Day 22.
+  redundant per-lap looping may be the dominant cost.
 
-- **DB connection pool exhaustion at 500 concurrent users — fix before
-  Day 22 Kubernetes deployment.** `core/database.py`'s
-  `create_async_engine(..., pool_size=10, max_overflow=20)` (30 total
-  connections, default 30s `pool_timeout`) is far too small once
-  concurrency reaches race-day scale. Measured via the Day 18 500-user load
-  test (`locust -u 500 -r 20 --run-time 10m`, 2026-07-23): backend
-  container logs for the run window show 493 occurrences of
-  `sqlalchemy.exc.TimeoutError: QueuePool limit of size 10 overflow 20
-  reached, connection timed out, timeout 30.00`. This single exhaustion
-  cascades into several symptoms that look unrelated on the surface:
-  - 172 of 1954 `/strategy/{session_id}/overview` failures were clean
-    `500 Internal Server Error`s caused directly by the pool timeout
-    propagating up as an unhandled exception (28.49% failure rate on that
-    endpoint overall).
-  - A previously-unseen WebSocket bug — 58 occurrences of `RuntimeError:
-    Expected ASGI message 'websocket.send' or 'websocket.close', but got
-    'websocket.accept'` in `telemetry.py`. Root cause: `websocket_telemetry`'s
-    `resolve_season_round` DB lookup (telemetry.py:210) stalls up to 30s
-    waiting on the same exhausted pool, while Locust's client-side
-    `ws_connect(ws_url, open_timeout=10)` gives up after only 10s and tears
-    down its side of the connection. When the server's stalled DB call
-    eventually returns and reaches `await websocket.accept()`
-    (telemetry.py:215), it's accepting a transport the client already
-    abandoned — uvicorn's ASGI state machine rejects the late accept with
-    this error. Not a standalone bug, a symptom of the pool exhaustion
-    above.
-  - Very likely also the dominant cause of the remaining
-    `RemoteDisconnected` / `ConnectionAbortedError` failures on `/overview`
-    and `/drivers/laps` (see `docs/load_test_results.md`'s 2026-07-23
-    500-user run for the full breakdown).
-
-  Proposed fix: raise `pool_size`/`max_overflow` with real numbers derived
-  from a follow-up load test (not guessed), and consider a bounded retry or
-  a faster-failing timeout so an overloaded request returns a clean 503
-  instead of hanging up to 30s per attempt. Fix before Day 22 Kubernetes
-  deployment — this blocks any real race-day-scale traffic today.
+  **Update, pre-Day-22 fix pass:** batching applied.
+  `get_competitor_predicted_strategy` (via the new
+  `_first_pit_laps_over_threshold_batch`) now calls
+  `pit_model.predict_proba` and `tire_deg_model.predict_life_remaining_batch`
+  once per lap-offset across all still-active drivers (grouped by compound
+  for the tire_deg call, since that pipeline is compound-specific), instead
+  of once per driver per offset. Verified 35% per-call improvement
+  (0.937s → 0.612s, models-warm) via a git-stash A/B against a real
+  20-driver session (`00b4f598-40ec-4792-8687-6eae51257977`). This is a
+  real, verified improvement — but does not reproduce or explain the full
+  16-17s concurrent-load floor above: an isolated single call finishes in
+  under 1s even on the pre-refactor code, so that floor is DB-pool/
+  concurrency-bound (queuing under ~100 concurrent Locust users), not pure
+  per-call model overhead. The WS fan-out fix has since landed (see Notes:
+  "WS telemetry broadcast fan-out redundancy") — the remaining floor is DB
+  connection pool sizing (below), still open.
 
 - **Single `--pool=solo` Celery worker cannot sustain race-day simulate
   traffic — fix via multiple worker pods on Day 22.** This project's
@@ -706,25 +679,21 @@ Kubernetes deployment.
   guessing. Fix on Day 22 Kubernetes deployment alongside the DB pool
   sizing fix above, since both block real race-day-scale traffic.
 
-- **Load-test harness account-pool-size formula doesn't scale past ~100
-  simulated users — fix before the next 500+-user load test.**
-  `tests/load/locustfile.py`'s `_target_pool_size` caps the shared test
-  account pool at `min(users, 30)` regardless of population (see its
-  docstring's rate-limit rationale, sized against Day 13's 100-user
-  baseline where 30 accounts meant ~3.3 simulated users per account). At
-  500 users this is unchanged at 30 accounts, so each account now backs
-  ~17 simulated users, pushing each shared account's request rate well past
-  the documented 60/min authenticated rate-limit bucket. Confirmed in the
-  Day 18 500-user run (2026-07-23): 1385 of 15242 total failures were
-  `429 Too Many Requests` (1257 on `/strategy/overview`, 88 on `/simulate`,
-  40 on `/drivers/laps`) — the rate limiter correctly protecting the
-  server, not a server-side bug. This is a load-test harness limitation,
-  not application code, but it meaningfully dilutes the failure count and
-  makes real server-side bottlenecks (DB pool exhaustion, WS fan-out, both
-  above) harder to isolate from the aggregate numbers. Fix before the next
-  500+-user run: either raise the pool-size cap for larger runs (accepting
-  a longer, rate-limit-paced provisioning pass) or give the rate-limit
-  budget more headroom accounted for in the pool-size formula itself.
+- **kubectl apply --dry-run=client not yet validated:**
+  infra/k8s/hpa.yaml, worker-scaledobject.yaml, and
+  race-weekend-cronjob.yaml were validated with a YAML parser only —
+  kubectl dry-run requires an API server connection which needs a running
+  cluster. Full validation with kubectl apply --dry-run=client will happen
+  on Day 22 when Docker Desktop Kubernetes is enabled. At that point also
+  confirm Deployment names match what the Helm chart generates and update
+  placeholder names if needed.
+
+- **WS keepalive ping timeouts under heavy CPU load:** 28,603 closures
+  (85.7% of WS traffic) in 500-user run. Likely cause: Uvicorn's single
+  event loop blocked by synchronous CPU-bound ML inference in `/overview`
+  cold path, starving asyncio ping/pong. Investigate after DB pool fix and
+  K8s deployment — may resolve naturally with multiple backend pods (each
+  with its own event loop, less contention per pod).
 
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
@@ -737,6 +706,46 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**DB connection pool exhaustion (✅ fixed 2026-07-30):**
+`core/database.py`'s hardcoded `pool_size=10, max_overflow=20` (30 total
+connections) was sized far too small for race-day concurrency — see the
+Day 18 500-user load test that originally surfaced this (493 QueuePool
+timeouts, cascading into `/overview` 500s and a WS `websocket.accept`
+bug — full history in the removed Deferred Wiring entry this replaces).
+Fixed via a targeted fix pass, not guessed: `pool_size`/`max_overflow` are
+now configurable via new `db_pool_size`/`db_max_overflow` fields on
+`DatabaseSettings` (`core/config.py`), read by `core/database.py`'s
+`get_engine()` instead of hardcoded literals. Defaults stay at `10`/`20`
+(worker's behavior is unchanged — no evidence of worker-side DB
+contention in any run); `docker-compose.yml`'s `backend` service alone
+sets `DB_POOL_SIZE=20`/`DB_MAX_OVERFLOW=40` (cap 60), since the load-test
+evidence (all logged `QueuePool` timeouts were from `backend-1`, zero
+`/simulate` failures) implicated only the backend's pool, not the
+worker's. Postgres's `max_connections` was also bumped `100 → 200`
+(`docker-compose.yml`'s `postgres` service `command`), confirmed via
+`SHOW max_connections;`, giving headroom for backend(60) + worker(30) +
+exporter/admin(~10) ≈ 100 of 200.
+
+QueuePool timeout progression across fixes: **493** (Day 18 500-user
+baseline, pre-WS-fix) → **16** (2026-07-30 500-user re-run, post-WS-fan-out-fix,
+same pool config) → **0** (2026-07-30 100-user verification run, post-pool-fix
+— see `docs/load_test_results.md`'s 2026-07-30 entry). The 16→0 drop is
+this fix; the 493→16 drop was the WS fan-out fix's side effect (faster
+session turnover meant DB sessions weren't held hostage behind Redis
+backpressure).
+
+**export_training_data.py one-time base corpus export (✅ completed 2026-07-30):**
+Ran once against the local Docker Postgres per the Deferred Wiring action item:
+exported 163,623 lap rows and 8,271 stint rows (2018-2025) and uploaded to S3:
+- `s3://f1-strategy-models/training-data/base/laps.parquet` (1.0 MB)
+- `s3://f1-strategy-models/training-data/base/stints.parquet` (27 KB)
+
+Upload confirmed via a direct `list_objects_v2` check against the bucket (AWS
+CLI isn't installed in this environment). `train-models.yml`'s
+`workflow_dispatch` is now unblocked — the CI workflow reads this base corpus
+from S3 on every training run. Re-run only if the base corpus changes (new
+historical seasons added).
 
 **users.fcm_token (✅ completed Day 10):**
 - Migration added: `20260711_add_fcm_token_to_users.py`
@@ -869,6 +878,157 @@ Docker Postgres: `GET /drivers` returns correct `team`/`contracts` for all
   dependency, not a violation of the "services must not import other services"
   rule (that rule is about services importing services).
 
+**Strategy endpoint authentication (✅ fixed pre-Day-22 fix pass):**
+All four business-logic strategy routes — `POST /simulate`, `GET pit-window`,
+`GET undercut`, `GET overview` — now require `Depends(get_current_user)`,
+matching the pattern already used in `alerts.py`/`auth.py`. Originally scoped
+to just `POST /simulate` and `GET pit-window`; extended to all four during
+the fix pass since `/overview` is the single most compute-expensive endpoint
+measured (16-17s cold) and leaving it public while locking the other three
+would have been an inconsistent gap in the same file. `GET
+/simulate/{task_id}` stays unauthenticated — it's a cheap Celery result
+lookup keyed by an unguessable task UUID, not a computation itself.
+`tests/integration/test_strategy_endpoint.py` updated to use the
+`authenticated_client` fixture.
+
+**Load-test harness account-pool-size formula (✅ fixed pre-Day-22 fix pass):**
+`tests/load/locustfile.py`'s `_target_pool_size` no longer caps at a flat 30
+regardless of population. Pool size now scales with `num_users`, sized so
+that even an account unlucky enough to back only the heaviest user type
+(RaceDayViewerUser, up to ~15/min) stays under half of `core/rate_limit.py`'s
+60/min authenticated bucket — see `_MAX_SIMULATED_USERS_PER_ACCOUNT`'s
+derivation in the module for the exact math.
+
+**WS telemetry broadcast fan-out redundancy (✅ fixed, 2026-07-28):**
+Replaced the one-`pubsub.listen()`-loop-per-connection model in
+`backend/apis/v1/telemetry.py` with a single shared `_SessionBroadcaster`
+per `session_id`: one instance is created on the first subscriber and torn
+down on the last disconnect (a module-level `_broadcasters` registry
+guarded by one `asyncio.Lock` — the same per-session-singleton lifecycle
+originally scoped, not a per-request dependency). Its one `pubsub.listen()`
+loop calls `get_live_car_channels` exactly once per lap-completion event,
+builds one `TelemetryStreamMessage`, and fans it out to every connection
+currently registered on that broadcaster — eliminating the Nx-redundant-
+per-event Redis GET this entry originally tracked. The broadcaster owns its
+own Redis client, built from the connecting request's `connection_pool`
+rather than its DI-scoped client, since that specific client can be
+`aclose()`'d by a *different* viewer's disconnect while the broadcaster
+itself is still serving other connections. Per-connection disconnect
+detection (`_watch_for_disconnect`) is unchanged — only the
+listen+enrich+send path moved from per-connection to per-session. A
+per-connection `websocket.send_text()` inside the shared loop is wrapped in
+its own try/except so one dead connection can't break delivery to the rest.
+
+Verified:
+- `tests/load/ws_load_test.py --connections 200 --messages 50 --rate 20`:
+  50/50 messages delivered per connection (was ~24/50), p50=31ms (was
+  ~2200ms), p95=47ms, p99=63ms, max=78ms, 0 connection failures — beats the
+  original clean 20-connection baseline (p50 16ms, p99 47ms).
+- Confirmed under combined load: 100-user Locust run (`-u 100 -r 10
+  --run-time 2m`, `replay_publisher.py --rate 5`) — 3090 WS messages
+  delivered, 0 failures, p99=94ms. `POST /strategy/{session_id}/simulate`
+  enqueue latency was back to p50=1900ms (matching the isolated
+  dedicated-executor fix's 630-2400ms range), not the ~12,000ms
+  combined-load regression this same redundancy previously caused via
+  Redis's single-threaded command queue backing up. See
+  `docs/load_test_results.md`'s 2026-07-28 entry for the full breakdown.
+- New regression test: `test_ws_fans_out_from_one_shared_broadcaster` in
+  `tests/integration/test_websocket.py` — two simultaneous connections to
+  one session_id, one publish, asserts both receive the identical envelope
+  and `get_live_car_channels` is called exactly once.
+- `core/redis_client.py`'s `max_connections=250` was sized for the old
+  N-pubsub-connections-per-session model; now only one pubsub connection is
+  pinned per active session regardless of viewer count, so this ceiling has
+  headroom to spare. Left unchanged — no evidence yet it needs lowering,
+  and lowering it isn't necessary for correctness.
+
+**SENTRY_DSN never reached a running process (✅ fixed Day 24):**
+`.env` had a real `SENTRY_DSN` since Day 12, but neither
+`infra/docker/docker-compose.yml`'s `backend`/`worker` `environment:`
+blocks nor the Helm chart's Secret/ConfigMap ever passed it through — so
+`AppSettings.sentry_dsn` was always `""` and `main.py`'s lifespan never
+called `sentry_sdk.init()`, in both docker-compose and every Kubernetes
+deployment to date. Only surfaced when a Day 24 smoke test tried to
+verify Sentry actually receives errors. Fixed: `SENTRY_DSN:
+"${SENTRY_DSN:-}"` added to both compose services;
+`infra/k8s/create-secrets.sh` now includes `SENTRY_DSN` in the Secret it
+creates (flows to both Deployments automatically via their existing
+`envFrom.secretRef`, no template changes needed). Added a permanent
+ops-only `GET /api/v1/debug/trigger-error` route (`main.py`) — 404s when
+`ENVIRONMENT=production` — for verifying Sentry wiring after any future
+deploy without needing a real bug. Verified live: event landed in
+`arhaanali.sentry.io` within 3 seconds, correct project, correct
+`environment` tag.
+
+**`create-secrets.sh` was sourcing the wrong DB/Redis URLs for a
+Kubernetes Secret (✅ fixed Day 24):** `.env`'s own `DATABASE_URL`/
+`TIMESCALE_URL`/`REDIS_URL` point at docker-compose's local Postgres/Redis
+(`localhost`) — they're for docker-compose's own `backend`/`worker`
+services, not for anything reaching Supabase/Upstash. The real cloud
+endpoints live in separate `SUPABASE_DATABASE_URL`/`SUPABASE_DIRECT_URL`/
+`UPSTASH_REDIS_URL` vars (added Day 23). `create-secrets.sh` read the
+former, so re-running it against the current `.env` silently wrote
+`localhost` URLs into the Kubernetes Secret — invisible until a pod
+actually restarted and picked them up (secrets aren't hot-reloaded),
+at which point it failed with `Connection refused` to `localhost:5432`/
+`6379` from inside the cluster network. Fixed: the script now builds
+`DATABASE_URL`/`TIMESCALE_URL` from `SUPABASE_DATABASE_URL` (with the
+`postgresql://` → `postgresql+asyncpg://` conversion `cd.yml`'s migrate
+job already does) and `REDIS_URL` from `UPSTASH_REDIS_URL` directly. The
+now-obsolete `--rewrite-localhost` flag (for reaching docker-compose's
+Postgres/Redis via `host.docker.internal`) was removed along with it,
+since a Kubernetes pod now always talks to the real Supabase/Upstash
+endpoints — there is no longer a "local-only" DB/cache target for it to
+reach. See [[docs/runbook.md]]'s Secret rotation procedure, corrected to
+match.
+
+**asyncpg + Supabase's transaction-mode pooler → intermittent
+`DuplicatePreparedStatementError` (✅ fixed Day 24):** Once
+`create-secrets.sh` above was fixed to actually point Kubernetes pods at
+Supabase, backend pods started failing `/health` — some only at startup
+(self-recovered on retry), one persistently on every request. Root cause:
+`SUPABASE_DATABASE_URL` (port 6543) is PgBouncer in transaction-pooling
+mode, which is incompatible with asyncpg's default prepared-statement
+caching — a connection can be handed to a different session mid-cache,
+producing `asyncpg.exceptions.DuplicatePreparedStatementError`. This is
+asyncpg's own documented PgBouncer caveat, not app-specific. Fixed:
+`core/database.py`'s `get_engine()` now passes
+`connect_args={"statement_cache_size": 0}` to `create_async_engine()`,
+unconditionally (harmless against docker-compose's local Postgres too,
+which has no pooler in front of it). Verified: 5 consecutive `/races`
+calls with zero errors post-fix, versus reproducing on ~1 in 3 fresh pods
+pre-fix.
+
+**Celery + Upstash's `rediss://` → hard crash at worker boot (✅ fixed Day
+24):** Once real Upstash traffic hit the worker (same Day 24 fix pass
+above), every worker pod crash-looped immediately:
+`ValueError: A rediss:// URL must have parameter ssl_cert_reqs...`.
+Celery's redis transport (`celery/backends/redis.py`) requires this
+stated explicitly for a `rediss://` broker/backend URL — unlike the
+FastAPI side's plain `redis.asyncio` client, which merely logs a warning
+and falls back to an unverified TLS connection. `workers/celery_app.py`
+now sets `broker_use_ssl`/`redis_backend_use_ssl` to
+`{"ssl_cert_reqs": ssl.CERT_REQUIRED}` whenever `REDIS_URL` starts with
+`rediss://` (a no-op against docker-compose's plain `redis://`). Also
+tightened `_poll_queue_depth`'s own `redis.Redis.from_url(...)` call and
+`core/redis_client.py`'s `aioredis.ConnectionPool.from_url(...)` to pass
+`ssl_cert_reqs="required"` under the same condition, closing the same
+unverified-TLS gap everywhere `rediss://` is used, not just where it was
+fatal. Verified: worker pods reach `celery@... ready.` and mingle with
+their peers against real Upstash.
+
+**Docker Desktop Kubernetes does not pick up a rebuilt image under an
+already-cached tag (⚠️ workaround only, not fixed — see Architecture
+Decisions' correction to the Day 22 image-caching note):** hit while
+verifying the two fixes above — rebuilding `f1-backend:local`/
+`f1-worker:local` and restarting pods kept reproducing the pre-fix
+behavior, traced to the node running a stale image digest under the same
+tag. Worked around Day 24 by retagging to a build-specific name
+(`f1-backend:day24fix`) and pointing the Helm release at it via `--set
+backend.image.tag=...`; not a lasting fix — local iteration on `:local`
+images should move to a per-build unique tag (git SHA or timestamp)
+rather than reusing one tag repeatedly.
+
 ## Deferred Telemetry Features
 
 Raw high-frequency telemetry (100ms Throttle/Brake/Speed channels from FastF1) was
@@ -955,3 +1115,19 @@ signal implicitly; explicit temperature adds race-specific noise that
 doesn't generalize across seasons. Revisit when 2+ additional holdout
 seasons available, or try temperature deviation from circuit historical
 mean as engineered feature instead of raw temperature.
+
+
+## Deployment Strategy
+
+**Local-first deployment** — all three clients (web/desktop/mobile) 
+connect to the locally hosted Docker stack during development and demos.
+
+- Backend: Docker Compose (all services on localhost)
+- Web app: Vercel (frontend only, points to local backend via ngrok for demos)
+- Desktop app: Tauri native build, connects to local backend
+- Mobile app: Expo Development Build on iPhone, connects to local backend 
+  via LAN IP (same WiFi network required)
+- Demo videos: recorded from each client, stored in demos/ directory
+
+No cloud VM deployment during the build — see DEPLOYMENT.md for full 
+strategy including ngrok demo workflow and future Render deployment plan.

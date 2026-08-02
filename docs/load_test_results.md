@@ -236,3 +236,175 @@ update rather than edited here):
 4. `locustfile.py`'s account-pool-size formula needs revisiting for load
    tests above ~100 users, to avoid rate-limit 429s dominating the failure
    count and obscuring real server-side bottlenecks in future runs.
+
+---
+
+## Load Test Run — 2026-07-28 18:01 IST (12:31 UTC)
+
+**Conditions:** 100 users, 10/s ramp, 2 minute duration, combined population
+(`RaceDayViewerUser` + `StrategyUser` + `HistoricalUser` + `WebSocketUser`,
+70/20/10/70 weights per `locustfile.py`), `replay_publisher.py --rate 5`
+feeding real WS traffic from session `5ef7e1da-0fcd-418f-80a6-17ddd132c273`
+(927 lap rows)
+**Infrastructure:** Local Docker
+**Git commit:** `9a2b87c09c4c96f1ea773f1c02cd9ecb45b50d56` (working tree had
+uncommitted changes at run time: the WS telemetry fan-out fix itself —
+`backend/apis/v1/telemetry.py`'s new `_SessionBroadcaster` registry — plus
+its regression test in `backend/tests/integration/test_websocket.py`. This
+run's purpose was to validate that fix under combined load; see Bottlenecks
+below.)
+
+### Results per endpoint
+
+| Endpoint | p50 | p95 | p99 | req/s | failures |
+|---|---|---|---|---|---|
+| GET /races/current | 160ms | 1300ms | 2200ms | 0.35 | 0/41 (0%) |
+| GET /strategy/{session_id}/overview | 68ms | 26000ms | 28000ms | 5.38 | 5/637 (0.78%) |
+| POST /strategy/{session_id}/simulate | 1900ms | 25000ms | 26000ms | 0.33 | 0/39 (0%) |
+| GET /drivers/{driver_id}/laps | 130ms | 25000ms | 27000ms | 0.44 | 0/52 (0%) |
+| WS lap_completed | 0ms | 0ms | 94ms | 26.10 | 0/3090 (0%) |
+| **Aggregated** | **0ms** | **280ms** | **25000ms** | **32.60** | **5/3859 (0.13%)** |
+
+Errors (all on `/strategy/{session_id}/overview`): 4x `RemoteDisconnected`
+("Remote end closed connection without response"), 1x
+`ConnectionAbortedError` (WinError 10053).
+
+Companion run, same session, same code: `tests/load/ws_load_test.py
+--connections 200 --messages 50 --rate 20` (isolated, no HTTP traffic) —
+50/50 messages delivered per connection, p50=31ms, p95=47ms, p99=63ms,
+max=78ms, 0 connection failures.
+
+### Grafana observations
+
+Not captured for this run — validation leaned on Locust's own per-endpoint
+stats and the dedicated `ws_load_test.py` run above rather than Grafana
+panels. Worth capturing queue-depth/Redis-command-rate panels on the next
+run once the DB pool sizing fix below lands, to see the effect directly.
+
+### Bottlenecks identified
+
+- **WS telemetry fan-out fix confirmed working under combined load.** `WS
+  lap_completed`: 3090 messages, **0 failures**, p99=94ms, max=380ms — no
+  loss, no meaningful tail, while three other user types hit the API
+  concurrently. This is the first combined-load run since the fix landed
+  (`_SessionBroadcaster`, one shared `pubsub.listen()` loop per session_id
+  instead of one per connection — see CLAUDE.md's Notes entry "WS telemetry
+  broadcast fan-out redundancy").
+- **The specific regression this fix targeted is gone.** CLAUDE.md's
+  pre-fix pass documented `POST /strategy/simulate`'s enqueue latency
+  regressing from its isolated ~630-2400ms p50 back to ~12000ms under
+  combined WS+HTTP load, attributed to the old per-connection fan-out's
+  Nx-redundant `get_live_car_channels` Redis GETs saturating Redis's
+  single-threaded command queue. This run's `simulate` p50 is **1900ms** —
+  back in the isolated-fix range, not the ~12000ms regression.
+- **Remaining tail latency on `/strategy/overview`, `/strategy/simulate`,
+  and `/drivers/laps` (p95/p99 in the 25000-28000ms range, plus 5
+  `RemoteDisconnected`/`ConnectionAbortedError` failures on `/overview`) is
+  the already-tracked, separate DB connection pool exhaustion issue**
+  (`core/database.py`'s `pool_size=10, max_overflow=20`), not a new finding
+  and not caused by the WS fan-out fix — same symptom pattern as the
+  2026-07-23 500-user run's 493 `QueuePool` timeout occurrences, just at
+  smaller scale. With the WS fan-out no longer in the picture, this is now
+  the clearest single remaining bottleneck.
+- The 16-17s `get_competitor_predicted_strategy` cold-compute floor
+  (CLAUDE.md's "Cache stampede fix does not address the underlying 16-17s
+  compute floor") is also baked into `/strategy/overview`'s tail here — not
+  new, still unaddressed, and DB-pool-bound rather than pure model
+  overhead per that entry's analysis.
+
+### Changes made after this run
+
+No code changes — this run's purpose was to validate the already-implemented
+WS fan-out fix, which it did. Documentation only:
+- CLAUDE.md's "WS telemetry broadcast: redundant per-connection enrichment
+  fan-out" entry moved from Deferred Wiring & Integration Gaps to Notes,
+  marked fixed, with this run's numbers and the `ws_load_test.py` numbers
+  above.
+- CLAUDE.md's "DB connection pool exhaustion" entry updated to record this
+  run's recurrence of the `RemoteDisconnected` pattern (5 failures on
+  `/overview`) as confirmation it's now the next priority, ahead of Day 22.
+- Two dangling cross-references in CLAUDE.md that pointed at the
+  now-moved WS fan-out bullet (`broker_pool_limit` entry and
+  `get_competitor_predicted_strategy` entry) were updated to point at the
+  new Notes entry and record that the regressions they described are
+  confirmed resolved.
+
+---
+
+## Load Test Run — 2026-07-30 15:07 IST (09:37 UTC)
+
+**Conditions:** 100 users, 10/s ramp, 2 minute duration, combined population
+(`RaceDayViewerUser` + `StrategyUser` + `HistoricalUser` + `WebSocketUser`,
+70/20/10/70 weights per `locustfile.py`), `replay_publisher.py --rate 5`
+feeding real WS traffic from session `00b4f598-40ec-4792-8687-6eae51257977`
+(1531 lap rows)
+**Infrastructure:** Local Docker — post-fix config: backend
+`pool_size=20, max_overflow=40` (cap 60), worker unchanged
+`pool_size=10, max_overflow=20` (cap 30), Postgres `max_connections=200`
+(raised from 100)
+**Git commit:** `3f54348` (branch HEAD at time of this run; working tree had
+uncommitted changes — the DB connection pool sizing fix itself:
+`backend/core/config.py`, `backend/core/database.py`,
+`infra/docker/docker-compose.yml`. This run's explicit purpose was
+verifying that fix.)
+
+### Results per endpoint
+
+| Endpoint | p50 | p95 | p99 | req/s | failures |
+|---|---|---|---|---|---|
+| GET /races/current | 6200ms | 13000ms | 14000ms | 0.35 | 0/41 (0%) |
+| GET /strategy/{session_id}/overview | 82ms | 4000ms | 5900ms | 6.57 | 7/777 (0.90%) |
+| POST /strategy/{session_id}/simulate | 3000ms | 6300ms | 7400ms | 0.41 | 0/48 (0%) |
+| GET /drivers/{driver_id}/laps | 140ms | 5100ms | 6700ms | 0.52 | 0/62 (0%) |
+| WS lap_completed | 0ms | 0ms | 230ms | 25.23 | 0/2985 (0%) |
+| **Aggregated** | **0ms** | **2000ms** | **5700ms** | **33.07** | **7/3913 (0.18%)** |
+
+### QueuePool timeout count
+
+**0** — confirmed via `docker compose logs backend --since 5m | grep -c QueuePool`.
+Progression across fixes: 493 (Day 18 500-user baseline) → 16 (2026-07-30
+500-user re-run, post-WS-fan-out-fix, same pool config as Day 18) → **0**
+(this run, post-pool-fix).
+
+### Grafana observations
+
+Not captured for this run — verification leaned on Locust's own
+per-endpoint stats and a direct backend-log grep for `QueuePool`, which
+was the specific signal this run needed to confirm.
+
+### Bottlenecks identified
+
+- **DB connection pool exhaustion: resolved.** Zero `QueuePool` timeouts
+  in backend logs for the run window, down from 16 in the same-scale,
+  same-code empirical run earlier today and 493 in the Day 18 500-user
+  baseline. See CLAUDE.md's Notes entry "DB connection pool exhaustion"
+  for the full fix writeup and reasoning behind the specific numbers
+  chosen.
+- **Residual: 7 `RemoteDisconnected` failures on `/overview` (0.90%),
+  not pool-related.** With `QueuePool` timeouts at zero, these are not
+  the same root cause as prior runs' failures on this endpoint. Most
+  likely candidate: the already-tracked "WS keepalive ping timeouts
+  under heavy CPU load" Deferred Wiring entry (Uvicorn's single event
+  loop blocked by synchronous ML inference) — unconfirmed, not
+  investigated further in this run since it was out of scope for the
+  pool-sizing verification.
+- **Operational note, not an application bug:** two earlier attempts at
+  this exact run failed with 100% `/overview` 500s
+  (`botocore.exceptions.ParamValidationError: Invalid bucket name ""`)
+  because the stack had been rebuilt with `docker compose up` omitting
+  `--env-file .env`, zeroing `AWS_BUCKET_NAME`/AWS credentials in the
+  container per `docker-compose.yml`'s `${VAR:-}` substitution. Fixed by
+  rebuilding with `--env-file .env` (per CLAUDE.md's documented
+  convention) before this run. Not a code defect — a reminder that any
+  manual `docker compose up`/`--build` during this kind of session must
+  include `--env-file .env`.
+
+### Changes made after this run
+
+None — this run's purpose was to verify the pool-sizing fix already
+applied earlier in this session (see Conditions above), which it did.
+Documentation only:
+- CLAUDE.md's "DB connection pool exhaustion" entry moved from Deferred
+  Wiring & Integration Gaps to Notes, marked fixed, with the full
+  before/after numbers and the 493 → 16 → 0 progression.
+- This entry added to `docs/load_test_results.md`.

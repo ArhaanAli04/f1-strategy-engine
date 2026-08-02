@@ -26,9 +26,19 @@ def get_engine() -> AsyncEngine:
         _engine = create_async_engine(
             settings.database_url,
             echo=False,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
+            # Supabase's app-runtime URL goes through PgBouncer in
+            # transaction-pooling mode, which does not support asyncpg's
+            # default prepared-statement caching — a pooled connection can be
+            # handed to a different session mid-cache, raising
+            # DuplicatePreparedStatementError (confirmed Day 24: hit on every
+            # pod at startup, intermittently persisting on some). Harmless to
+            # disable against docker-compose's local Postgres too (no pooler
+            # in front of it), so this is unconditional rather than branching
+            # on environment.
+            connect_args={"statement_cache_size": 0},
         )
     return _engine
 

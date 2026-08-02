@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "f1-strategy-engine.fullname" . }}-backend
+  labels:
+    {{- include "f1-strategy-engine.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  replicas: {{ .Values.backend.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "f1-strategy-engine.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        {{- include "f1-strategy-engine.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: {{ include "f1-strategy-engine.serviceAccountName" . }}
+      containers:
+        - name: backend
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.backend.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "f1-strategy-engine.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secrets.name }}
+          env:
+            - name: DB_POOL_SIZE
+              value: {{ .Values.backend.dbPoolSize | quote }}
+            - name: DB_MAX_OVERFLOW
+              value: {{ .Values.backend.dbMaxOverflow | quote }}
+          # Cold start imports xgboost/lightgbm/shap/numpy/scipy before
+          # uvicorn ever binds the port — measured at ~88s for a single
+          # container with no CPU contention (docker run, no other pods
+          # competing for the node's CPU), confirmed empirically during
+          # Day 22 deploy debugging. startupProbe gates liveness/readiness
+          # until the app is actually up, so a slow cold start is never
+          # mistaken for a hung container and killed mid-import.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Give in-flight HTTP/WebSocket requests time to drain before
+              # SIGTERM — matters here given how much of CLAUDE.md's Notes
+              # section is about WS connection lifecycle correctness.
+              exec:
+                command: ["sh", "-c", "sleep 5"]
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}

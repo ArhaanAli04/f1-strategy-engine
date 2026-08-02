@@ -1,0 +1,36 @@
+# Placeholder for a future production deployment (EKS/GKE or Render). Not
+# validated against any real cluster. Mirrors cd.yml's deploy-production
+# job's commented-out real steps (manual approval gate already configured
+# there). Do not treat these values as usable today — revisit once a real
+# production target is chosen (see CLAUDE.md's External Services checklist:
+# Supabase/Upstash/Kubernetes cluster all still "Not set up").
+
+backend:
+  image:
+    repository: "${ECR_REGISTRY}/${ECR_BACKEND_REPO}"
+    tag: latest
+  replicaCount: 3
+
+worker:
+  image:
+    repository: "${ECR_REGISTRY}/${ECR_WORKER_REPO}"
+    tag: latest
+  replicaCount: 3
+
+image:
+  pullPolicy: IfNotPresent
+
+env:
+  environment: production
+
+secrets:
+  name: f1-strategy-engine-secrets
+
+ingress:
+  host: f1-strategy-engine.internal
+  tls:
+    secretName: f1-strategy-engine-production-tls
+
+hpa:
+  minReplicas: 3
+  maxReplicas: 15

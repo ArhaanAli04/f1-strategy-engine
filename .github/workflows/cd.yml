@@ -1,0 +1,209 @@
+name: CD
+
+# Runs only when commits land on main (i.e. after a PR merge) — never on
+# feature branches and never on pull_request events. Contrast with ci.yml,
+# which runs on every branch push and every PR into main.
+#
+# Required GitHub Secrets (must exist before this workflow can succeed):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   ECR_REGISTRY, ECR_BACKEND_REPO, ECR_WORKER_REPO
+#   SLACK_WEBHOOK_DEPLOY
+#   SUPABASE_DIRECT_URL (Day 23 — session-mode pooler URL, port 5432; used
+#     for alembic upgrade head, which needs session-level features the
+#     transaction-mode pooler on port 6543 doesn't support)
+#
+# Jobs 3-5 are intentionally structured as an echo placeholder + a commented
+# real command, so the real command can drop in on its scheduled day without
+# restructuring this file. Job 2 (migrate) went live Day 23.
+#
+# Day 22 built and validated infra/helm-chart/ against a local Docker
+# Desktop Kubernetes cluster only (see DEPLOYMENT.md's "Local Kubernetes
+# Deployment" section) — no cloud cluster exists yet, and which one
+# (EKS/GKE/Render, see DEPLOYMENT.md's "Future Cloud Deployment") is still
+# an open decision. Jobs 3-5 below stay deferred until that decision is
+# made and a real cluster/kubeconfig exists.
+#
+# cosign image signing is deferred until a real cloud cluster exists (an
+# admission-time verification target) — no signing step below yet.
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_BACKEND_REPO: ${{ secrets.ECR_BACKEND_REPO }}
+  ECR_WORKER_REPO: ${{ secrets.ECR_WORKER_REPO }}
+
+jobs:
+  build-and-push:
+    name: Build and push images to ECR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Build backend image
+        run: |
+          docker build -f infra/docker/Dockerfile.backend \
+            -t "$ECR_REGISTRY/$ECR_BACKEND_REPO:${{ github.sha }}" \
+            -t "$ECR_REGISTRY/$ECR_BACKEND_REPO:latest" \
+            .
+
+      - name: Build worker image
+        run: |
+          docker build -f infra/docker/Dockerfile.worker \
+            -t "$ECR_REGISTRY/$ECR_WORKER_REPO:${{ github.sha }}" \
+            -t "$ECR_REGISTRY/$ECR_WORKER_REPO:latest" \
+            .
+
+      - name: Push backend image
+        run: |
+          docker push "$ECR_REGISTRY/$ECR_BACKEND_REPO:${{ github.sha }}"
+          docker push "$ECR_REGISTRY/$ECR_BACKEND_REPO:latest"
+
+      - name: Push worker image
+        run: |
+          docker push "$ECR_REGISTRY/$ECR_WORKER_REPO:${{ github.sha }}"
+          docker push "$ECR_REGISTRY/$ECR_WORKER_REPO:latest"
+
+      - name: Notify Slack on success
+        if: success()
+        env:
+          SLACK_WEBHOOK_DEPLOY: ${{ secrets.SLACK_WEBHOOK_DEPLOY }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg sha "${{ github.sha }}" \
+            --arg backend_repo "$ECR_BACKEND_REPO" \
+            --arg worker_repo "$ECR_WORKER_REPO" \
+            '{text: ":white_check_mark: *CD build-and-push succeeded* — images pushed for commit `\($sha)` (backend: `\($backend_repo):\($sha)`, worker: `\($worker_repo):\($sha)`)."}')
+          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+  migrate:
+    name: Run database migrations
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -e ".[dev]"
+
+      - name: Run alembic upgrade head
+        env:
+          # SUPABASE_DIRECT_URL is Supabase's session-mode pooler (port 5432,
+          # same pooler host as SUPABASE_DATABASE_URL) — the true direct host
+          # (db.xxx.supabase.co) is IPv6-only and unreachable from GitHub's
+          # IPv4-only runners. Session mode supports the session-level
+          # features (advisory locks/prepared statements) that the transaction
+          # pooler (port 6543, used for app runtime) does not. TIMESCALE_URL
+          # is required by DatabaseSettings even though this migration doesn't
+          # use it — pointed at the same DB, matching local .env's convention.
+          SUPABASE_DIRECT_URL: ${{ secrets.SUPABASE_DIRECT_URL }}
+        run: |
+          # env.py / DatabaseSettings need the asyncpg driver scheme; the
+          # secret stores a bare postgresql:// URL, same as local .env does
+          # before the +asyncpg prefix is added for the app/Alembic.
+          ASYNC_URL="${SUPABASE_DIRECT_URL/postgresql:\/\//postgresql+asyncpg:\/\/}"
+          export DATABASE_URL="$ASYNC_URL"
+          export TIMESCALE_URL="$ASYNC_URL"
+          alembic upgrade head
+
+      - name: Notify Slack on migration failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_DEPLOY: ${{ secrets.SLACK_WEBHOOK_DEPLOY }}
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg sha "${{ github.sha }}" \
+            '{text: ":x: *CD migrate failed* — `alembic upgrade head` against Supabase did not complete for commit `\($sha)`. Deploy is blocked until this is fixed."}')
+          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD"
+
+  deploy-staging:
+    name: Deploy to staging (cloud target TBD)
+    needs: [migrate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to staging (deferred)
+        run: echo "Staging deploy deferred — no cloud cluster provisioned yet; Day 22 validated the Helm chart against local Docker Desktop Kubernetes only (see DEPLOYMENT.md)"
+        # TODO: replace the echo above with the real staging deploy, once a
+        # cloud cluster (EKS/GKE/Render — still an open decision, see
+        # DEPLOYMENT.md's "Future Cloud Deployment") and its kubeconfig
+        # exist. The Helm chart itself (infra/helm-chart/) is ready — Day 22
+        # proved `helm upgrade --install` works end-to-end locally:
+        #
+        # - uses: actions/checkout@v4
+        # - name: Configure kubeconfig
+        #   run: echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
+        # - name: Helm upgrade (staging)
+        #   run: |
+        #     helm upgrade --install f1-strategy-engine infra/helm-chart \
+        #       --namespace staging --create-namespace \
+        #       --kubeconfig kubeconfig \
+        #       --set backend.image.tag=${{ github.sha }} \
+        #       --set worker.image.tag=${{ github.sha }} \
+        #       --values infra/helm-chart/values.staging.yaml \
+        #       --wait --timeout 5m
+
+  load-test-staging:
+    name: Load test staging
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load test staging (deferred)
+        run: echo "Load test deferred — no staging URL yet; deploy-staging remains an echo placeholder until a cloud cluster exists (see DEPLOYMENT.md)"
+        # TODO: once deploy-staging is real, trigger load-test.yml against
+        # the resulting staging URL, e.g.:
+        #
+        # - name: Trigger load-test workflow
+        #   env:
+        #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        #   run: |
+        #     gh workflow run load-test.yml \
+        #       -f staging_url=https://staging.f1-strategy-engine.internal \
+        #       -f users=100 \
+        #       -f session_id=<real staging session UUID>
+
+  deploy-production:
+    name: Deploy to production (Fly.io)
+    needs: [load-test-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to production (deferred)
+        run: echo "Production deploy deferred — target is Fly.io (decided Day 24), not Kubernetes/EKS; real deploy lands after Day 40"
+        # TODO (after Day 40): replace the echo above with the real
+        # production deploy. Fly.io was chosen over EKS/GKE/Render (see
+        # CLAUDE.md's Deployment Strategy) — no Kubernetes cluster, no Helm
+        # chart involved for this target; infra/helm-chart/ remains local
+        # Docker Desktop-only (see Day 22/24 notes). Fly.io builds straight
+        # from the existing backend Dockerfile:
+        #
+        # - uses: actions/checkout@v4
+        # - name: Install flyctl
+        #   uses: superfly/flyctl-actions/setup-flyctl@master
+        # - name: Deploy to Fly.io
+        #   env:
+        #     FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        #   run: |
+        #     fly deploy --dockerfile infra/docker/Dockerfile.backend \
+        #       --image-label ${{ github.sha }}

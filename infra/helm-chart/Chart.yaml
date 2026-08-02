@@ -1,0 +1,6 @@
+apiVersion: v2
+name: f1-strategy-engine
+description: F1 Real-Time Strategy & Telemetry Engine — backend API + Celery worker
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

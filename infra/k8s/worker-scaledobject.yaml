@@ -1,0 +1,40 @@
+# Celery worker KEDA ScaledObject — written Day 21, applied Day 22 against
+# local Docker Desktop Kubernetes (see infra/helm-chart/, DEPLOYMENT.md's
+# "Local Kubernetes Deployment" section) once the KEDA operator is
+# installed.
+#
+# namespace/address below are LOCAL-VALIDATION overrides: a real cluster
+# restores namespace: production and points address at that cluster's own
+# Redis. TriggerAuthentication/authenticationRef is dropped here because
+# local Redis (docker-compose's redis:7-alpine) has no password —
+# production must re-add both once Redis auth is configured there.
+#
+# Scales on prediction_queue's Redis list length (Celery's redis transport
+# implements queues as plain Redis lists — confirmed via `redis-cli llen
+# prediction_queue` in CLAUDE.md's Day 18 load test notes), not CPU: the Day
+# 18 500-user load test found a single --pool=solo worker takes 65-88s per
+# run_race_simulation task, so queue backlog — not worker CPU — is the real
+# signal that more replicas are needed (see CLAUDE.md's "--pool=solo cannot
+# sustain race-day simulate traffic" note).
+#
+# scaleTargetRef.name (f1-strategy-engine-worker) matches the Deployment
+# name the Helm chart generates: release name == chart name, so Helm's
+# fullname helper returns "f1-strategy-engine", plus this chart's own
+# "-worker" suffix (infra/helm-chart/templates/worker-deployment.yaml).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: f1-strategy-engine-worker
+  namespace: local
+spec:
+  scaleTargetRef:
+    name: f1-strategy-engine-worker
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 120
+  triggers:
+    - type: redis
+      metadata:
+        address: host.docker.internal:6379
+        listName: prediction_queue
+        listLength: "50"

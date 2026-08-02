@@ -105,35 +105,152 @@ async def get_session_gaps(
     return await telemetry_service.get_session_gaps_for_session(redis_client, db, session_id)
 
 
-async def _forward_lap_events(
-    websocket: WebSocket,
-    pubsub: Any,
-    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+class _SessionBroadcaster:
+    """Fans out one session's lap-completion events to every connected WS client.
+
+    One instance lives per active session_id — created on the first
+    subscriber and torn down on the last disconnect (see _acquire_broadcaster
+    / _release_broadcaster) — replacing the old one-pubsub-per-connection
+    model where every connected viewer independently repeated the same
+    get_live_car_channels Redis lookup on every event (see CLAUDE.md's WS
+    fan-out deferred-wiring entry).
+
+    Owns its own Redis client, built from the connecting request's
+    connection_pool rather than reusing that request's own DI-scoped client:
+    the request that happens to create this broadcaster can disconnect long
+    before the broadcaster itself is torn down (other viewers may still be
+    connected), and FastAPI's get_redis() dependency would already have
+    aclose()'d that client at that point.
+    """
+
+    def __init__(
+        self,
+        session_id: uuid.UUID,
+        season: int,
+        round_number: int,
+        redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    ) -> None:
+        self.session_id = session_id
+        self.season = season
+        self.round_number = round_number
+        self.channel = f"f1:telemetry:{session_id}:laps"
+        self.connections: set[WebSocket] = set()
+        self._redis: aioredis.Redis = aioredis.Redis(  # type: ignore[type-arg]
+            connection_pool=redis_client.connection_pool
+        )
+        self._pubsub: Any = self._redis.pubsub()
+        self._listen_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        """Subscribe to this session's channel and start the shared listen loop."""
+        await self._pubsub.subscribe(self.channel)
+        self._listen_task = asyncio.create_task(self._listen())
+
+    async def _listen(self) -> None:
+        async for message in self._pubsub.listen():
+            if message["type"] != "message":
+                continue
+            lap_summary = json.loads(message["data"])
+            channels = await telemetry_service.get_live_car_channels(
+                self._redis, self.season, self.round_number, uuid.UUID(lap_summary["driver_id"])
+            )
+            event = LapCompletedEvent(**lap_summary, **channels)
+            envelope = TelemetryStreamMessage(
+                event="lap_completed", session_id=self.session_id, data=event
+            )
+            text = envelope.model_dump_json()
+            for websocket in list(self.connections):
+                try:
+                    await websocket.send_text(text)
+                except Exception:
+                    logger.warning(
+                        "Failed to deliver lap event to one WS client in session %s "
+                        "(its own disconnect-detection will clean it up)",
+                        self.session_id,
+                    )
+
+    async def stop(self) -> None:
+        """Cancel the listen loop, unsubscribe, and release this broadcaster's Redis client."""
+        if self._listen_task is not None:
+            self._listen_task.cancel()
+            try:
+                await self._listen_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception(
+                    "Unexpected error shutting down WS broadcaster for session %s",
+                    self.session_id,
+                )
+        await self._pubsub.unsubscribe(self.channel)
+        # redis-py 6.4.0's PubSub.aclose() can hang indefinitely on
+        # connection.disconnect() when the listen loop was cancelled mid-read
+        # on this same connection — confirmed via a manual print-trace during
+        # Day 17 test-writing: unsubscribe completes, but aclose() never
+        # returns. Worse, even asyncio.wait_for(aclose(), timeout=...) doesn't
+        # rescue it: wait_for cancels the inner task and then awaits its
+        # actual completion, which never comes either, since the underlying
+        # connection is stuck in a non-cancellable state (not an ordinary
+        # "slow" case a timeout can bound). Running it as a detached
+        # background task instead means a wedged connection can never block
+        # this method's return — worst case it abandons that one broadcaster's
+        # connection rather than stalling every teardown.
+        cleanup_task = asyncio.create_task(self._pubsub.aclose())
+        cleanup_task.add_done_callback(
+            functools.partial(_log_pubsub_cleanup_failure, self.session_id)
+        )
+        await self._redis.aclose()  # type: ignore[attr-defined]
+
+
+_broadcasters: dict[uuid.UUID, _SessionBroadcaster] = {}
+_registry_lock = asyncio.Lock()
+
+
+async def _acquire_broadcaster(
     session_id: uuid.UUID,
     season: int,
     round_number: int,
-) -> None:
-    """Forward each f1:telemetry:{session_id}:laps pub/sub message to one WS client.
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    websocket: WebSocket,
+) -> _SessionBroadcaster:
+    """Get-or-create the shared broadcaster for session_id and register websocket on it.
 
     Args:
-        websocket: The accepted WebSocket connection.
-        pubsub: PubSub object already subscribed to this session's lap-completion channel.
-        redis_client: Redis client, for the per-message live-telemetry enrichment lookup.
-        session_id, season, round_number: Identifiers for the enrichment lookup key.
+        session_id, season, round_number: Identifiers for a new broadcaster —
+            ignored if one already exists for this session_id.
+        redis_client: The connecting request's DI-scoped Redis client — only
+            used for its connection_pool if a new broadcaster must be created.
+        websocket: The just-accepted connection to add as a fan-out target.
     Returns:
-        None. Runs until cancelled — see websocket_telemetry, which races this
-        against _watch_for_disconnect.
+        The (possibly newly created) broadcaster for this session_id.
     """
-    async for message in pubsub.listen():
-        if message["type"] != "message":
-            continue
-        lap_summary = json.loads(message["data"])
-        channels = await telemetry_service.get_live_car_channels(
-            redis_client, season, round_number, uuid.UUID(lap_summary["driver_id"])
-        )
-        event = LapCompletedEvent(**lap_summary, **channels)
-        envelope = TelemetryStreamMessage(event="lap_completed", session_id=session_id, data=event)
-        await websocket.send_text(envelope.model_dump_json())
+    async with _registry_lock:
+        broadcaster = _broadcasters.get(session_id)
+        if broadcaster is None:
+            broadcaster = _SessionBroadcaster(session_id, season, round_number, redis_client)
+            await broadcaster.start()
+            _broadcasters[session_id] = broadcaster
+        broadcaster.connections.add(websocket)
+        return broadcaster
+
+
+async def _release_broadcaster(session_id: uuid.UUID, websocket: WebSocket) -> None:
+    """Unregister websocket from its session's broadcaster; tear down if it was the last one.
+
+    Args:
+        session_id: Session the disconnecting websocket belonged to.
+        websocket: The disconnecting connection.
+    Returns:
+        None.
+    """
+    async with _registry_lock:
+        broadcaster = _broadcasters.get(session_id)
+        if broadcaster is None:
+            return
+        broadcaster.connections.discard(websocket)
+        if not broadcaster.connections:
+            del _broadcasters[session_id]
+            await broadcaster.stop()
 
 
 async def _watch_for_disconnect(websocket: WebSocket) -> None:
@@ -141,7 +258,7 @@ async def _watch_for_disconnect(websocket: WebSocket) -> None:
 
     Without a concurrent receive(), Starlette never observes a client-initiated
     disconnect until the next outbound send() fails, which could be a full lap
-    (tens of seconds) away. Racing this against _forward_lap_events bounds
+    (tens of seconds) away. Awaiting this directly in websocket_telemetry bounds
     disconnect detection to roughly immediate instead.
 
     Args:
@@ -186,8 +303,10 @@ async def websocket_telemetry(
     Args:
         websocket: The incoming WebSocket connection (not yet accepted).
         session_id: Session to stream lap-completion events for.
-        redis_client: Redis client, for both the pub/sub subscription and the
-            per-message live-telemetry enrichment lookup.
+        redis_client: This connection's DI-scoped Redis client — only used to
+            seed a new _SessionBroadcaster's connection pool if this is the
+            first viewer for session_id; the broadcaster then owns its own
+            client for the shared subscription and enrichment lookups.
     Returns:
         None.
     """
@@ -215,41 +334,13 @@ async def websocket_telemetry(
     await websocket.accept()
     f1_active_websocket_connections.inc()
 
-    channel = f"f1:telemetry:{session_id}:laps"
-    pubsub = redis_client.pubsub()
-    await pubsub.subscribe(channel)
-
-    forward_task = asyncio.create_task(
-        _forward_lap_events(websocket, pubsub, redis_client, session_id, season, round_number)
-    )
-    watch_task = asyncio.create_task(_watch_for_disconnect(websocket))
+    await _acquire_broadcaster(session_id, season, round_number, redis_client, websocket)
     try:
-        await asyncio.wait({forward_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
+        await _watch_for_disconnect(websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("Unexpected error in WS telemetry stream for session %s", session_id)
     finally:
-        forward_task.cancel()
-        watch_task.cancel()
-        for task in (forward_task, watch_task):
-            try:
-                await task
-            except (asyncio.CancelledError, WebSocketDisconnect):
-                pass
-            except Exception:
-                logger.exception(
-                    "Unexpected error in WS telemetry stream for session %s", session_id
-                )
-        await pubsub.unsubscribe(channel)
-        # redis-py 6.4.0's PubSub.aclose() can hang indefinitely on
-        # connection.disconnect() when forward_task was cancelled mid-read on
-        # this same connection — confirmed via a manual print-trace during
-        # Day 17 test-writing: unsubscribe completes, but aclose() never
-        # returns. Worse, even asyncio.wait_for(aclose(), timeout=...)
-        # doesn't rescue it: wait_for cancels the inner task and then awaits
-        # its actual completion, which never comes either, since the
-        # underlying connection is stuck in a non-cancellable state (not an
-        # ordinary "slow" case a timeout can bound). Running it as a
-        # detached background task instead means a wedged connection can
-        # never block .dec() or this coroutine's return — worst case it
-        # abandons that one connection rather than stalling every disconnect.
-        cleanup_task = asyncio.create_task(pubsub.aclose())  # type: ignore[attr-defined]
-        cleanup_task.add_done_callback(functools.partial(_log_pubsub_cleanup_failure, session_id))
+        await _release_broadcaster(session_id, websocket)
         f1_active_websocket_connections.dec()

@@ -12,17 +12,27 @@ failing logins, not exercising the endpoints under test. Instead,
 real client actually behaves (log in once, reuse the token) — each
 simulated User then just reads a pre-fetched access token in on_start.
 
-Account pool sizing — shared, not 1:1 with simulated users: at 100 concurrent
-users, provisioning 100 real accounts would itself need ~200 unauthenticated
-requests (register + login each) against the same 10/minute ceiling — about
-20 minutes of one-time setup. LOAD_TEST_USER_POOL_SIZE (default: min(target
-users, 30)) trades that off against realism: each account then backs a few
-concurrent simulated users, round-robin. At the request rates below (~12/min
-for RaceDayViewerUser, ~2/min for StrategyUser), a handful of simulated users
-sharing one account still stays comfortably under the 60/min authenticated
-bucket. Tokens are cached to backend/tests/load/.token_cache.json (gitignored
-— see .gitignore) so a same-day re-run (e.g. baseline, then again after DB
-indexes land) reuses valid tokens instantly instead of re-paying setup cost.
+Account pool sizing — shared, not 1:1 with simulated users, but scaled with
+population rather than capped at a flat size: provisioning 1:1 real accounts
+would itself need ~2 unauthenticated requests (register + login) per account
+against the same 10/minute ceiling. LOAD_TEST_USER_POOL_SIZE (default:
+ceil(num_users / _MAX_SIMULATED_USERS_PER_ACCOUNT)) trades that off against
+realism: each account backs a handful of concurrent simulated users,
+round-robin, capped so that even an unlucky account backing only the
+heaviest user type (RaceDayViewerUser, up to ~15/min at its tightest
+wait_time) stays under half of core/rate_limit.py's 60/min authenticated
+bucket — see _MAX_SIMULATED_USERS_PER_ACCOUNT's derivation below. A flat
+cap of 30 (this file's original formula, sized against the Day 13 100-user
+baseline) does not scale: at 500 users it left each account backing ~17
+simulated users, which measurably tripped the rate limiter (1385/15242
+failures were 429s in the Day 18 500-user run — see CLAUDE.md's Deferred
+Wiring). Scaling the pool with population instead means a large run pays a
+longer, rate-limit-paced provisioning pass up front (e.g. ~250 accounts at
+500 users, well under half an hour), not a shorter one that then fails
+requests mid-run. Tokens are cached to backend/tests/load/.token_cache.json
+(gitignored — see .gitignore) so a same-day re-run (e.g. baseline, then
+again after a fix lands) reuses valid tokens instantly instead of
+re-paying setup cost.
 
 Required env var:
     LOAD_TEST_SESSION_ID     Real session UUID with ingested lap_data.
@@ -49,6 +59,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -69,7 +80,20 @@ _TOKEN_CACHE_PATH = Path(__file__).parent / ".token_cache.json"
 # login call from this un-authenticated test-runner IP shares that bucket.
 _UNAUTHENTICATED_CALLS_PER_MINUTE = 10
 _SECONDS_BETWEEN_UNAUTH_CALLS = 60.0 / _UNAUTHENTICATED_CALLS_PER_MINUTE
-_DEFAULT_POOL_SIZE_CAP = 30
+# core/rate_limit.py's AUTHENTICATED_LIMIT = "60/minute", bucketed per account
+# (rate_limit_key keys on "user:{user_id}" from the token, not per simulated
+# Locust User). Token assignment is a flat round-robin over every spawned
+# User regardless of type (see _next_token/_provision_test_users), so an
+# unlucky account could end up backing only RaceDayViewerUser instances —
+# the heaviest population member, up to ~15/minute at its tightest
+# wait_time(4, 6). Capping each account at half the authenticated bucket
+# (30/minute) covers that worst case with headroom for Locust's imprecise
+# spawn timing.
+_ASSUMED_MAX_REQUESTS_PER_MINUTE_PER_USER = 15.0
+_RATE_LIMIT_BUDGET_FRACTION = 0.5
+_MAX_SIMULATED_USERS_PER_ACCOUNT = (
+    _RATE_LIMIT_BUDGET_FRACTION * 60.0
+) / _ASSUMED_MAX_REQUESTS_PER_MINUTE_PER_USER
 # Re-use a cached token if it has at least this long left before expiry —
 # avoids a token expiring mid-request near the boundary.
 _TOKEN_REUSE_SAFETY_MARGIN_SECONDS = 120
@@ -165,7 +189,7 @@ def _target_pool_size(environment: Any) -> int:
     if override:
         return int(override)
     num_users = getattr(environment.parsed_options, "num_users", None) or 100
-    return min(int(num_users), _DEFAULT_POOL_SIZE_CAP)
+    return max(1, math.ceil(int(num_users) / _MAX_SIMULATED_USERS_PER_ACCOUNT))
 
 
 @events.test_start.add_listener  # type: ignore[untyped-decorator]

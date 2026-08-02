@@ -1,0 +1,95 @@
+# Race weekend pre-scaling CronJob — written Day 21, applied Day 22 against
+# local Docker Desktop Kubernetes (see infra/helm-chart/, DEPLOYMENT.md's
+# "Local Kubernetes Deployment" section).
+#
+# namespace below is a LOCAL-VALIDATION override: a real cluster restores
+# namespace: production (both in metadata and the CronJob's --namespace
+# arg). image is also local-only (f1-backend:local, matching
+# values.local.yaml) — production points this at the same ECR backend
+# image cd.yml builds/pushes.
+#
+# Session start times vary weekend-to-weekend, so a single fixed `schedule:`
+# cron expression can't itself mean "30 min before the next session" — this
+# CronJob instead runs frequently (every 10 minutes) and each run checks the
+# Ergast-resolved calendar (fastf1.ergast.Ergast().get_race_schedule(), the
+# same wrapper race_service.py already uses — see CLAUDE.md's note that raw
+# HTTP to ergast.com has been dead since 2024) for whether any session starts
+# within the next 30 minutes; if so, it scales the backend Deployment to 5
+# replicas, otherwise it's a no-op. Scaling back down after a session ends is
+# handled by the HPA's own scaleDown behavior (infra/helm-chart/templates/hpa.yaml)
+# once viewer-driven traffic (f1_active_websocket_connections) drops, not by
+# this CronJob.
+#
+# backend/scripts/prescale_for_session.py (referenced below) does not exist
+# yet — applying this manifest only proves the CronJob/RBAC objects register
+# correctly; a scheduled run will fail until that script is written (see
+# DEPLOYMENT.md's Local Kubernetes Deployment troubleshooting table).
+#
+# Deployment name (f1-strategy-engine-backend) matches the name the Helm
+# chart generates (release name == chart name, confirmed via `helm template
+# f1-strategy-engine infra/helm-chart` — see infra/helm-chart/templates/
+# backend-deployment.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: f1-strategy-engine-race-scaler
+  namespace: local
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: f1-strategy-engine-race-scaler
+  namespace: local
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames: ["f1-strategy-engine-backend"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: f1-strategy-engine-race-scaler
+  namespace: local
+subjects:
+  - kind: ServiceAccount
+    name: f1-strategy-engine-race-scaler
+    namespace: local
+roleRef:
+  kind: Role
+  name: f1-strategy-engine-race-scaler
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: f1-strategy-engine-race-weekend-prescale
+  namespace: local
+spec:
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          serviceAccountName: f1-strategy-engine-race-scaler
+          restartPolicy: Never
+          containers:
+            - name: race-weekend-prescale
+              image: f1-backend:local
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - -m
+                - backend.scripts.prescale_for_session
+                - --lead-minutes
+                - "30"
+                - --replicas
+                - "5"
+                - --deployment
+                - f1-strategy-engine-backend
+                - --namespace
+                - local
