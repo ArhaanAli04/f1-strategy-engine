@@ -89,9 +89,16 @@ jobs:
             --arg backend_repo "$ECR_BACKEND_REPO" \
             --arg worker_repo "$ECR_WORKER_REPO" \
             '{text: ":white_check_mark: *CD build-and-push succeeded* — images pushed for commit `\($sha)` (backend: `\($backend_repo):\($sha)`, worker: `\($worker_repo):\($sha)`)."}')
-          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+          # Informational only — a Slack delivery failure (bad/expired
+          # webhook, Slack outage) must never fail a CD job whose actual
+          # work (image build+push) already succeeded. No -f: curl exits 0
+          # on a non-2xx response too; the || true also covers client-side
+          # failures (e.g. a malformed/empty webhook URL) that -f wouldn't
+          # have caught anyway.
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"
 
   migrate:
     name: Run database migrations
@@ -134,9 +141,12 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg sha "${{ github.sha }}" \
             '{text: ":x: *CD migrate failed* — `alembic upgrade head` against Supabase did not complete for commit `\($sha)`. Deploy is blocked until this is fixed."}')
-          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+          # Informational only — see build-and-push's Notify Slack step for
+          # why this must not fail the job on a Slack delivery failure.
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"
 
   deploy-staging:
     name: Deploy to staging (cloud target TBD)

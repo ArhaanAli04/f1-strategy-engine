@@ -78,6 +78,11 @@ jobs:
             --arg users "${{ inputs.users }}" \
             --arg summary "${{ steps.summary.outputs.summary }}" \
             '{text: ":bar_chart: *Load test (\($status))* against `\($url)` with \($users) users\n```\($summary)```"}')
-          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+          # Informational only — a Slack delivery failure must never fail a
+          # job whose actual work (the load test itself) already completed.
+          # No -f: curl exits 0 on a non-2xx response too; the || true also
+          # covers client-side failures (e.g. a malformed/empty webhook URL).
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"
