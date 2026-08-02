@@ -401,17 +401,18 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    5
-Day:      23
-Status:   Supabase PostgreSQL connected — 8 migrations ran clean, 
-          TimescaleDB gracefully skipped, 14 tables verified, 
-          24 circuits + 11 teams + 22 drivers + 22 contracts seeded. 
-          Upstash Redis configured (Mumbai, allkeys-lru). S3 verified: 
-          7 production models + metrics JSONs + training-data parquet. 
-          cd.yml Job 2 (migrate) filled in — alembic upgrade head 
-          against SUPABASE_DIRECT_URL, Slack alert on failure. 
-          IPv6 blocker resolved: session-mode pooler (port 5432) 
-          used instead of direct connection.
-Next:     Day 24 — Production deployment + smoke tests
+Day:      24
+Status:   All smoke tests passed against local K8s + Supabase + 
+          Upstash. 4 production bugs found and fixed: SENTRY_DSN 
+          not wired (docker-compose + Helm), create-secrets.sh 
+          wrong URL source (localhost vs Supabase/Upstash), asyncpg 
+          prepared-statement collision on PgBouncer (statement_cache_size=0), 
+          Celery rediss:// crash (ssl_cert_reqs). Monitoring verified: 
+          Grafana, Prometheus, Sentry (3s delivery), Alertmanager → Slack. 
+          train-models.yml weekly cron enabled. cd.yml Job 5 updated to 
+          Fly.io plan. runbook.md corrected for real deployment target. 
+          Docker image tag caching behavior corrected in CLAUDE.md.
+Next:     Day 25 — React web app setup
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
