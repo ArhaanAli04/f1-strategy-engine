@@ -115,9 +115,14 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg body "${{ steps.summary.outputs.promoted }}" \
             '{text: ":white_check_mark: *Weekly retrain promoted model(s) to production*\n\($body)"}')
-          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+          # Informational only — a Slack delivery failure must never fail a
+          # job whose actual work (promotion) already succeeded. No -f:
+          # curl exits 0 on a non-2xx response too; the || true also covers
+          # client-side failures (e.g. a malformed/empty webhook URL).
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"
 
       - name: Open review issue for candidate model(s)
         if: steps.summary.outputs.has_candidates == 'true'
@@ -136,6 +141,9 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg body "${{ steps.summary.outputs.candidates }}" \
             '{text: ":warning: *Weekly retrain: candidate model(s) awaiting human review*\n\($body)"}')
-          curl -sf -X POST "$SLACK_WEBHOOK_DEPLOY" \
+          # Informational only — see "Notify Slack — model(s) promoted"
+          # above for why this must not fail the job.
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"
