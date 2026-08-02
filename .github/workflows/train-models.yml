@@ -22,12 +22,11 @@ name: Train Models
 
 on:
   workflow_dispatch: {}
-  # TODO: Day 23 — enable after Supabase is configured AND the one-time
-  # export_training_data.py run has uploaded the base corpus to S3 (see
-  # CLAUDE.md's Deferred Wiring & Integration Gaps). Until then this workflow
-  # only runs manually.
-  # schedule:
-  #   - cron: "0 2 * * 1"
+  # Enabled Day 24: Supabase is configured (Day 23) and the one-time
+  # export_training_data.py run uploaded the base corpus to S3 (completed
+  # 2026-07-30 — see CLAUDE.md's Notes). Runs every Monday 02:00 UTC.
+  schedule:
+    - cron: "0 2 * * 1"
 
 env:
   PYTHON_VERSION: "3.12"

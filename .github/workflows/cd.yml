@@ -184,26 +184,26 @@ jobs:
         #       -f session_id=<real staging session UUID>
 
   deploy-production:
-    name: Deploy to production (EKS)
+    name: Deploy to production (Fly.io)
     needs: [load-test-staging]
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: Deploy to production (deferred)
-        run: echo "Production deploy deferred — manual approval gate configured, real deploy lands Day 24"
-        # TODO Day 24: replace the echo above with the real production
-        # deploy, mirroring deploy-staging above but against the
-        # production namespace/values file:
+        run: echo "Production deploy deferred — target is Fly.io (decided Day 24), not Kubernetes/EKS; real deploy lands after Day 40"
+        # TODO (after Day 40): replace the echo above with the real
+        # production deploy. Fly.io was chosen over EKS/GKE/Render (see
+        # CLAUDE.md's Deployment Strategy) — no Kubernetes cluster, no Helm
+        # chart involved for this target; infra/helm-chart/ remains local
+        # Docker Desktop-only (see Day 22/24 notes). Fly.io builds straight
+        # from the existing backend Dockerfile:
         #
         # - uses: actions/checkout@v4
-        # - name: Configure kubeconfig
-        #   run: echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
-        # - name: Helm upgrade (production)
+        # - name: Install flyctl
+        #   uses: superfly/flyctl-actions/setup-flyctl@master
+        # - name: Deploy to Fly.io
+        #   env:
+        #     FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         #   run: |
-        #     helm upgrade --install f1-strategy-engine infra/k8s/helm \
-        #       --namespace production \
-        #       --kubeconfig kubeconfig \
-        #       --set backend.image.tag=${{ github.sha }} \
-        #       --set worker.image.tag=${{ github.sha }} \
-        #       --values infra/k8s/helm/values-production.yaml \
-        #       --wait --timeout 5m
+        #     fly deploy --dockerfile infra/docker/Dockerfile.backend \
+        #       --image-label ${{ github.sha }}

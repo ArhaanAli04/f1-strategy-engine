@@ -2,12 +2,26 @@
 
 Procedures for rolling back a bad deploy, migration, or model; scaling for
 race day; and rotating secrets. Written Day 21, ahead of the Day 22
-Kubernetes deployment — the Helm/kubectl commands below assume the cluster
-and Helm release described in `infra/k8s/` exist (Day 22+), and use
-`f1-strategy-backend`/`f1-strategy-worker` as placeholder Deployment names —
-confirm/update these against the actual Helm chart's generated resource
-names once it's written. Everything else (model rollback, secret rotation)
-applies today.
+Kubernetes deployment. Deployment names below (`f1-strategy-engine-backend`/
+`f1-strategy-engine-worker`) are confirmed against the actual Helm chart's
+generated resource names (`{{ include "f1-strategy-engine.fullname" . }}-backend`/
+`-worker`) — verified directly against a running cluster on Day 24, not just
+inferred from the templates.
+
+**Production is Fly.io, not Kubernetes (decided Day 24, see `cd.yml`'s
+`deploy-production` job) — every `-n production` command below currently has
+no real target.** `infra/helm-chart/` and the kubectl/Helm procedures in this
+runbook were built and validated only against the local Docker Desktop
+cluster (`-n local`; see CLAUDE.md's Deployment Strategy and Day 22/24
+notes) — there is no `production` namespace or cluster today, and there
+won't be a Kubernetes-based one once the real production deploy lands after
+Day 40. Until then, treat every command below as validated against `-n
+local` only; substitute `-n local` if you're actually running one of these
+procedures today. App rollback, race day scaling, and the Kubernetes-secret
+half of secret rotation will need a Fly.io-specific rewrite once that
+deploy exists — this is flagged here rather than guessed at, since Fly.io's
+equivalent primitives (`fly deploy`, `fly scale count`, `fly secrets set`)
+aren't a 1:1 mapping of what's documented below.
 
 ## Table of Contents
 
@@ -36,8 +50,8 @@ helm rollback f1-strategy-engine -n production
 helm rollback f1-strategy-engine <revision> -n production
 
 # Confirm pods came back healthy on the reverted image
-kubectl rollout status deployment/f1-strategy-backend -n production
-kubectl rollout status deployment/f1-strategy-worker -n production
+kubectl rollout status deployment/f1-strategy-engine-backend -n production
+kubectl rollout status deployment/f1-strategy-engine-worker -n production
 ```
 
 Release name matches `cd.yml`'s `helm upgrade --install f1-strategy-engine`
@@ -127,8 +141,8 @@ effect until you restart the processes that serve predictions.
    docker compose restart worker backend
 
    # Kubernetes (Day 22+)
-   kubectl rollout restart deployment/f1-strategy-worker -n production
-   kubectl rollout restart deployment/f1-strategy-backend -n production
+   kubectl rollout restart deployment/f1-strategy-engine-worker -n production
+   kubectl rollout restart deployment/f1-strategy-engine-backend -n production
    ```
 
 ---
@@ -168,7 +182,7 @@ worker backlog and DB pool exhaustion).
    CronJob isn't deployed yet):
 
    ```bash
-   kubectl scale deployment/f1-strategy-backend -n production --replicas=5
+   kubectl scale deployment/f1-strategy-engine-backend -n production --replicas=5
    ```
 
 2. **Confirm the worker pool is scaled for the queue depth you expect.** The
@@ -177,7 +191,7 @@ worker backlog and DB pool exhaustion).
    `/strategy/simulate` calls, not from CPU alone:
 
    ```bash
-   kubectl scale deployment/f1-strategy-worker -n production --replicas=8
+   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=8
    ```
 
 3. **Warm the cache** before the session starts, so the first wave of
@@ -194,14 +208,14 @@ worker backlog and DB pool exhaustion).
    workers are draining it, scale workers further:
 
    ```bash
-   kubectl scale deployment/f1-strategy-worker -n production --replicas=<N>
+   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=<N>
    ```
 
 5. **Scale back down** after the session ends to avoid idle cost:
 
    ```bash
-   kubectl scale deployment/f1-strategy-backend -n production --replicas=2
-   kubectl scale deployment/f1-strategy-worker -n production --replicas=2
+   kubectl scale deployment/f1-strategy-engine-backend -n production --replicas=2
+   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=2
    ```
 
 Once `infra/k8s/hpa.yaml` and `infra/k8s/worker-scaledobject.yaml` are
@@ -224,8 +238,13 @@ individual with access leaves the project.
    - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`: create a new IAM access
      key in the AWS Console for the `f1-strategy-s3-access` policy's user,
      confirm it works, then deactivate (don't yet delete) the old key.
-   - `DATABASE_URL` / `REDIS_URL` passwords: rotate at the Supabase/Upstash
-     dashboard, which issues a new connection string.
+   - `SUPABASE_DATABASE_URL` / `UPSTASH_REDIS_URL` passwords: rotate at the
+     Supabase/Upstash dashboard, which issues a new connection string. Note
+     these are distinct from `.env`'s own `DATABASE_URL`/`REDIS_URL`, which
+     point at docker-compose's local Postgres/Redis for local dev and are
+     never used for a Kubernetes Secret (see `infra/k8s/create-secrets.sh`'s
+     header comment, corrected Day 24 after this exact confusion broke a
+     local K8s deploy).
    - `SLACK_WEBHOOK_DEPLOY`: regenerate the incoming webhook URL in the Slack
      app configuration for the F1 Strategy Engine workspace.
 
@@ -233,22 +252,24 @@ individual with access leaves the project.
    Actions) with the new value. Do this for every secret listed in
    `cd.yml`'s and `train-models.yml`'s header comments.
 
-3. **Update the production environment** (Kubernetes Sealed Secrets, once
-   Day 22+ lands) — never commit the plaintext value to any YAML file:
+3. **Update the Kubernetes Secret** — never commit the plaintext value to
+   any YAML file. Sealed Secrets is still deferred (no real cloud cluster
+   exists yet — see CLAUDE.md's Deferred Wiring); the actual interim
+   mechanism, confirmed working Day 24, is `infra/k8s/create-secrets.sh`,
+   which reads `.env` (including `SUPABASE_DATABASE_URL`/
+   `UPSTASH_REDIS_URL` — update `.env` with the new value first) and
+   recreates the Secret:
 
    ```bash
-   kubectl create secret generic f1-strategy-secrets -n production \
-     --from-literal=SECRET_KEY="$NEW_SECRET_KEY" \
-     --dry-run=client -o yaml | kubeseal -o yaml > infra/k8s/sealed-secrets/f1-strategy-secrets.yaml
-   kubectl apply -f infra/k8s/sealed-secrets/f1-strategy-secrets.yaml
+   ./infra/k8s/create-secrets.sh local
    ```
 
 4. **Roll the deployment** so running pods pick up the new value (secrets
    mounted as env vars are not hot-reloaded):
 
    ```bash
-   kubectl rollout restart deployment/f1-strategy-backend -n production
-   kubectl rollout restart deployment/f1-strategy-worker -n production
+   kubectl rollout restart deployment/f1-strategy-engine-backend -n production
+   kubectl rollout restart deployment/f1-strategy-engine-worker -n production
    ```
 
 5. **Verify** the app is healthy on the new secret (`GET /health`, a real
