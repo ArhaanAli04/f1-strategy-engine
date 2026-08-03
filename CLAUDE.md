@@ -566,6 +566,19 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- **retrain_incremental.py FastF1 403→mirror fallback for 2026 data:**
+  FastF1 temporarily gets a 403 from livetiming.formula1.com,
+  incorrectly falls back to livetiming-mirror.fastf1.dev which
+  has no 2026 data (mirror only patches corrupted 2021-2022 sessions),
+  resulting in SessionNotAvailableError for all 2026 rounds.
+  Current fix: rounds are skipped gracefully. Real fix needed:
+  (1) call fastf1.Cache.clear_cache() before fetching 2026 rounds,
+  (2) add retry loop (max 3 attempts, 30s delay) around load_session()
+  for current season data specifically,
+  (3) add FASTF1_CACHE_DIR setup step in train-models.yml.
+  Non-blocking — pipeline trains on 2018-2025 base corpus correctly.
+  Fix before next season when 2026 data becomes critical for MAE improvement.
+
 - prometheus.yml Basic Auth credentials are hardcoded as dev defaults 
 (metrics/metrics-dev). Fix on Day 19 when setting up GitHub Secrets — 
 use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD} 
