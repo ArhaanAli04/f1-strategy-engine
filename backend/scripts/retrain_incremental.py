@@ -34,6 +34,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import fastf1._api
+import fastf1.exceptions
 import pandas as pd
 
 from backend.core.config import get_aws_settings
@@ -112,8 +114,17 @@ def _fetch_current_season_rounds() -> tuple[pd.DataFrame, pd.DataFrame]:
     for round_number in range(1, 25):
         try:
             session = load_session(CURRENT_SEASON, round_number, "R")
-        except RoundSkippedError as exc:
+            laps = session.laps
+        except (
+            RoundSkippedError,
+            fastf1.exceptions.DataNotLoadedError,
+            fastf1._api.SessionNotAvailableError,
+        ) as exc:
             logger.info("Skipping round %d: %s", round_number, exc)
+            continue
+
+        if laps.empty:
+            logger.info("Skipping round %d: no lap data available", round_number)
             continue
 
         location = session.event["Location"]
@@ -123,7 +134,6 @@ def _fetch_current_season_rounds() -> tuple[pd.DataFrame, pd.DataFrame]:
             continue
 
         session_key = f"{CURRENT_SEASON}-R{round_number}-R"
-        laps = session.laps
 
         for _, lap in laps.iterrows():
             if pd.isna(lap["LapNumber"]) or pd.isna(lap["LapTime"]):
