@@ -401,18 +401,16 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      24
-Status:   All smoke tests passed against local K8s + Supabase + 
-          Upstash. 4 production bugs found and fixed: SENTRY_DSN 
-          not wired (docker-compose + Helm), create-secrets.sh 
-          wrong URL source (localhost vs Supabase/Upstash), asyncpg 
-          prepared-statement collision on PgBouncer (statement_cache_size=0), 
-          Celery rediss:// crash (ssl_cert_reqs). Monitoring verified: 
-          Grafana, Prometheus, Sentry (3s delivery), Alertmanager → Slack. 
-          train-models.yml weekly cron enabled. cd.yml Job 5 updated to 
-          Fly.io plan. runbook.md corrected for real deployment target. 
-          Docker image tag caching behavior corrected in CLAUDE.md.
-Next:     Day 25 — React web app setup
+Day:      25
+Status:   React web app scaffolded in web/. Vite+React+TS, 
+          Tailwind v3, shadcn/ui (Zinc). 8 TypeScript type files 
+          mirroring all backend Pydantic schemas. axios API client, 
+          Zustand stores (auth/session/alert), TanStack Query hooks 
+          (useAuth, useStrategy, useLiveTelemetry, useWebSocket). 
+          10 routes with AuthGuard, ErrorBoundary, 404, 
+          LoadingSkeleton. Stub pages for all routes. 
+          react-router-dom pinned to v6. Build clean (85 modules).
+Next:     Day 26 — Web app — API client layer, auth pages & TanStack Query setup
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
