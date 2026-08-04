@@ -37,6 +37,23 @@ cd backend && alembic check
 docker build -f infra/docker/Dockerfile.backend -t f1-backend:test . --no-cache
 ```
 
+## Frontend checks (web/)
+
+Only run these if files under `web/` changed in the current session — same
+conditional logic as step 5 (migration check) and step 6 (Docker build check)
+above. Stop at the first failure and fix it, same as the backend checks.
+
+```bash
+# 1. Type check
+cd web && npx tsc -b --noEmit
+
+# 2. Lint check
+cd web && npm run lint
+
+# 3. Production build verification
+cd web && npm run build
+```
+
 ## STOP HERE — hand control back to the user
 
 Once all checks above pass, produce a clean summary table of what passed
