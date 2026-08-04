@@ -401,15 +401,20 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      26
-Status:   LoginPage + RegisterPage built with shadcn/ui 
-          (Card/Form/Input/Label), react-hook-form validation, 
-          sonner toasts. api/alerts.ts and api/telemetry.ts added. 
-          QueryClient configured (staleTime 0, retry 2, global 
-          error handler). Dark mode activated (class="dark" on html). 
-          errors.ts utility handles both backend error shapes. 
-          E2E verified: register→login→dashboard, token in localStorage.
-Next:     Day 27 — Live race dashboard, WebSocket, timing tower
+Day:      27
+Status:   Live race dashboard built. LiveTimingTower (22 drivers, 
+          position order, compound indicator, cumulative gap, 
+          click-to-select, FLIP animation). LapTimeChart (Recharts, 
+          per-lap data from getDriverLaps, compound segments + pit 
+          reference lines). SectorHeatmap (22 drivers, purple/green/
+          yellow/grey F1 color scheme, client-side session-best 
+          aggregation). RacePage layout (sidebar/main/right panel). 
+          useDrivers, useDriverLaps, useSessionGaps hooks added. 
+          CI frontend-check job added (Node 20, npm ci, lint, build, 
+          gated on web/** paths filter). Verified live with 2025 
+          Yas Marina session (real drivers: VER, HAD, LAW, PIA, NOR, 
+          LEC, RUS, HAM etc.)
+Next:     Day 28 — Strategy dashboard, pit window, simulator UI
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
