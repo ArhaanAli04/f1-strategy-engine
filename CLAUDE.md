@@ -401,16 +401,15 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      25
-Status:   React web app scaffolded in web/. Vite+React+TS, 
-          Tailwind v3, shadcn/ui (Zinc). 8 TypeScript type files 
-          mirroring all backend Pydantic schemas. axios API client, 
-          Zustand stores (auth/session/alert), TanStack Query hooks 
-          (useAuth, useStrategy, useLiveTelemetry, useWebSocket). 
-          10 routes with AuthGuard, ErrorBoundary, 404, 
-          LoadingSkeleton. Stub pages for all routes. 
-          react-router-dom pinned to v6. Build clean (85 modules).
-Next:     Day 26 — Web app — API client layer, auth pages & TanStack Query setup
+Day:      26
+Status:   LoginPage + RegisterPage built with shadcn/ui 
+          (Card/Form/Input/Label), react-hook-form validation, 
+          sonner toasts. api/alerts.ts and api/telemetry.ts added. 
+          QueryClient configured (staleTime 0, retry 2, global 
+          error handler). Dark mode activated (class="dark" on html). 
+          errors.ts utility handles both backend error shapes. 
+          E2E verified: register→login→dashboard, token in localStorage.
+Next:     Day 27 — Live race dashboard, WebSocket, timing tower
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders
 ```
