@@ -66,4 +66,17 @@
   body {
     @apply bg-background text-foreground;
   }
+
+  /* Scroll still works everywhere (wheel/trackpad/keyboard) — this only
+     suppresses the native scrollbar's visual track/thumb, which otherwise
+     renders with the browser's light default regardless of the app's dark
+     theme, showing up as bright bars between panels (timing tower sidebar,
+     sector heatmap, etc). */
+  * {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* legacy Edge/IE */
+  }
+  *::-webkit-scrollbar {
+    display: none; /* Chrome, Safari, Edge (Chromium) */
+  }
 }

@@ -20,3 +20,15 @@ export function formatGap(seconds: number | null | undefined): string {
 export function getCompoundColor(compound: string): string {
   return COMPOUND_COLORS[compound.toUpperCase()] ?? COMPOUND_COLORS.UNKNOWN
 }
+
+const COMPOUND_LABELS: Record<string, string> = {
+  SOFT: "S",
+  MEDIUM: "M",
+  HARD: "H",
+  INTERMEDIATE: "I",
+  WET: "W",
+}
+
+export function getCompoundLabel(compound: string): string {
+  return COMPOUND_LABELS[compound.toUpperCase()] ?? "?"
+}
