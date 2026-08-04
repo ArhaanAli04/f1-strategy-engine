@@ -1,6 +1,70 @@
+import { useEffect } from "react"
 import { useParams } from "react-router-dom"
+import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
+import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
+import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { useDrivers } from "@/hooks/useDrivers"
+import { useSessionStore } from "@/stores/sessionStore"
 
 export function RacePage() {
   const { sessionId } = useParams<{ sessionId: string }>()
-  return <h1>Race {sessionId}</h1>
+  const setSelectedSession = useSessionStore((state) => state.setSelectedSession)
+  const selectedDriverId = useSessionStore((state) => state.selectedDriverId)
+  const { data: drivers } = useDrivers()
+
+  useEffect(() => {
+    setSelectedSession(sessionId ?? null)
+    return () => setSelectedSession(null)
+  }, [sessionId, setSelectedSession])
+
+  if (!sessionId) {
+    return <div className="p-6 text-sm text-muted-foreground">No session selected.</div>
+  }
+
+  const selectedDriver = drivers?.find((driver) => driver.id === selectedDriverId) ?? null
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-background">
+      <aside className="flex w-72 flex-shrink-0 flex-col overflow-y-auto border-r">
+        <div className="flex-shrink-0 border-b px-3 py-2 text-sm font-semibold">Live Timing</div>
+        <LiveTimingTower sessionId={sessionId} />
+      </aside>
+
+      <main className="flex flex-1 flex-col overflow-y-auto">
+        {/* Fixed height so this placeholder is sized like its eventual
+            content — the live circuit map (CLAUDE.md's Days 25-28 plan)
+            slots in here without reflowing the panels below it. */}
+        <div className="flex h-80 flex-shrink-0 items-center justify-center border-b bg-muted/30 text-sm text-muted-foreground">
+          Circuit Map — coming soon
+        </div>
+
+        <div className="flex flex-1 flex-col gap-4 p-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Lap Times{selectedDriver ? ` — ${selectedDriver.code}` : ""}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <LapTimeChart sessionId={sessionId} driverId={selectedDriverId} />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Sector Times</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <SectorHeatmap sessionId={sessionId} />
+            </CardContent>
+          </Card>
+        </div>
+      </main>
+
+      <aside className="flex w-80 flex-shrink-0 flex-col overflow-y-auto border-l p-4">
+        <div className="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
+          Strategy — Day 28
+        </div>
+      </aside>
+    </div>
+  )
 }
