@@ -1,4 +1,5 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom"
+import { NavBar } from "@/components/layout/NavBar"
 import { useIsAuthenticated } from "@/stores/authStore"
 import { ROUTES } from "@/utils/constants"
 
@@ -13,5 +14,15 @@ export function AuthGuard() {
     return <Navigate to={ROUTES.LOGIN} state={{ from: location }} replace />
   }
 
-  return <Outlet />
+  // flex-col + NavBar's fixed height means child routes fill the *remaining*
+  // height (h-full), not a fresh 100vh (h-screen) — see RacePage.tsx, the
+  // one existing page that assumed full-viewport height.
+  return (
+    <div className="flex h-screen flex-col overflow-hidden">
+      <NavBar />
+      <div className="flex-1 overflow-hidden">
+        <Outlet />
+      </div>
+    </div>
+  )
 }

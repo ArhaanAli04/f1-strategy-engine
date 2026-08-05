@@ -6,9 +6,64 @@ import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { cn } from "@/lib/utils"
 import { useSessionStore } from "@/stores/sessionStore"
+import { COMPOUND_COLORS } from "@/utils/constants"
 import { formatLapTime, getCompoundColor, getCompoundLabel } from "@/utils/formatters"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import type { DriverGap, DriverResponse, LapDataResponse } from "@/types"
+
+const TYRE_ICON_SIZE = 24
+const TYRE_ICON_BG = "#1a1a1a"
+
+interface TyreIconProps {
+  compound: string | null
+}
+
+// F1-style tyre icon: dark disc, bold compound letter, and a partial
+// circular border split into two arcs (left/right) with small gaps at 12
+// and 6 o'clock — not a full ring. Letter and arcs share the compound color.
+function TyreIcon({ compound }: TyreIconProps) {
+  const color = compound ? getCompoundColor(compound) : COMPOUND_COLORS.UNKNOWN
+  const label = compound ? getCompoundLabel(compound) : "?"
+
+  return (
+    <svg
+      width={TYRE_ICON_SIZE}
+      height={TYRE_ICON_SIZE}
+      viewBox="0 0 24 24"
+      className="flex-shrink-0"
+      aria-label={compound ?? "Unknown compound"}
+    >
+      <circle cx="12" cy="12" r="11" fill={TYRE_ICON_BG} />
+      {/* Right arc: theta 12°→168° (measured clockwise from 12 o'clock) */}
+      <path
+        d="M 13.87 3.2 A 9 9 0 0 1 13.87 20.8"
+        fill="none"
+        stroke={color}
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      {/* Left arc: theta 192°→348°, mirrors the right arc */}
+      <path
+        d="M 10.13 20.8 A 9 9 0 0 1 10.13 3.2"
+        fill="none"
+        stroke={color}
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+      <text
+        x="12"
+        y="12.5"
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fontSize="10"
+        fontWeight="bold"
+        fill={color}
+      >
+        {label}
+      </text>
+    </svg>
+  )
+}
 
 interface LiveTimingTowerProps {
   sessionId: string
@@ -184,32 +239,27 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
             if (event.key === "Enter" || event.key === " ") setSelectedDriver(row.driverId)
           }}
           className={cn(
-            // All 6 columns are fixed-width (no 1fr) so the row can never
-            // demand more than the sidebar's width — a 1fr lap-time column
-            // has an implicit minmax(auto, 1fr), so unbreakable monospace
-            // text was forcing the grid wider than its container and
-            // pushing the compound circle off the edge (needed a horizontal
-            // scroll to see it). Row height (py-1.5) is unchanged.
-            "grid cursor-pointer grid-cols-[1.5rem_0.2rem_2.5rem_4rem_4rem_1.5rem] items-center gap-1 border-b px-1.5 py-1.5 text-xs",
+            // flex + justify-between with every field fixed-width: each
+            // field claims exactly its own space and justify-between
+            // distributes the leftover evenly between them, so there's no
+            // single large gap anywhere and the tyre icon (last field)
+            // lands flush against the row's right edge. Row height
+            // (py-1.5) is unchanged. Lap time was dropped — already shown
+            // in SectorHeatmap, redundant here.
+            "flex cursor-pointer items-center justify-between border-b px-1.5 py-1.5 text-xs",
             row.driverId === selectedDriverId ? "bg-accent" : "hover:bg-muted/50",
           )}
         >
-          <span className="text-center font-mono text-muted-foreground">{row.position}</span>
-          <span className="h-5 w-1 rounded-full" style={{ backgroundColor: row.teamColor }} />
-          <span className="font-semibold">{row.code}</span>
-          <span className="font-mono tabular-nums">{formatLapTime(row.lastLapSeconds)}</span>
-          <span className="text-right font-mono tabular-nums text-muted-foreground">
+          <span className="w-6 text-center font-mono text-muted-foreground">{row.position}</span>
+          <span
+            className="h-5 w-1 flex-shrink-0 rounded-full"
+            style={{ backgroundColor: row.teamColor }}
+          />
+          <span className="w-10 font-semibold">{row.code}</span>
+          <span className="w-20 text-right font-mono tabular-nums text-muted-foreground">
             {row.gapLabel}
           </span>
-          <span
-            className="flex h-5 w-5 items-center justify-center justify-self-center rounded-full text-[10px] font-bold"
-            style={{
-              backgroundColor: row.compound ? getCompoundColor(row.compound) : "#374151",
-              color: row.compound?.toUpperCase() === "HARD" ? "#111827" : "#FFFFFF",
-            }}
-          >
-            {row.compound ? getCompoundLabel(row.compound) : "?"}
-          </span>
+          <TyreIcon compound={row.compound} />
         </div>
       ))}
     </div>

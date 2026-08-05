@@ -568,6 +568,11 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- **Monte Carlo simulator position_gain_loss may not correctly account for
+  current on-track gaps when computing position changes** — VER pitting
+  lap 55/58 returned 0 change despite HAD being only 1.3s behind.
+  Investigate simulation_service.py run_race_simulation() gap handling.
+
 - **retrain_incremental.py FastF1 403→mirror fallback for 2026 data:**
   FastF1 temporarily gets a 403 from livetiming.formula1.com,
   incorrectly falls back to livetiming-mirror.fastf1.dev which
