@@ -401,22 +401,22 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      27
-Status:   Live race dashboard built. LiveTimingTower (22 drivers, 
-          position order, compound indicator, cumulative gap, 
-          click-to-select, FLIP animation). LapTimeChart (Recharts, 
-          per-lap data from getDriverLaps, compound segments + pit 
-          reference lines). SectorHeatmap (22 drivers, purple/green/
-          yellow/grey F1 color scheme, client-side session-best 
-          aggregation). RacePage layout (sidebar/main/right panel). 
-          useDrivers, useDriverLaps, useSessionGaps hooks added. 
-          CI frontend-check job added (Node 20, npm ci, lint, build, 
-          gated on web/** paths filter). Verified live with 2025 
-          Yas Marina session (real drivers: VER, HAD, LAW, PIA, NOR, 
-          LEC, RUS, HAM etc.)
-Next:     Day 28 — Strategy dashboard, pit window, simulator UI
+Day:      28
+Status:   Strategy components built: PitWindowCard (pit window + 
+          SHAP explanation), StrategyOverviewGrid (22-driver wall), 
+          UndercutThreatPanel (ahead/behind undercut analysis), 
+          CompetitorStrategyTable (30s polling). SimulatorPage 
+          (4-step flow: driver/state → pit stops → poll → bar chart). 
+          AlertsPage (notification feed, mark as read). NavBar with 
+          bell icon + unread count. UI improvements: F1-style tyre 
+          icon (SVG with partial arc border), SectorHeatmap restyled 
+          as F1 table (5 columns, zebra striping, grey pill cells, 
+          purple/green/yellow text). Timing tower lap time removed 
+          (shown in sector table instead).
+Next:     Day 29 — Driver analytics, dashboard page, settings
 Blockers: Cloud deployment target undecided (Render/GKE) — 
-          cd.yml Jobs 3-5 remain placeholders
+          cd.yml Jobs 3-5 remain placeholders, Monte Carlo simulator position_gain_loss may not correctly 
+          account for current on-track gaps (see CLAUDE.md deferred wiring)
 ```
 
 ---
