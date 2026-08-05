@@ -3,6 +3,8 @@ import { useParams } from "react-router-dom"
 import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
 import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
 import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
+import { StrategyOverviewGrid } from "@/components/strategy/StrategyOverviewGrid"
+import { UndercutThreatPanel } from "@/components/strategy/UndercutThreatPanel"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useSessionStore } from "@/stores/sessionStore"
@@ -25,8 +27,8 @@ export function RacePage() {
   const selectedDriver = drivers?.find((driver) => driver.id === selectedDriverId) ?? null
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <aside className="flex w-72 flex-shrink-0 flex-col overflow-y-auto border-r">
+    <div className="flex h-full overflow-hidden bg-background">
+      <aside className="flex w-60 flex-shrink-0 flex-col overflow-y-auto border-r">
         <div className="flex-shrink-0 border-b px-3 py-2 text-sm font-semibold">Live Timing</div>
         <LiveTimingTower sessionId={sessionId} />
       </aside>
@@ -60,9 +62,11 @@ export function RacePage() {
         </div>
       </main>
 
-      <aside className="flex w-80 flex-shrink-0 flex-col overflow-y-auto border-l p-4">
-        <div className="flex h-full items-center justify-center text-center text-sm text-muted-foreground">
-          Strategy — Day 28
+      <aside className="flex w-80 flex-shrink-0 flex-col gap-4 overflow-y-auto border-l p-4">
+        <UndercutThreatPanel sessionId={sessionId} driverId={selectedDriverId} />
+        <div>
+          <div className="mb-2 text-sm font-semibold">Strategy Wall</div>
+          <StrategyOverviewGrid sessionId={sessionId} />
         </div>
       </aside>
     </div>

@@ -6,15 +6,20 @@ import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { cn } from "@/lib/utils"
 import { useSessionStore } from "@/stores/sessionStore"
+import { formatLapTime } from "@/utils/formatters"
 import type { DriverResponse, LapDataResponse } from "@/types"
 
 interface SectorHeatmapProps {
   sessionId: string
 }
 
-type SectorKey = "sector1_seconds" | "sector2_seconds" | "sector3_seconds"
+// lap_time_seconds is included alongside the 3 sectors so the Lap Time
+// column gets the same purple/green/yellow session-best/personal-best
+// classification as S1/S2/S3, not just a plain readout.
+type TimeKey = "lap_time_seconds" | "sector1_seconds" | "sector2_seconds" | "sector3_seconds"
 
-const SECTORS: { key: SectorKey; label: string }[] = [
+const TIME_COLUMNS: { key: TimeKey; label: string }[] = [
+  { key: "lap_time_seconds", label: "LAP TIME" },
   { key: "sector1_seconds", label: "S1" },
   { key: "sector2_seconds", label: "S2" },
   { key: "sector3_seconds", label: "S3" },
@@ -22,16 +27,18 @@ const SECTORS: { key: SectorKey; label: string }[] = [
 
 type SectorClass = "purple" | "green" | "yellow" | "none"
 
-// Matches real F1 timing screens: purple = absolute session-best for that
-// sector, green = this driver's own best (but not session-best), yellow =
-// slower than their own best, grey = no time set.
-const SECTOR_CLASS_STYLES: Record<SectorClass, string> = {
-  purple: "bg-purple-500 text-white",
-  green: "bg-emerald-500 text-white",
-  yellow: "bg-yellow-400 text-black",
-  none: "bg-muted text-muted-foreground",
+// Real F1 timing-screen convention: purple = absolute session-best, green =
+// this driver's own best (but not session-best), yellow = slower than their
+// own best, grey/white = no time set. Text color inside a fixed grey pill
+// (bg-[#2a2a2a] below) rather than a colored cell background.
+const TIME_TEXT_STYLES: Record<SectorClass, string> = {
+  purple: "text-purple-400",
+  green: "text-emerald-400",
+  yellow: "text-yellow-300",
+  none: "text-gray-400",
 }
 
+const FALLBACK_TEAM_COLOR = "#6B7280"
 const EQUALITY_EPSILON = 1e-6
 
 function classifySector(
@@ -54,6 +61,11 @@ function minOf(values: (number | null)[]): number | null {
   return best
 }
 
+function formatTimeValue(key: TimeKey, value: number | null): string {
+  if (value === null) return "—"
+  return key === "lap_time_seconds" ? formatLapTime(value) : value.toFixed(3)
+}
+
 export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
   const { data: drivers } = useDrivers()
   const { data: gapsResponse } = useSessionGaps(sessionId)
@@ -69,6 +81,12 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
     }
     return [...(drivers ?? [])].sort((a, b) => a.code.localeCompare(b.code)).map((d) => d.id)
   }, [gapsResponse, drivers])
+
+  const positionsByDriver = useMemo(() => {
+    const map = new Map<string, number>()
+    for (const gap of gapsResponse?.gaps ?? []) map.set(gap.driver_id, gap.position)
+    return map
+  }, [gapsResponse])
 
   // Same query key as useDriverLaps/LapTimeChart — react-query dedupes and
   // shares this cache entry rather than double-fetching.
@@ -94,12 +112,13 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
   }, [orderedDriverIds, lapsQueries])
 
   const sessionBests = useMemo(() => {
-    const bests: Record<SectorKey, number | null> = {
+    const bests: Record<TimeKey, number | null> = {
+      lap_time_seconds: null,
       sector1_seconds: null,
       sector2_seconds: null,
       sector3_seconds: null,
     }
-    for (const { key } of SECTORS) {
+    for (const { key } of TIME_COLUMNS) {
       const allValues: (number | null)[] = []
       lapsByDriver.forEach((laps) => laps.forEach((lap) => allValues.push(lap[key])))
       bests[key] = minOf(allValues)
@@ -108,15 +127,16 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
   }, [lapsByDriver])
 
   const personalBests = useMemo(() => {
-    const map = new Map<string, Record<SectorKey, number | null>>()
+    const map = new Map<string, Record<TimeKey, number | null>>()
     orderedDriverIds.forEach((driverId) => {
       const laps = lapsByDriver.get(driverId) ?? []
-      const perDriver: Record<SectorKey, number | null> = {
+      const perDriver: Record<TimeKey, number | null> = {
+        lap_time_seconds: null,
         sector1_seconds: null,
         sector2_seconds: null,
         sector3_seconds: null,
       }
-      for (const { key } of SECTORS) {
+      for (const { key } of TIME_COLUMNS) {
         perDriver[key] = minOf(laps.map((lap) => lap[key]))
       }
       map.set(driverId, perDriver)
@@ -138,17 +158,19 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
     )
   }
 
+  const gridColumns = "grid-cols-[7rem_1fr_1fr_1fr_1fr]"
+
   return (
-    <div className="flex flex-col gap-1">
-      <div className="grid grid-cols-[3rem_1fr_1fr_1fr] gap-1 px-1 text-xs font-medium text-muted-foreground">
-        <span>Driver</span>
-        {SECTORS.map((sector) => (
-          <span key={sector.key} className="text-center">
-            {sector.label}
+    <div className="flex flex-col gap-0.5">
+      <div className={cn("grid gap-1 px-2 py-1 text-xs font-medium text-muted-foreground", gridColumns)}>
+        <span>POSITION</span>
+        {TIME_COLUMNS.map(({ key, label }) => (
+          <span key={key} className="text-center">
+            {label}
           </span>
         ))}
       </div>
-      {orderedDriverIds.map((driverId) => {
+      {orderedDriverIds.map((driverId, index) => {
         const driver = driversById.get(driverId)
         const laps = lapsByDriver.get(driverId) ?? []
         const latestLap = laps.reduce<LapDataResponse | null>(
@@ -156,6 +178,12 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
           null,
         )
         const personalBest = personalBests.get(driverId)
+        const teamColor = driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR
+        const position = positionsByDriver.get(driverId)
+        const isSelected = driverId === selectedDriverId
+        // Zebra striping: 1st/3rd/5th... rows (even index) are deep black,
+        // 2nd/4th/6th... (odd index) are slightly lighter dark grey.
+        const rowBg = index % 2 === 0 ? "bg-[#0a0a0a]" : "bg-[#141414]"
 
         return (
           <button
@@ -163,27 +191,35 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
             type="button"
             onClick={() => setSelectedDriver(driverId)}
             className={cn(
-              "grid grid-cols-[3rem_1fr_1fr_1fr] items-center gap-1 rounded px-1 py-1 text-left",
-              driverId === selectedDriverId ? "ring-2 ring-ring" : "",
+              "grid items-center gap-1 rounded px-2 py-1.5 text-left",
+              gridColumns,
+              rowBg,
+              isSelected && "ring-2 ring-ring",
             )}
           >
-            <span className="text-sm font-semibold">{driver?.code ?? "???"}</span>
-            {SECTORS.map(({ key }) => {
+            <span className="flex items-center gap-1.5">
+              <span className="w-5 text-right font-mono text-xs text-muted-foreground">
+                {position ?? "—"}
+              </span>
+              <span
+                className="h-6 w-1 flex-shrink-0 rounded-full"
+                style={{ backgroundColor: teamColor }}
+              />
+              <span className="text-sm font-semibold text-white">{driver?.code ?? "???"}</span>
+            </span>
+            {TIME_COLUMNS.map(({ key }) => {
               const value = latestLap ? latestLap[key] : null
-              const sectorClass = classifySector(
-                value,
-                sessionBests[key],
-                personalBest?.[key] ?? null,
-              )
+              const timeClass = classifySector(value, sessionBests[key], personalBest?.[key] ?? null)
               return (
-                <span
-                  key={key}
-                  className={cn(
-                    "rounded py-1 text-center font-mono text-xs tabular-nums",
-                    SECTOR_CLASS_STYLES[sectorClass],
-                  )}
-                >
-                  {value === null ? "—" : value.toFixed(3)}
+                <span key={key} className="flex justify-center">
+                  <span
+                    className={cn(
+                      "rounded-md bg-[#2a2a2a] px-2 py-1 text-center font-mono text-xs tabular-nums",
+                      TIME_TEXT_STYLES[timeClass],
+                    )}
+                  >
+                    {formatTimeValue(key, value)}
+                  </span>
                 </span>
               )
             })}
