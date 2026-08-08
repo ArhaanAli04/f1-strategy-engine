@@ -41,6 +41,7 @@ from backend.scripts._ingest_common import (
     get_or_create_drivers,
     get_or_create_race,
     get_or_create_session,
+    resolve_scheduled_start,
 )
 from backend.workers.prediction_worker import run_strategy_prediction
 from backend.workers.telemetry_worker import process_lap
@@ -55,7 +56,7 @@ _VALID_SESSION_TYPES = ("R", "Q", "FP1", "FP2", "FP3")
 # FastF1's own reference implementation.
 _CONNECTION_URL = "wss://livetiming.formula1.com/signalrcore"
 _NEGOTIATE_URL = "https://livetiming.formula1.com/signalrcore/negotiate"
-_TOPICS = ["TimingData", "CarData.z", "SessionInfo", "TrackStatus", "WeatherData"]
+_TOPICS = ["TimingData", "CarData.z", "Position.z", "SessionInfo", "TrackStatus", "WeatherData"]
 
 _MAX_BACKOFF_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 15.0
@@ -63,6 +64,11 @@ _CONNECT_TIMEOUT_SECONDS = 15.0
 # Weather changes slowly (over minutes, not seconds) relative to CarData/TimingData's
 # 8s TTL, so a longer TTL here is appropriate — see CLAUDE.md Redis Cache Key Schema.
 _WEATHER_KEY_TTL_SECONDS = 60
+
+# Shorter than CarData's 8s: Position.z updates more frequently (the Circuit
+# Map Panel's live driver dots need to look current within a couple of
+# seconds, not lag behind a stale sample) — see CLAUDE.md Redis Cache Key Schema.
+_POSITION_KEY_TTL_SECONDS = 3
 
 
 def _decode_z(payload: str) -> dict[str, Any]:
@@ -156,6 +162,8 @@ class F1SignalRIngestor:
         try:
             if topic == "CarData.z":
                 self._handle_car_data(data)
+            elif topic == "Position.z":
+                self._handle_position_data(data)
             elif topic == "TimingData":
                 self._handle_timing_data(data)
             elif topic == "WeatherData":
@@ -170,6 +178,30 @@ class F1SignalRIngestor:
         for car_number, entry in decoded.get("Cars", {}).items():
             key = f"f1:{self._season}:{self._round_number}:car:{car_number}:latest"
             self._redis.setex(key, 8, json.dumps(entry))
+
+    def _handle_position_data(self, payload: str) -> None:
+        """Decode a Position.z frame and cache each car's latest X/Y/Z.
+
+        Feeds the Circuit Map Panel's live driver dots (see CLAUDE.md's
+        Planned Feature: Live Circuit Map). Payload shape:
+        {"Position": [{"Timestamp": ..., "Entries": {car_number: {"X":...,
+        "Y":..., "Z":..., "Status":...}}}]} — a list of snapshots (usually
+        one per frame); only X/Y/Z are needed here, "Status" (e.g. OnTrack/
+        OffTrack/Retired) is left for a future consumer if ever needed.
+        """
+        decoded = _decode_z(payload)
+        for snapshot in decoded.get("Position", []):
+            timestamp = snapshot.get("Timestamp")
+            for car_number, entry in snapshot.get("Entries", {}).items():
+                x, y, z = entry.get("X"), entry.get("Y"), entry.get("Z")
+                if x is None or y is None:
+                    continue
+                key = f"f1:{self._season}:{self._round_number}:car:{car_number}:position"
+                self._redis.setex(
+                    key,
+                    _POSITION_KEY_TTL_SECONDS,
+                    json.dumps({"x": x, "y": y, "z": z, "timestamp": timestamp}),
+                )
 
     def _handle_weather_data(self, payload: dict[str, Any]) -> None:
         track_temp = _parse_temp(payload.get("TrackTemp"))
@@ -277,12 +309,14 @@ async def _resolve_context(
             round_number=round_number,
             circuit_id=circuit.id,
             race_date=fastf1_session.event["EventDate"].date(),
+            event_name=fastf1_session.event["EventName"],
         )
         session_row = await get_or_create_session(
             db,
             race_id=race.id,
             session_type=session_type,
             session_date=fastf1_session.event["EventDate"].date(),
+            scheduled_start=resolve_scheduled_start(fastf1_session.event, session_type),
         )
         await db.commit()
 

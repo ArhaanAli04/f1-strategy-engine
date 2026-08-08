@@ -1,5 +1,6 @@
 import { useEffect } from "react"
 import { useParams } from "react-router-dom"
+import { CircuitMapPanel } from "@/components/circuit/CircuitMapPanel"
 import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
 import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
 import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
@@ -34,12 +35,7 @@ export function RacePage() {
       </aside>
 
       <main className="flex flex-1 flex-col overflow-y-auto">
-        {/* Fixed height so this placeholder is sized like its eventual
-            content — the live circuit map (CLAUDE.md's Days 25-28 plan)
-            slots in here without reflowing the panels below it. */}
-        <div className="flex h-80 flex-shrink-0 items-center justify-center border-b bg-muted/30 text-sm text-muted-foreground">
-          Circuit Map — coming soon
-        </div>
+        <CircuitMapPanel sessionId={sessionId} />
 
         <div className="flex flex-1 flex-col gap-4 p-4">
           <Card>

@@ -38,3 +38,16 @@ export interface RaceListResponse {
   status: string
   circuit: CircuitResponse | null
 }
+
+// GET /races/upcoming — minimal shape for the Circuit Map Panel's
+// NON-RACE-mode countdown: display name, circuit, and the Race session's
+// real start instant.
+export interface UpcomingRaceResponse {
+  id: string
+  season: number
+  round_number: number
+  race_name: string | null
+  circuit_id: string
+  race_date: string
+  scheduled_start: string | null
+}

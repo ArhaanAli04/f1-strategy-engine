@@ -140,3 +140,35 @@ class DriverGap(BaseModel):
 class SessionGapsResponse(BaseModel):
     session_id: uuid.UUID
     gaps: list[DriverGap]
+
+
+class DriverPosition(BaseModel):
+    """One car's latest live X/Y/Z, read from f1:{season}:{round}:car:{car_number}:position.
+
+    Keyed by driver_number (the car number FastF1's live feed uses), not
+    driver_id — unlike the rest of this file, the Circuit Map Panel's live
+    dots don't need a DB round trip to resolve which driver a car number
+    belongs to (the frontend already has the roster via GET /drivers).
+    """
+
+    driver_number: str
+    x: float
+    y: float
+    z: float | None = None
+    timestamp: str | None = None
+
+
+class DriverCarNumber(BaseModel):
+    """One driver's live-session car number, from f1:{season}:{round}:driver:{driver_id}:car_number.
+
+    Bridges DriverPosition's driver_number (a car number, not a driver_id) to
+    the driver roster (GET /drivers) so the Circuit Map Panel can resolve
+    each live dot's team color and match it against the selected driver.
+    Session-scoped rather than a static roster field: sourced from the same
+    live-ingestor-written key for the lifetime of this specific session, so
+    it self-corrects for a reserve-driver substitution instead of assuming a
+    driver's car number never changes.
+    """
+
+    driver_id: uuid.UUID
+    car_number: str

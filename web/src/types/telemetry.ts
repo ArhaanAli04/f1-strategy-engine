@@ -118,3 +118,22 @@ export interface SessionGapsResponse {
   session_id: string
   gaps: DriverGap[]
 }
+
+// One car's latest live X/Y/Z, from GET /telemetry/{session_id}/positions.
+// Keyed by driver_number (a car number), not driver_id — resolve it to a
+// driver via DriverCarNumber below.
+export interface DriverPosition {
+  driver_number: string
+  x: number
+  y: number
+  z: number | null
+  timestamp: string | null
+}
+
+// One driver's live-session car number, from GET
+// /telemetry/{session_id}/car-numbers — bridges DriverPosition.driver_number
+// back to the roster (useDrivers) for team color / selected-driver matching.
+export interface DriverCarNumber {
+  driver_id: string
+  car_number: string
+}

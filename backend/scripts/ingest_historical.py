@@ -30,6 +30,7 @@ from backend.scripts._ingest_common import (
     get_or_create_race,
     get_or_create_session,
     or_default,
+    resolve_scheduled_start,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -208,12 +209,14 @@ async def ingest(season: int, round_number: int, session_type: str) -> None:
             round_number=round_number,
             circuit_id=circuit.id,
             race_date=fastf1_session.event["EventDate"].date(),
+            event_name=fastf1_session.event["EventName"],
         )
         session_row = await get_or_create_session(
             db,
             race_id=race.id,
             session_type=session_type,
             session_date=fastf1_session.event["EventDate"].date(),
+            scheduled_start=resolve_scheduled_start(fastf1_session.event, session_type),
         )
         await db.commit()
 

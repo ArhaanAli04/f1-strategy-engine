@@ -1,5 +1,11 @@
 import { apiClient } from "./client"
-import type { PaginatedResponse, RaceListResponse, RaceResponse, SessionResponse } from "@/types"
+import type {
+  PaginatedResponse,
+  RaceListResponse,
+  RaceResponse,
+  SessionResponse,
+  UpcomingRaceResponse,
+} from "@/types"
 
 export interface ListRacesParams {
   season?: number
@@ -31,5 +37,12 @@ export async function getSession(raceId: string, sessionId: string): Promise<Ses
   const { data } = await apiClient.get<SessionResponse>(
     `/races/${raceId}/sessions/${sessionId}`,
   )
+  return data
+}
+
+// GET /races/upcoming — registered ahead of /races/{race_id} on the backend,
+// same reason as getCurrentRace above.
+export async function getUpcomingRace(): Promise<UpcomingRaceResponse> {
+  const { data } = await apiClient.get<UpcomingRaceResponse>("/races/upcoming")
   return data
 }
