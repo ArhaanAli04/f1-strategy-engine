@@ -402,21 +402,20 @@ Update this section at the start of each day's session:
 ```
 Phase:    7
 Day:      28
-Status:   Strategy components built: PitWindowCard (pit window + 
-          SHAP explanation), StrategyOverviewGrid (22-driver wall), 
-          UndercutThreatPanel (ahead/behind undercut analysis), 
-          CompetitorStrategyTable (30s polling). SimulatorPage 
-          (4-step flow: driver/state → pit stops → poll → bar chart). 
-          AlertsPage (notification feed, mark as read). NavBar with 
-          bell icon + unread count. UI improvements: F1-style tyre 
-          icon (SVG with partial arc border), SectorHeatmap restyled 
-          as F1 table (5 columns, zebra striping, grey pill cells, 
-          purple/green/yellow text). Timing tower lap time removed 
-          (shown in sector table instead).
+Status:   CircuitMapPanel built with 3 modes: LIVE (GPS driver 
+          dots via Redis Position.z polling), NON-RACE (circuit 
+          outline + countdown timer), FINISHED (next race info). 
+          24 circuit outlines extracted from FastF1 and seeded 
+          to Supabase. Turn number markers on circuit. 
+          TelemetryGauge SVG component (270° gauge, throttle/brake 
+          arcs, speed ring, DRS pill). Position.z subscribed in 
+          SignalR ingestor. scheduled_start + map_geometry + 
+          event_name schema additions. self-updating 
+          GET /races/upcoming. 122 backend tests passing.
 Next:     Day 29 — Driver analytics, dashboard page, settings
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders, Monte Carlo simulator position_gain_loss may not correctly 
-          account for current on-track gaps (see CLAUDE.md deferred wiring)
+          account for current on-track gaps (see CLAUDE.md deferred wiring), Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
 ```
 
 ---
