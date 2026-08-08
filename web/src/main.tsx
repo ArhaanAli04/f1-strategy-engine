@@ -1,3 +1,4 @@
+import { isAxiosError } from "axios"
 import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
@@ -19,7 +20,25 @@ const queryClient = new QueryClient({
     },
   },
   queryCache: new QueryCache({
-    onError: (error) => toast.error(getApiErrorMessage(error)),
+    onError: (error, query) => {
+      // A handful of queries treat a specific HTTP status as a normal,
+      // expected outcome the component renders directly — not a global
+      // error toast. Opt in via `meta: { silentOn404: true }` /
+      // `silentOn503: true` on the query itself.
+      // - 404: useCircuitOutline before extract_circuit_outlines.py has
+      //   run, useUpcomingRace once a season concludes.
+      // - 503: useLiveDriverTelemetry's 8s poll whenever no live CarData
+      //   sample is cached yet (driver not on track / feed momentarily
+      //   stale) — TelemetryNotAvailableError, expected every poll a live
+      //   ingestor isn't actively running.
+      if (isAxiosError(error) && error.response) {
+        const status = error.response.status
+        if ((status === 404 && query.meta?.silentOn404) || (status === 503 && query.meta?.silentOn503)) {
+          return
+        }
+      }
+      toast.error(getApiErrorMessage(error))
+    },
   }),
 })
 

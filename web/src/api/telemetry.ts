@@ -1,5 +1,11 @@
 import { apiClient } from "./client"
-import type { LapHistoryBucket, LiveTelemetryResponse, SessionGapsResponse } from "@/types"
+import type {
+  DriverCarNumber,
+  DriverPosition,
+  LapHistoryBucket,
+  LiveTelemetryResponse,
+  SessionGapsResponse,
+} from "@/types"
 
 export async function getLiveLap(
   sessionId: string,
@@ -25,5 +31,15 @@ export async function getLapHistory(
 
 export async function getSessionGaps(sessionId: string): Promise<SessionGapsResponse> {
   const { data } = await apiClient.get<SessionGapsResponse>(`/telemetry/${sessionId}/gaps`)
+  return data
+}
+
+export async function getDriverPositions(sessionId: string): Promise<DriverPosition[]> {
+  const { data } = await apiClient.get<DriverPosition[]>(`/telemetry/${sessionId}/positions`)
+  return data
+}
+
+export async function getDriverCarNumbers(sessionId: string): Promise<DriverCarNumber[]> {
+  const { data } = await apiClient.get<DriverCarNumber[]>(`/telemetry/${sessionId}/car-numbers`)
   return data
 }

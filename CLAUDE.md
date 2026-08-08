@@ -568,6 +568,17 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- **extract_circuit_outlines.py (Checkpoint C) must be run manually against
+  Supabase after Checkpoint C is complete** — same pattern as seed_circuits.py
+  on Day 23. Set DATABASE_URL to SUPABASE_DATABASE_URL temporarily, run the
+  script, reset back.
+
+- **Circuit map sector boundaries (S1/S2/S3):** requires timestamp-correlation
+  between Lap.Sector1SessionTime/Sector2SessionTime and position telemetry
+  get_pos_data() SessionTime column. ~50ms accuracy (meters at racing speed).
+  Needs new logic in extract_circuit_outlines.py + edge case handling for
+  missing sector timestamps. Defer to after circuit map feature is complete.
+
 - **Monte Carlo simulator position_gain_loss may not correctly account for
   current on-track gaps when computing position changes** — VER pitting
   lap 55/58 returned 0 change despite HAD being only 1.3s behind.

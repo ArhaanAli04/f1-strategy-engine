@@ -35,6 +35,8 @@ from backend.core.exceptions import NotFoundError, TelemetryNotAvailableError
 from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.schemas.telemetry_schema import (
+    DriverCarNumber,
+    DriverPosition,
     LapHistoryBucket,
     LiveTelemetryResponse,
     SessionGapsResponse,
@@ -286,6 +288,83 @@ async def get_live_car_channels(
     return _decode_car_channels(raw)
 
 
+_POSITION_KEY_PATTERN = "f1:{season}:{round_number}:car:*:position"
+
+
+async def get_driver_positions(
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+) -> list[dict[str, Any]]:
+    """Read every car's latest live X/Y/Z for a race weekend.
+
+    Pure cache read via SCAN (like get_live_lap/get_live_car_channels) — not
+    a computed/cacheable value. Deliberately returns an empty list rather
+    than raising when no position keys exist: that's the expected
+    steady-state whenever this session isn't currently live (no ingestor
+    running, or between position samples), not an error condition — see
+    apis/v1/telemetry.py's positions route.
+
+    Args:
+        redis_client: Redis client.
+        season, round_number: Race weekend identifiers.
+    Returns:
+        One dict per car with a currently-cached position: driver_number, x,
+        y, z, timestamp. Cars with no cached position (stale/off track/not
+        streaming) are simply absent, not included with null fields.
+    """
+    pattern = _POSITION_KEY_PATTERN.format(season=season, round_number=round_number)
+    positions: list[dict[str, Any]] = []
+    async for key in redis_client.scan_iter(match=pattern):
+        raw = await cache_get(redis_client, key)
+        if raw is None:
+            continue
+        car_number = key.split(":")[-2]
+        positions.append(
+            {
+                "driver_number": car_number,
+                "x": raw.get("x"),
+                "y": raw.get("y"),
+                "z": raw.get("z"),
+                "timestamp": raw.get("timestamp"),
+            }
+        )
+    return positions
+
+
+_CAR_NUMBER_KEY_PATTERN = "f1:{season}:{round_number}:driver:*:car_number"
+
+
+async def get_driver_car_numbers(
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+) -> list[dict[str, Any]]:
+    """Read every driver's live-session car number (the reverse of DriverPosition's key).
+
+    Pure cache read via SCAN, same shape as get_driver_positions — see that
+    function's docstring for why this degrades to an empty list rather than
+    raising. Lets the frontend resolve a DriverPosition.driver_number (a car
+    number) back to a driver_id, and from there to the roster's team color.
+
+    Args:
+        redis_client: Redis client.
+        season, round_number: Race weekend identifiers.
+    Returns:
+        One dict per driver currently mapped to a car number this session:
+        driver_id, car_number.
+    """
+    pattern = _CAR_NUMBER_KEY_PATTERN.format(season=season, round_number=round_number)
+    car_numbers: list[dict[str, Any]] = []
+    async for key in redis_client.scan_iter(match=pattern):
+        car_number = await cache_get(redis_client, key)
+        if car_number is None:
+            continue
+        driver_id = key.split(":")[-2]
+        car_numbers.append({"driver_id": driver_id, "car_number": str(car_number)})
+    return car_numbers
+
+
 async def _fetch_lap_history(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID, last_n: int
 ) -> list[dict[str, Any]]:
@@ -490,3 +569,41 @@ async def get_session_gaps_for_session(
     season, round_number = await resolve_season_round(db, session_id)
     result = await get_session_gaps(client, db, season, round_number, session_id)
     return SessionGapsResponse.model_validate(result)
+
+
+async def get_driver_positions_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> list[DriverPosition]:
+    """Resolve season/round for a session, then delegate to get_driver_positions.
+
+    Args: see get_driver_positions — season/round_number are resolved here
+        rather than caller-supplied.
+    Returns:
+        See get_driver_positions.
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    positions = await get_driver_positions(client, season, round_number)
+    return [DriverPosition.model_validate(position) for position in positions]
+
+
+async def get_driver_car_numbers_for_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> list[DriverCarNumber]:
+    """Resolve season/round for a session, then delegate to get_driver_car_numbers.
+
+    Args: see get_driver_car_numbers — season/round_number are resolved here
+        rather than caller-supplied.
+    Returns:
+        See get_driver_car_numbers.
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    season, round_number = await resolve_season_round(db, session_id)
+    car_numbers = await get_driver_car_numbers(client, season, round_number)
+    return [DriverCarNumber.model_validate(entry) for entry in car_numbers]
