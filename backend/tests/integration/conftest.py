@@ -17,6 +17,8 @@ import backend.models  # noqa: F401 — registers all tables on Base.metadata
 from backend.core.config import get_db_settings, get_redis_settings
 from backend.core.database import Base
 
+TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
+
 
 @pytest.fixture(scope="session")
 def postgres_container() -> Generator[PostgresContainer, None, None]:
@@ -153,7 +155,7 @@ def authenticated_client(test_client: TestClient) -> TestClient:
     bearer token.
     """
     email = f"integration-{uuid.uuid4()}@example.com"
-    password = "IntegrationTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Integration Test User"},

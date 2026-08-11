@@ -46,6 +46,16 @@ class FCMTokenUpdate(BaseModel):
     fcm_token: str
 
 
+class UserUpdate(BaseModel):
+    full_name: str | None = None
+    email: EmailStr | None = None
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class SubscriptionCreate(BaseModel):
     driver_ids: list[uuid.UUID]
     team_ids: list[uuid.UUID]
@@ -71,6 +81,8 @@ __all__ = [
     "LoginResponse",
     "RefreshTokenRequest",
     "FCMTokenUpdate",
+    "UserUpdate",
+    "PasswordChange",
     "SubscriptionCreate",
     "SubscriptionResponse",
 ]

@@ -23,11 +23,13 @@ from backend.core.security import get_current_user
 from backend.schemas.user_schema import (
     FCMTokenUpdate,
     LoginResponse,
+    PasswordChange,
     RefreshTokenRequest,
     TokenResponse,
     UserCreate,
     UserLogin,
     UserResponse,
+    UserUpdate,
 )
 from backend.services import user_service
 
@@ -82,6 +84,30 @@ async def me(
     current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> UserResponse:
     return await user_service.get_user(db, uuid.UUID(current_user["sub"]))
+
+
+@router.put("/me", response_model=UserResponse)
+@limiter.limit(rate_limit_value)
+async def update_me(
+    request: Request,
+    payload: UserUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> UserResponse:
+    return await user_service.update_user(db, uuid.UUID(current_user["sub"]), payload)
+
+
+@router.put("/password", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(rate_limit_value)
+async def update_password(
+    request: Request,
+    payload: PasswordChange,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> None:
+    await user_service.change_password(
+        db, uuid.UUID(current_user["sub"]), payload.current_password, payload.new_password
+    )
 
 
 @router.put("/fcm-token", response_model=UserResponse)

@@ -24,6 +24,13 @@ from backend.core.config import get_auth_settings
 from backend.core.security import verify_password
 from backend.models.user import User
 
+TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
+# Distinct values are required (not aliases of TEST_PASSWORD) where a test's
+# assertions depend on the values actually differing — e.g. asserting the
+# old password stops working and a wrong current password is rejected.
+TEST_NEW_PASSWORD = "N3w-fixture-only!"  # noqa: S105
+TEST_WRONG_PASSWORD = "Wr0ng-fixture-only!"  # noqa: S105
+
 
 async def _fetch_user_by_email(
     db_session_factory: async_sessionmaker[AsyncSession], email: str
@@ -38,7 +45,7 @@ def test_register_creates_user_in_db(
     test_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     email = f"register-{uuid.uuid4()}@example.com"
-    password = "RegisterTest123!"  # noqa: S105
+    password = TEST_PASSWORD
 
     response = test_client.post(
         "/api/v1/auth/register",
@@ -58,7 +65,7 @@ def test_register_creates_user_in_db(
 @pytest.mark.integration
 def test_login_returns_jwt_tokens(test_client: TestClient) -> None:
     email = f"login-{uuid.uuid4()}@example.com"
-    password = "LoginTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Login Test"},
@@ -76,7 +83,7 @@ def test_login_returns_jwt_tokens(test_client: TestClient) -> None:
 @pytest.mark.integration
 def test_refresh_token_issues_new_access_token(test_client: TestClient) -> None:
     email = f"refresh-{uuid.uuid4()}@example.com"
-    password = "RefreshTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Refresh Test"},
@@ -105,7 +112,7 @@ def test_refresh_token_issues_new_access_token(test_client: TestClient) -> None:
 @pytest.mark.integration
 def test_logout_invalidates_refresh_token(test_client: TestClient) -> None:
     email = f"logout-{uuid.uuid4()}@example.com"
-    password = "LogoutTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Logout Test"},
@@ -135,6 +142,112 @@ def test_protected_endpoint_with_valid_token(authenticated_client: TestClient) -
     body = response.json()
     assert body["email"]
     assert body["is_active"] is True
+
+
+@pytest.mark.integration
+def test_update_me_changes_name_and_email(test_client: TestClient) -> None:
+    email = f"update-{uuid.uuid4()}@example.com"
+    password = TEST_PASSWORD
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Before Update"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+    new_email = f"updated-{uuid.uuid4()}@example.com"
+
+    response = test_client.put(
+        "/api/v1/auth/me",
+        json={"full_name": "After Update", "email": new_email},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["full_name"] == "After Update"
+    assert body["email"] == new_email
+
+
+@pytest.mark.integration
+def test_update_me_rejects_email_already_taken(test_client: TestClient) -> None:
+    taken_email = f"taken-{uuid.uuid4()}@example.com"
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": taken_email, "password": TEST_PASSWORD, "full_name": "Taken"},
+    )
+
+    email = f"conflict-{uuid.uuid4()}@example.com"
+    password = TEST_PASSWORD
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Conflict Test"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/me",
+        json={"email": taken_email},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.integration
+def test_update_password_succeeds_and_new_password_logs_in(test_client: TestClient) -> None:
+    email = f"pwchange-{uuid.uuid4()}@example.com"
+    password = TEST_PASSWORD
+    new_password = TEST_NEW_PASSWORD
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Password Change"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/password",
+        json={"current_password": password, "new_password": new_password},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert response.status_code == 204
+
+    old_login = test_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert old_login.status_code == 401
+
+    new_login = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": new_password}
+    )
+    assert new_login.status_code == 200
+
+
+@pytest.mark.integration
+def test_update_password_rejects_wrong_current_password(test_client: TestClient) -> None:
+    email = f"pwchange-wrong-{uuid.uuid4()}@example.com"
+    password = TEST_PASSWORD
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Password Change Wrong"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/password",
+        json={"current_password": TEST_WRONG_PASSWORD, "new_password": TEST_NEW_PASSWORD},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 401
 
 
 @pytest.mark.integration

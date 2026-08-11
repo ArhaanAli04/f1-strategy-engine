@@ -35,6 +35,7 @@ from backend.schemas.user_schema import (
     SubscriptionResponse,
     TokenResponse,
     UserResponse,
+    UserUpdate,
 )
 
 TOKEN_TYPE = "bearer"  # noqa: S105 — this is an OAuth2 scheme name, not a secret
@@ -218,6 +219,68 @@ async def update_subscription(
     await db.commit()
     await db.refresh(existing)
     return SubscriptionResponse.model_validate(existing)
+
+
+async def update_user(db: AsyncSession, user_id: uuid.UUID, payload: UserUpdate) -> UserResponse:
+    """Partially update a user's name and/or email.
+
+    Args:
+        db: Async DB session.
+        user_id: The user to update.
+        payload: Fields to change — omitted (None) fields are left as-is.
+    Returns:
+        The updated user.
+    Raises:
+        NotFoundError: If no user with this ID exists.
+        ConflictError: If payload.email is set and already registered to a
+            different user.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise NotFoundError("User not found")
+
+    if payload.email is not None and payload.email != user.email:
+        existing = await db.execute(
+            select(User).where(User.email == payload.email, User.id != user_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise ConflictError(f"Email '{payload.email}' is already registered")
+        user.email = payload.email
+
+    if payload.full_name is not None:
+        user.full_name = payload.full_name
+
+    await db.commit()
+    await db.refresh(user)
+    return UserResponse.model_validate(user)
+
+
+async def change_password(
+    db: AsyncSession, user_id: uuid.UUID, current_password: str, new_password: str
+) -> None:
+    """Verify the current password and replace it with a new bcrypt hash.
+
+    Args:
+        db: Async DB session.
+        user_id: The user changing their password.
+        current_password: Plaintext password to verify against the stored hash.
+        new_password: Plaintext replacement password to hash before storage.
+    Returns:
+        None.
+    Raises:
+        NotFoundError: If no user with this ID exists.
+        AuthenticationError: If current_password does not match the stored hash.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise NotFoundError("User not found")
+    if not verify_password(current_password, user.hashed_password):
+        raise AuthenticationError("Current password is incorrect")
+
+    user.hashed_password = hash_password(new_password)
+    await db.commit()
 
 
 async def update_fcm_token(db: AsyncSession, user_id: uuid.UUID, fcm_token: str) -> UserResponse:
