@@ -38,6 +38,16 @@ export interface FCMTokenUpdate {
   fcm_token: string
 }
 
+export interface UserUpdate {
+  full_name?: string
+  email?: string
+}
+
+export interface PasswordChange {
+  current_password: string
+  new_password: string
+}
+
 export interface SubscriptionCreate {
   driver_ids: string[]
   team_ids: string[]

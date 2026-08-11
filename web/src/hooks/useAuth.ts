@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect } from "react"
 import * as authApi from "@/api/auth"
 import { useAuthStore, useIsAuthenticated } from "@/stores/authStore"
-import type { UserCreate, UserLogin } from "@/types"
+import type { PasswordChange, UserCreate, UserLogin, UserUpdate } from "@/types"
 
 const ME_QUERY_KEY = ["auth", "me"] as const
 
@@ -56,6 +56,18 @@ export function useAuth() {
     },
   })
 
+  const updateProfileMutation = useMutation({
+    mutationFn: (payload: UserUpdate) => authApi.updateProfile(payload),
+    onSuccess: (updated) => {
+      useAuthStore.getState().setUser(updated)
+      queryClient.setQueryData(ME_QUERY_KEY, updated)
+    },
+  })
+
+  const changePasswordMutation = useMutation({
+    mutationFn: (payload: PasswordChange) => authApi.changePassword(payload),
+  })
+
   return {
     user,
     isAuthenticated,
@@ -67,5 +79,9 @@ export function useAuth() {
     registerError: registerMutation.error,
     logout: logoutMutation.mutateAsync,
     isLoggingOut: logoutMutation.isPending,
+    updateProfile: updateProfileMutation.mutateAsync,
+    isUpdatingProfile: updateProfileMutation.isPending,
+    changePassword: changePasswordMutation.mutateAsync,
+    isChangingPassword: changePasswordMutation.isPending,
   }
 }

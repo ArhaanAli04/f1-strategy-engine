@@ -2,11 +2,13 @@ import { apiClient } from "./client"
 import type {
   FCMTokenUpdate,
   LoginResponse,
+  PasswordChange,
   RefreshTokenRequest,
   TokenResponse,
   UserCreate,
   UserLogin,
   UserResponse,
+  UserUpdate,
 } from "@/types"
 
 export async function register(payload: UserCreate): Promise<UserResponse> {
@@ -38,4 +40,13 @@ export async function getMe(): Promise<UserResponse> {
 export async function updateFcmToken(payload: FCMTokenUpdate): Promise<UserResponse> {
   const { data } = await apiClient.put<UserResponse>("/auth/fcm-token", payload)
   return data
+}
+
+export async function updateProfile(payload: UserUpdate): Promise<UserResponse> {
+  const { data } = await apiClient.put<UserResponse>("/auth/me", payload)
+  return data
+}
+
+export async function changePassword(payload: PasswordChange): Promise<void> {
+  await apiClient.put("/auth/password", payload)
 }

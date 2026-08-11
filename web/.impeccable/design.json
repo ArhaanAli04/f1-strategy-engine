@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-12T00:00:00Z",
+  "title": "Design System: F1 Strategy Engine",
+  "extensions": {
+    "colorMeta": {
+      "background-near-black": {
+        "role": "neutral",
+        "displayName": "Void",
+        "canonical": "oklch(0.141 0.005 285.823)",
+        "tonalRamp": [
+          "oklch(0.10 0.004 285.8)",
+          "oklch(0.141 0.005 285.823)",
+          "oklch(0.21 0.006 285.885)",
+          "oklch(0.274 0.006 286.033)",
+          "oklch(0.37 0.013 285.805)",
+          "oklch(0.552 0.016 285.938)",
+          "oklch(0.705 0.015 286.067)",
+          "oklch(0.92 0.004 286.32)"
+        ]
+      },
+      "card-surface": {
+        "role": "neutral",
+        "displayName": "Card Surface",
+        "canonical": "oklch(0.21 0.006 285.885)"
+      },
+      "primary-action": {
+        "role": "primary",
+        "displayName": "Primary Action",
+        "canonical": "oklch(0.92 0.004 286.32)"
+      },
+      "row-void": { "role": "neutral", "displayName": "Row Void", "canonical": "#0a0a0a" },
+      "row-recede": { "role": "neutral", "displayName": "Row Recede", "canonical": "#141414" },
+      "pill-surface": { "role": "neutral", "displayName": "Pill Surface", "canonical": "#2a2a2a" },
+      "status-positive": { "role": "status", "displayName": "Gain", "canonical": "#10B981" },
+      "status-negative": { "role": "status", "displayName": "Loss", "canonical": "#EF4444" }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Body", "purpose": "Default UI text, labels, descriptions." },
+      "data": { "displayName": "Data", "purpose": "Every live-updating numeric field (gaps, lap times, sectors, positions) — always tabular-nums monospace." }
+    },
+    "shadows": [
+      { "name": "card-shadow-sm", "value": "0 1px 2px rgba(0,0,0,0.05)", "purpose": "shadcn Card's only shadow — the system is flat by default, see the Flat-By-Default Rule." }
+    ],
+    "motion": [
+      { "name": "flip-reorder", "value": "transform 400ms ease-out", "purpose": "Timing tower FLIP-style reorder when driver positions change." },
+      { "name": "dot-glide", "value": "cx 1.8s linear, cy 1.8s linear", "purpose": "Circuit map driver dot movement between position polls." }
+    ],
+    "breakpoints": [
+      { "name": "sm", "value": "640px" },
+      { "name": "md", "value": "768px" },
+      { "name": "lg", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary action button — near-white on near-black.",
+      "html": "<button class=\"ds-btn-primary\">Save profile</button>",
+      "css": ".ds-btn-primary { background: oklch(0.92 0.004 286.32); color: oklch(0.141 0.005 285.823); padding: 8px 16px; border-radius: 8px; border: none; font-weight: 500; font-size: 14px; transition: background-color 0.15s; } .ds-btn-primary:hover { background: oklch(0.92 0.004 286.32 / 0.9); } .ds-btn-primary:focus-visible { outline: 2px solid oklch(0.705 0.015 286.067); outline-offset: 2px; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Standard elevated surface — the system's one 'elevated' tone, flat shadow.",
+      "html": "<div class=\"ds-card\"><div class=\"ds-card-title\">Pit Window</div><div class=\"ds-card-body\">Lap 32–36</div></div>",
+      "css": ".ds-card { background: oklch(0.21 0.006 285.885); color: oklch(0.985 0 0); border: 1px solid oklch(1 0 0 / 10%); border-radius: 10px; padding: 24px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); } .ds-card-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; } .ds-card-body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; font-size: 20px; }"
+    },
+    {
+      "name": "Timing Row",
+      "kind": "custom",
+      "refersTo": "timing-row",
+      "description": "Signature data row — timing tower / sector heatmap. Team-color bar, tabular-nums values, zebra striping via row-void/row-recede.",
+      "html": "<div class=\"ds-timing-row\"><span class=\"ds-timing-pos\">1</span><span class=\"ds-timing-bar\"></span><span class=\"ds-timing-code\">VER</span><span class=\"ds-timing-gap\">Leader</span></div>",
+      "css": ".ds-timing-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px; background: #0a0a0a; border-bottom: 1px solid oklch(1 0 0 / 10%); font-size: 12px; } .ds-timing-pos { width: 24px; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: oklch(0.705 0.015 286.067); } .ds-timing-bar { width: 4px; height: 20px; border-radius: 9999px; background: #3671C6; flex-shrink: 0; } .ds-timing-code { width: 40px; font-weight: 600; } .ds-timing-gap { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; color: oklch(0.705 0.015 286.067); }"
+    },
+    {
+      "name": "Driver Chip",
+      "kind": "chip",
+      "refersTo": "driver-chip",
+      "description": "Small reusable driver identity pill — team-color dot + code.",
+      "html": "<span class=\"ds-chip\"><span class=\"ds-chip-dot\"></span>VER</span>",
+      "css": ".ds-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 9999px; border: 1px solid oklch(1 0 0 / 10%); font-size: 12px; font-weight: 600; } .ds-chip-dot { width: 8px; height: 8px; border-radius: 9999px; background: #3671C6; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Pit Wall Terminal",
+    "overview": "This is instrumentation, not a marketing surface — a pit-wall engineer's live display, not a consumer dashboard. The canvas is near-black by default and stays out of the way; color is not decoration, it is data — a driver's team hex, a tyre compound's FIA color, a gain/loss sign. Density is a feature: the timing tower holds 22 drivers x 5 fields, the sector heatmap holds 22 x 4 cells, and nothing here is allowed to ask for more room than a real broadcast timing screen would give it. The system today is genuinely flat: shadcn's default Card uses only shadow-sm, and most visual separation comes from 10%-opacity hairline borders and background-tone steps, not elevation. Motion is scarce and earns its place.",
+    "keyCharacteristics": [
+      "Near-black canvas, data supplies the color, not the chrome",
+      "Flat by default — hairline borders and tone steps over shadows",
+      "Dense, tabular, broadcast-timing-screen layout",
+      "Motion only where it tracks a real state change"
+    ],
+    "rules": [
+      { "name": "The Data Supplies Color Rule", "body": "Chrome stays neutral zinc. Color only appears to report a fact (team, compound, gain/loss).", "section": "colors" },
+      { "name": "The Tabular Numerals Rule", "body": "Any number that can change between renders is font-mono tabular-nums, full stop.", "section": "typography" },
+      { "name": "The Flat-By-Default Rule", "body": "Step the background tone or add a hairline border before reaching for a shadow.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep the canvas near-black and let team/compound/status colors carry all the meaning.",
+      "Do use tabular-nums monospace on every value that updates live.",
+      "Do step background tone instead of reaching for a shadow.",
+      "Do animate only real state changes."
+    ],
+    "donts": [
+      "Don't introduce gradients, especially purple-to-blue.",
+      "Don't build generic SaaS/Material-style nested card-in-card containers.",
+      "Don't use light-mode data tables or components.",
+      "Don't add decorative motion."
+    ]
+  }
+}

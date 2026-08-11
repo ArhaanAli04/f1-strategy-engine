@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
 import { useDriverCarNumbers, useDriverPositions } from "@/hooks/useDriverPositions"
@@ -11,11 +12,6 @@ import type { CircuitOutlineTransform } from "@/types"
 // Matches LiveTimingTower's convention for a driver with no resolved team.
 const FALLBACK_TEAM_COLOR = "#6B7280"
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
-// Center of the 1000x1000 viewBox convention extract_circuit_outlines.py
-// always uses — falls back to this when transform (and its own
-// viewbox_center) hasn't loaded yet, so corner markers can still offset
-// correctly even before the transform itself is needed for anything else.
-const DEFAULT_VIEWBOX_CENTER = 500
 const DOT_RADIUS = 12
 const SELECTED_DOT_RADIUS = 18
 const DOT_STROKE_WIDTH = 1.5
@@ -23,32 +19,8 @@ const SELECTED_DOT_STROKE_WIDTH = 3
 // Slightly under useDriverPositions's 2s poll interval so a dot finishes
 // easing into place before the next update arrives.
 const DOT_TRANSITION = "cx 1.8s linear, cy 1.8s linear"
-const CORNER_MARKER_RADIUS = 14
-const CORNER_MARKER_FONT_SIZE = 15
-// Pushed away from the track centroid rather than along a per-corner
-// track-normal (which the API doesn't provide) — simple, and effective
-// since every circuit is a loop roughly centered in its own viewBox.
-const CORNER_OFFSET_DISTANCE = 22
 
 type Mode = "live" | "non-race" | "finished" | "unknown"
-
-function pointsToPath(points: number[][]): string | null {
-  if (points.length === 0) return null
-  const [first, ...rest] = points
-  const move = `M ${first[0]} ${first[1]}`
-  const lines = rest.map(([x, y]) => `L ${x} ${y}`).join(" ")
-  return `${move} ${lines} Z`
-}
-
-// Pushes a corner marker radially outward from the track's centroid so it
-// sits just outside the track line instead of on top of it (and out of the
-// way of driver dots, which sit directly on the line).
-function offsetFromCenter(x: number, y: number, center: number, distance: number) {
-  const dx = x - center
-  const dy = y - center
-  const length = Math.hypot(dx, dy) || 1
-  return { x: x + (dx / length) * distance, y: y + (dy / length) * distance }
-}
 
 // Mirrors extract_circuit_outlines.py's _build_geometry — applies the same
 // X-mirror-correction/rotation/center/scale to a raw live Position.z X/Y
@@ -153,56 +125,21 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
   }, [carNumbers, drivers])
 
   const viewBox = outline?.viewbox ?? FALLBACK_VIEWBOX
-  const pathD = outline ? pointsToPath(outline.points) : null
   const transform = outline?.transform ?? null
 
   return (
     <div className="relative flex h-[500px] flex-shrink-0 items-center justify-center overflow-hidden border-b bg-muted/30">
+      <CircuitOutlineSvg outline={outline} className="h-full w-full" />
+      {/* Absolutely overlaid on the outline above, same viewBox/preserveAspectRatio
+          so live dots line up pixel-for-pixel with the track line underneath —
+          kept as a separate SVG rather than folded into CircuitOutlineSvg since
+          live positions/selection are CircuitMapPanel-only state. */}
       <svg
         viewBox={viewBox}
         preserveAspectRatio="xMidYMid meet"
-        className="h-full w-full"
+        className="absolute inset-0 h-full w-full"
         aria-hidden="true"
       >
-        {pathD && (
-          <path
-            d={pathD}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth={10}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            className="text-muted-foreground/40"
-          />
-        )}
-        {(outline?.corners ?? []).map((corner) => {
-          const center = transform?.viewbox_center ?? DEFAULT_VIEWBOX_CENTER
-          const { x, y } = offsetFromCenter(corner.x, corner.y, center, CORNER_OFFSET_DISTANCE)
-          return (
-            <g key={corner.number}>
-              <circle
-                cx={x}
-                cy={y}
-                r={CORNER_MARKER_RADIUS}
-                className="fill-background"
-                stroke="#ffffff"
-                strokeOpacity={0.6}
-                strokeWidth={1.5}
-              />
-              <text
-                x={x}
-                y={y}
-                textAnchor="middle"
-                dominantBaseline="central"
-                fontSize={CORNER_MARKER_FONT_SIZE}
-                fontWeight={700}
-                className="select-none fill-muted-foreground"
-              >
-                {corner.number}
-              </text>
-            </g>
-          )
-        })}
         {mode === "live" &&
           transform &&
           (positions ?? []).map((position) => {

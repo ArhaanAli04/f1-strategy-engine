@@ -138,6 +138,112 @@ def test_protected_endpoint_with_valid_token(authenticated_client: TestClient) -
 
 
 @pytest.mark.integration
+def test_update_me_changes_name_and_email(test_client: TestClient) -> None:
+    email = f"update-{uuid.uuid4()}@example.com"
+    password = "UpdateTest123!"  # noqa: S105
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Before Update"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+    new_email = f"updated-{uuid.uuid4()}@example.com"
+
+    response = test_client.put(
+        "/api/v1/auth/me",
+        json={"full_name": "After Update", "email": new_email},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["full_name"] == "After Update"
+    assert body["email"] == new_email
+
+
+@pytest.mark.integration
+def test_update_me_rejects_email_already_taken(test_client: TestClient) -> None:
+    taken_email = f"taken-{uuid.uuid4()}@example.com"
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": taken_email, "password": "Taken123!", "full_name": "Taken"},
+    )
+
+    email = f"conflict-{uuid.uuid4()}@example.com"
+    password = "ConflictTest123!"  # noqa: S105
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Conflict Test"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/me",
+        json={"email": taken_email},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 409
+
+
+@pytest.mark.integration
+def test_update_password_succeeds_and_new_password_logs_in(test_client: TestClient) -> None:
+    email = f"pwchange-{uuid.uuid4()}@example.com"
+    password = "OldPassword123!"  # noqa: S105
+    new_password = "NewPassword456!"  # noqa: S105
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Password Change"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/password",
+        json={"current_password": password, "new_password": new_password},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert response.status_code == 204
+
+    old_login = test_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert old_login.status_code == 401
+
+    new_login = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": new_password}
+    )
+    assert new_login.status_code == 200
+
+
+@pytest.mark.integration
+def test_update_password_rejects_wrong_current_password(test_client: TestClient) -> None:
+    email = f"pwchange-wrong-{uuid.uuid4()}@example.com"
+    password = "OldPassword123!"  # noqa: S105
+    test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Password Change Wrong"},
+    )
+    login_response = test_client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    )
+    access_token = login_response.json()["access_token"]
+
+    response = test_client.put(
+        "/api/v1/auth/password",
+        json={"current_password": "WrongPassword999!", "new_password": "Whatever123!"},
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
 def test_protected_endpoint_with_expired_token(test_client: TestClient) -> None:
     settings = get_auth_settings()
     expired_payload = {
