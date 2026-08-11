@@ -24,6 +24,13 @@ from backend.core.config import get_auth_settings
 from backend.core.security import verify_password
 from backend.models.user import User
 
+TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
+# Distinct values are required (not aliases of TEST_PASSWORD) where a test's
+# assertions depend on the values actually differing — e.g. asserting the
+# old password stops working and a wrong current password is rejected.
+TEST_NEW_PASSWORD = "N3w-fixture-only!"  # noqa: S105
+TEST_WRONG_PASSWORD = "Wr0ng-fixture-only!"  # noqa: S105
+
 
 async def _fetch_user_by_email(
     db_session_factory: async_sessionmaker[AsyncSession], email: str
@@ -38,7 +45,7 @@ def test_register_creates_user_in_db(
     test_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     email = f"register-{uuid.uuid4()}@example.com"
-    password = "RegisterTest123!"  # noqa: S105
+    password = TEST_PASSWORD
 
     response = test_client.post(
         "/api/v1/auth/register",
@@ -58,7 +65,7 @@ def test_register_creates_user_in_db(
 @pytest.mark.integration
 def test_login_returns_jwt_tokens(test_client: TestClient) -> None:
     email = f"login-{uuid.uuid4()}@example.com"
-    password = "LoginTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Login Test"},
@@ -76,7 +83,7 @@ def test_login_returns_jwt_tokens(test_client: TestClient) -> None:
 @pytest.mark.integration
 def test_refresh_token_issues_new_access_token(test_client: TestClient) -> None:
     email = f"refresh-{uuid.uuid4()}@example.com"
-    password = "RefreshTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Refresh Test"},
@@ -105,7 +112,7 @@ def test_refresh_token_issues_new_access_token(test_client: TestClient) -> None:
 @pytest.mark.integration
 def test_logout_invalidates_refresh_token(test_client: TestClient) -> None:
     email = f"logout-{uuid.uuid4()}@example.com"
-    password = "LogoutTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Logout Test"},
@@ -140,7 +147,7 @@ def test_protected_endpoint_with_valid_token(authenticated_client: TestClient) -
 @pytest.mark.integration
 def test_update_me_changes_name_and_email(test_client: TestClient) -> None:
     email = f"update-{uuid.uuid4()}@example.com"
-    password = "UpdateTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Before Update"},
@@ -168,11 +175,11 @@ def test_update_me_rejects_email_already_taken(test_client: TestClient) -> None:
     taken_email = f"taken-{uuid.uuid4()}@example.com"
     test_client.post(
         "/api/v1/auth/register",
-        json={"email": taken_email, "password": "Taken123!", "full_name": "Taken"},
+        json={"email": taken_email, "password": TEST_PASSWORD, "full_name": "Taken"},
     )
 
     email = f"conflict-{uuid.uuid4()}@example.com"
-    password = "ConflictTest123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Conflict Test"},
@@ -194,8 +201,8 @@ def test_update_me_rejects_email_already_taken(test_client: TestClient) -> None:
 @pytest.mark.integration
 def test_update_password_succeeds_and_new_password_logs_in(test_client: TestClient) -> None:
     email = f"pwchange-{uuid.uuid4()}@example.com"
-    password = "OldPassword123!"  # noqa: S105
-    new_password = "NewPassword456!"  # noqa: S105
+    password = TEST_PASSWORD
+    new_password = TEST_NEW_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Password Change"},
@@ -224,7 +231,7 @@ def test_update_password_succeeds_and_new_password_logs_in(test_client: TestClie
 @pytest.mark.integration
 def test_update_password_rejects_wrong_current_password(test_client: TestClient) -> None:
     email = f"pwchange-wrong-{uuid.uuid4()}@example.com"
-    password = "OldPassword123!"  # noqa: S105
+    password = TEST_PASSWORD
     test_client.post(
         "/api/v1/auth/register",
         json={"email": email, "password": password, "full_name": "Password Change Wrong"},
@@ -236,7 +243,7 @@ def test_update_password_rejects_wrong_current_password(test_client: TestClient)
 
     response = test_client.put(
         "/api/v1/auth/password",
-        json={"current_password": "WrongPassword999!", "new_password": "Whatever123!"},
+        json={"current_password": TEST_WRONG_PASSWORD, "new_password": TEST_NEW_PASSWORD},
         headers={"Authorization": f"Bearer {access_token}"},
     )
 

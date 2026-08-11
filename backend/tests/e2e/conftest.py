@@ -19,6 +19,7 @@ import pytest
 import requests
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
+TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
 
 
 @pytest.fixture(scope="session")
@@ -36,7 +37,7 @@ def authenticated_session(base_url: str) -> Generator[requests.Session, None, No
     FastAPI TestClient — there is no in-process app object here to wrap.
     """
     email = f"e2e-{uuid.uuid4()}@example.com"
-    password = "E2ETest123!"  # noqa: S105 — throwaway local test account, not a secret
+    password = TEST_PASSWORD
     session = requests.Session()
 
     register_resp = session.post(
