@@ -45,6 +45,9 @@ export default {
           4: 'var(--chart-4)',
           5: 'var(--chart-5)',
         },
+        'row-void': 'var(--row-void)',
+        'row-recede': 'var(--row-recede)',
+        'pill-surface': 'var(--pill-surface)',
       },
       borderRadius: {
         lg: 'var(--radius)',

@@ -1,12 +1,11 @@
 import { useDrivers } from "@/hooks/useDrivers"
 import { cn } from "@/lib/utils"
+import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 
 interface DriverChipProps {
   driverId: string
   className?: string
 }
-
-const FALLBACK_TEAM_COLOR = "#6B7280"
 
 // Small reusable code + team-color chip — shared by UndercutThreatPanel,
 // CompetitorStrategyTable, and AlertsPage. Resolves driverId -> code/team

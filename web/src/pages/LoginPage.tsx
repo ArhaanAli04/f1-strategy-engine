@@ -35,6 +35,7 @@ export function LoginPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <h1 className="sr-only">Log in</h1>
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Log in</CardTitle>
@@ -82,7 +83,11 @@ export function LoginPage() {
                   </FormItem>
                 )}
               />
-              {serverError && <p className="text-sm font-medium text-destructive">{serverError}</p>}
+              {serverError && (
+                <p role="alert" className="text-sm font-medium text-destructive">
+                  {serverError}
+                </p>
+              )}
             </CardContent>
             <CardFooter className="flex flex-col gap-4">
               <Button type="submit" className="w-full" disabled={isLoggingIn}>

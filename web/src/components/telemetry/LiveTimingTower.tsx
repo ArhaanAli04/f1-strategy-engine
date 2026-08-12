@@ -6,7 +6,7 @@ import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { cn } from "@/lib/utils"
 import { useSessionStore } from "@/stores/sessionStore"
-import { COMPOUND_COLORS } from "@/utils/constants"
+import { COMPOUND_COLORS, FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import { formatLapTime, getCompoundColor, getCompoundLabel } from "@/utils/formatters"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import type { DriverGap, DriverResponse, LapDataResponse } from "@/types"
@@ -79,8 +79,6 @@ interface TimingRow {
   compound: string | null
 }
 
-const FALLBACK_TEAM_COLOR = "#6B7280"
-const ROW_REORDER_ANIMATION_MS = 400
 
 // formatGap (utils/formatters.ts) is flat-seconds ("+2.345s") — right for
 // small sub-lap deltas elsewhere (undercut/overcut), but a cumulative gap to
@@ -193,18 +191,24 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
       newTops.set(driverId, el.getBoundingClientRect().top)
     })
 
-    rowRefs.current.forEach((el, driverId) => {
-      const prevTop = prevTops.current.get(driverId)
-      const newTop = newTops.get(driverId)
-      if (prevTop === undefined || newTop === undefined || prevTop === newTop) return
-      const delta = prevTop - newTop
-      el.style.transition = "none"
-      el.style.transform = `translateY(${delta}px)`
-      requestAnimationFrame(() => {
-        el.style.transition = `transform ${ROW_REORDER_ANIMATION_MS}ms ease-out`
-        el.style.transform = ""
+    // Reduced motion: still reorder (rows are already in their new DOM
+    // position by this point), just skip the animated glide between old
+    // and new spots.
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    if (!prefersReducedMotion) {
+      rowRefs.current.forEach((el, driverId) => {
+        const prevTop = prevTops.current.get(driverId)
+        const newTop = newTops.get(driverId)
+        if (prevTop === undefined || newTop === undefined || prevTop === newTop) return
+        const delta = prevTop - newTop
+        el.style.transition = "none"
+        el.style.transform = `translateY(${delta}px)`
+        requestAnimationFrame(() => {
+          el.style.transition = "transform var(--duration-row-reorder) var(--ease-out-strong)"
+          el.style.transform = ""
+        })
       })
-    })
+    }
 
     prevTops.current = newTops
     // orderKey is the intended re-measurement trigger (reorder only) —

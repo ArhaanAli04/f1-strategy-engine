@@ -9,6 +9,7 @@ import {
 } from "recharts"
 import * as driverApi from "@/api/driver"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
+import { CHART_TOOLTIP_STYLE } from "@/utils/constants"
 
 interface StyleRadarProps {
   driverId: string | null
@@ -79,7 +80,10 @@ export function StyleRadar({ driverId, sessionId }: StyleRadarProps) {
         <RadarChart data={chartData} outerRadius="75%">
           <PolarGrid className="stroke-border" />
           <PolarAngleAxis dataKey="metric" className="text-xs fill-muted-foreground" />
-          <Tooltip formatter={(value) => (typeof value === "number" ? value.toFixed(3) : value)} />
+          <Tooltip
+            formatter={(value) => (typeof value === "number" ? value.toFixed(3) : value)}
+            {...CHART_TOOLTIP_STYLE}
+          />
           <Radar
             dataKey="value"
             stroke="var(--primary)"

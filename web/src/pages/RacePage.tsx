@@ -28,7 +28,7 @@ export function RacePage() {
   const selectedDriver = drivers?.find((driver) => driver.id === selectedDriverId) ?? null
 
   return (
-    <div className="flex h-full overflow-hidden bg-background">
+    <div className="flex h-full overflow-x-auto overflow-y-hidden bg-background">
       <aside className="flex w-60 flex-shrink-0 flex-col overflow-y-auto border-r">
         <div className="flex-shrink-0 border-b px-3 py-2 text-sm font-semibold">Live Timing</div>
         <LiveTimingTower sessionId={sessionId} />

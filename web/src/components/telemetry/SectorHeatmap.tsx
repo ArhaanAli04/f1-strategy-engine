@@ -6,6 +6,7 @@ import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { cn } from "@/lib/utils"
 import { useSessionStore } from "@/stores/sessionStore"
+import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import { formatLapTime } from "@/utils/formatters"
 import type { DriverResponse, LapDataResponse } from "@/types"
 
@@ -30,7 +31,7 @@ type SectorClass = "purple" | "green" | "yellow" | "none"
 // Real F1 timing-screen convention: purple = absolute session-best, green =
 // this driver's own best (but not session-best), yellow = slower than their
 // own best, grey/white = no time set. Text color inside a fixed grey pill
-// (bg-[#2a2a2a] below) rather than a colored cell background.
+// (bg-pill-surface below) rather than a colored cell background.
 const TIME_TEXT_STYLES: Record<SectorClass, string> = {
   purple: "text-purple-400",
   green: "text-emerald-400",
@@ -38,7 +39,6 @@ const TIME_TEXT_STYLES: Record<SectorClass, string> = {
   none: "text-gray-400",
 }
 
-const FALLBACK_TEAM_COLOR = "#6B7280"
 const EQUALITY_EPSILON = 1e-6
 
 function classifySector(
@@ -183,7 +183,7 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
         const isSelected = driverId === selectedDriverId
         // Zebra striping: 1st/3rd/5th... rows (even index) are deep black,
         // 2nd/4th/6th... (odd index) are slightly lighter dark grey.
-        const rowBg = index % 2 === 0 ? "bg-[#0a0a0a]" : "bg-[#141414]"
+        const rowBg = index % 2 === 0 ? "bg-row-void" : "bg-row-recede"
 
         return (
           <button
@@ -214,7 +214,7 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
                 <span key={key} className="flex justify-center">
                   <span
                     className={cn(
-                      "rounded-md bg-[#2a2a2a] px-2 py-1 text-center font-mono text-xs tabular-nums",
+                      "rounded-md bg-pill-surface px-2 py-1 text-center font-mono text-xs tabular-nums",
                       TIME_TEXT_STYLES[timeClass],
                     )}
                   >

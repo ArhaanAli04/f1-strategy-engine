@@ -9,9 +9,14 @@ interface ErgastResult {
   points: string
 }
 
-interface ErgastRace {
+interface ErgastCircuit {
+  circuitName: string
+}
+
+export interface ErgastRace {
   round: string
   raceName: string
+  Circuit: ErgastCircuit
   Results: ErgastResult[]
 }
 
@@ -33,6 +38,37 @@ export async function getDriverSeasonResults(
   }
   const data = (await response.json()) as ErgastResponse
   return data.MRData.RaceTable.Races
+}
+
+export interface ErgastDriverStanding {
+  position: string
+  points: string
+  wins: string
+}
+
+interface ErgastDriverStandingsResponse {
+  MRData: {
+    StandingsTable: {
+      StandingsLists: {
+        DriverStandings: ErgastDriverStanding[]
+      }[]
+    }
+  }
+}
+
+// Per-driver-scoped endpoint (not the full grid) — returns just this
+// driver's own standing directly, same "empty before the season's first
+// points-paying session" shape as getConstructorStandings.
+export async function getDriverStandings(
+  ergastDriverId: string,
+  season: number,
+): Promise<ErgastDriverStanding | null> {
+  const response = await fetch(`${ERGAST_BASE_URL}/${season}/drivers/${ergastDriverId}/driverStandings/`)
+  if (!response.ok) {
+    throw new Error(`Ergast request failed: ${response.status}`)
+  }
+  const data = (await response.json()) as ErgastDriverStandingsResponse
+  return data.MRData.StandingsTable.StandingsLists[0]?.DriverStandings[0] ?? null
 }
 
 export interface ErgastConstructorStanding {

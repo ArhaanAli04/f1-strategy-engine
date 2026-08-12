@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
+import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 
 // Served from web/public/teams/ (user-supplied PNGs) — plain static assets,
 // no build-time import needed since Vite serves public/ as-is at the root.
@@ -18,7 +19,6 @@ const TEAM_LOGO_SLUGS: Record<string, string> = {
   Cadillac: "cadillac",
 }
 
-const FALLBACK_TEAM_COLOR = "#6B7280"
 const DEFAULT_LOGO_SIZE_PX = 32
 const TIMING_TOWER_LOGO_SIZE_PX = 36
 // These three teams' marks read too small next to the others at the
@@ -77,6 +77,7 @@ export function TeamLogo({ teamName, teamColor, className, showInTimingTower }: 
       src={logoUrl}
       alt={`${teamName} logo`}
       onError={() => setFailed(true)}
+      loading="lazy"
       className="h-full w-full object-contain"
     />
   )

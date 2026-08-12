@@ -18,10 +18,10 @@ function QuickAccessCard({ icon, label, description, to, disabledReason }: Quick
     <Card
       className={cn(
         "flex h-full flex-col gap-2 p-4 transition-colors",
-        to ? "hover:bg-accent" : "opacity-50",
+        to ? "hover:bg-accent" : "cursor-not-allowed",
       )}
     >
-      {icon}
+      <span className={cn(!to && "opacity-50")}>{icon}</span>
       <div className="text-sm font-semibold">{label}</div>
       <div className="text-xs text-muted-foreground">{to ? description : (disabledReason ?? description)}</div>
     </Card>

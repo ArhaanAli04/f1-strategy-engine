@@ -15,7 +15,7 @@ colors:
   status-negative: "#EF4444"
 typography:
   body:
-    fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontFamily: "'Titillium Web', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
     fontSize: "0.875rem"
     fontWeight: 400
     lineHeight: 1.4
@@ -92,10 +92,10 @@ The palette is intentionally quiet: one neutral zinc scale for every surface and
 
 ## Typography
 
-**Body Font:** ui-sans-serif / system-ui stack (no custom font is loaded — this is an honest gap, not a considered choice; a display face for headers is a reasonable future addition, not yet made).
+**Body Font:** Titillium Web — F1's own official broadcast/timing-graphics typeface, self-hosted (`public/fonts/titillium-web-{400,600,700}.woff2`, Latin subset, loaded via `@font-face` in `index.css`; no third-party font host requested at runtime). Falls back to the system sans-serif stack (`ui-sans-serif, system-ui, ...`) while loading or if a weight fails to load. Used for headings, labels, and body text alike.
 **Data Font:** ui-monospace / SFMono-Regular / Menlo — used with `tabular-nums` on every numeric field that updates live (13 occurrences across 7 components: gaps, lap times, sector times, position counts, season stats).
 
-**Character:** Plain and functional. The one deliberate typographic move is numeric, not decorative.
+**Character:** Plain and functional. The typeface choice reinforces "reads like a real F1 broadcast screen" (see Product Principles) rather than a generic software-UI default; the one deliberate *decorative* typographic move remains numeric (tabular-nums), not ornamental.
 
 ### Hierarchy
 - **Title** (600–700 weight, `text-xl`–`text-2xl`): page headers (e.g. `DriverPage`'s driver name).
@@ -144,6 +144,16 @@ The system's most distinctive pattern: a dense, fixed-field-width row (`flex jus
 
 ### Navigation
 No persistent top navbar exists yet — `NavBar.tsx` is a minimal header (title + alerts bell) shown on every authenticated route via `AuthGuard`. See the nav-architecture audit for whether this needs to grow (settings icon, dashboard link, login/logout affordance).
+
+## Motion
+
+Shared tokens (`index.css`, not theme-dependent) — introduced during the animation audit pass to replace hand-typed one-off values with named, reusable ones:
+
+- `--ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1)` — entrances/repositioning (timing-tower row reorder).
+- `--ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1)` — on-screen movement (circuit-map dot glide, telemetry-gauge arc sweep).
+- `--duration-row-reorder: 400ms`, `--duration-dot-glide: 1.8s` (just under the 2s position-poll interval), `--duration-gauge-sweep: 600ms` (well under the 8s telemetry-poll interval).
+
+All three animated surfaces (timing-tower reorder, circuit-map dots, telemetry-gauge arcs) respect `prefers-reduced-motion`: the underlying value/position update still happens, only the animated glide is skipped.
 
 ## Do's and Don'ts
 
