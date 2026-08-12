@@ -7,18 +7,21 @@ import { useDrivers } from "@/hooks/useDrivers"
 import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 import { useSessionStore } from "@/stores/sessionStore"
+import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import type { CircuitOutlineTransform } from "@/types"
 
-// Matches LiveTimingTower's convention for a driver with no resolved team.
-const FALLBACK_TEAM_COLOR = "#6B7280"
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
 const DOT_RADIUS = 12
 const SELECTED_DOT_RADIUS = 18
 const DOT_STROKE_WIDTH = 1.5
 const SELECTED_DOT_STROKE_WIDTH = 3
-// Slightly under useDriverPositions's 2s poll interval so a dot finishes
-// easing into place before the next update arrives.
-const DOT_TRANSITION = "cx 1.8s linear, cy 1.8s linear"
+// transform (not cx/cy) so the browser can composite this on the GPU
+// instead of recalculating layout on every one of up to 22 simultaneously
+// moving dots. --duration-dot-glide is slightly under useDriverPositions's
+// 2s poll interval so a dot finishes easing into place before the next
+// update arrives; --ease-in-out-strong reads as a moving object rather
+// than the constant-velocity feel of linear.
+const DOT_TRANSITION = "transform var(--duration-dot-glide) var(--ease-in-out-strong)"
 
 type Mode = "live" | "non-race" | "finished" | "unknown"
 
@@ -96,6 +99,7 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
   const { data: drivers } = useDrivers()
   const selectedDriverId = useSessionStore((state) => state.selectedDriverId)
   const { data: liveTelemetry } = useLiveDriverTelemetry(sessionId, selectedDriverId)
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
 
   const isLive = Boolean(positions && positions.length > 0)
   const scheduledStart = upcomingRace?.scheduled_start ?? null
@@ -149,13 +153,14 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
             return (
               <circle
                 key={position.driver_number}
-                cx={cx}
-                cy={cy}
                 r={isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS}
                 fill={meta?.color ?? FALLBACK_TEAM_COLOR}
                 stroke="#fff"
                 strokeWidth={isSelected ? SELECTED_DOT_STROKE_WIDTH : DOT_STROKE_WIDTH}
-                style={{ transition: DOT_TRANSITION }}
+                style={{
+                  transform: `translate(${cx}px, ${cy}px)`,
+                  transition: prefersReducedMotion ? "none" : DOT_TRANSITION,
+                }}
               />
             )
           })}
@@ -172,7 +177,7 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
                 {upcomingRace?.race_name ?? "Race"}
               </div>
               {!transform && (
-                <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground">
+                <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
                   Track outline unavailable
                 </div>
               )}
@@ -216,7 +221,7 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
       </div>
 
       {mode === "live" && (
-        <div className="pointer-events-none absolute bottom-4 left-4 rounded bg-black/60 shadow-sm">
+        <div className="pointer-events-none absolute bottom-4 left-4 rounded bg-black/60 shadow-sm backdrop-blur-sm">
           {!selectedDriverId ? (
             <div className="px-4 py-3 text-xs text-muted-foreground">Select a driver</div>
           ) : liveTelemetry === undefined ? (

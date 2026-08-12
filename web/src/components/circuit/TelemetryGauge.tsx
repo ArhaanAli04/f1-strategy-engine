@@ -81,6 +81,19 @@ export interface TelemetryGaugeProps {
   drsOpen: boolean
 }
 
+// The gauge's visual is entirely SVG text/arcs with no other accessible
+// text alternative — aria-hidden would silence all five live values for
+// screen reader users. Mirrors TyreIcon's aria-label={compound} pattern in
+// LiveTimingTower.tsx.
+function describeGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: TelemetryGaugeProps): string {
+  const speedText = speedKmh == null ? "speed unavailable" : `speed ${Math.round(speedKmh)} km/h`
+  const gearText = gear == null ? "gear unavailable" : `gear ${gear}`
+  const throttleText = throttlePct == null ? "throttle unavailable" : `throttle ${Math.round(throttlePct)}%`
+  const brakeText = brake ? "braking" : "not braking"
+  const drsText = drsOpen ? "DRS open" : "DRS closed"
+  return `${speedText}, ${gearText}, ${throttleText}, ${brakeText}, ${drsText}`
+}
+
 export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: TelemetryGaugeProps) {
   // Instance-unique path ids — a fixed string id would collide if this
   // component were ever mounted more than once on the same page, breaking
@@ -88,6 +101,12 @@ export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: 
   const instanceId = useId()
   const throttlePathId = `telemetry-gauge-throttle-arc-${instanceId}`
   const brakePathId = `telemetry-gauge-brake-arc-${instanceId}`
+  const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  // d is stable in structure across renders (describeArc always emits the
+  // same "M...A..." command template, only the coordinates change), so
+  // browsers can interpolate it directly — sweeps the arc to its new value
+  // instead of snapping on every 8s telemetry poll.
+  const arcTransition = prefersReducedMotion ? "none" : "d var(--duration-gauge-sweep) var(--ease-in-out-strong)"
 
   const speed = Math.max(0, Math.min(speedKmh ?? 0, MAX_SPEED))
   const throttle = Math.max(0, Math.min(throttlePct ?? 0, 100))
@@ -125,7 +144,8 @@ export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: 
       height={SIZE}
       viewBox={`0 0 ${SIZE} ${SIZE}`}
       className="select-none"
-      aria-hidden="true"
+      role="img"
+      aria-label={describeGauge({ speedKmh, gear, throttlePct, brake, drsOpen })}
     >
       <path
         d={speedTrack ?? undefined}
@@ -141,6 +161,7 @@ export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: 
           stroke={SPEED_COLOR}
           strokeWidth={OUTER_STROKE}
           strokeLinecap="butt"
+          style={{ transition: arcTransition }}
         />
       )}
       {SPEED_LABELS.map((label) => {
@@ -180,6 +201,7 @@ export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: 
           stroke={THROTTLE_COLOR}
           strokeWidth={INNER_STROKE}
           strokeLinecap="butt"
+          style={{ transition: arcTransition }}
         />
       )}
       <text fontSize={8} fontWeight={700} fill={TEXT_COLOR}>
@@ -203,6 +225,7 @@ export function TelemetryGauge({ speedKmh, gear, throttlePct, brake, drsOpen }: 
           stroke={BRAKE_COLOR}
           strokeWidth={INNER_STROKE}
           strokeLinecap="butt"
+          style={{ transition: arcTransition }}
         />
       )}
       <text fontSize={8} fontWeight={700} fill={TEXT_COLOR}>

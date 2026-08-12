@@ -40,6 +40,7 @@ export function RegisterPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <h1 className="sr-only">Create an account</h1>
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>Create an account</CardTitle>
@@ -122,7 +123,11 @@ export function RegisterPage() {
                   </FormItem>
                 )}
               />
-              {serverError && <p className="text-sm font-medium text-destructive">{serverError}</p>}
+              {serverError && (
+                <p role="alert" className="text-sm font-medium text-destructive">
+                  {serverError}
+                </p>
+              )}
             </CardContent>
             <CardFooter className="flex flex-col gap-4">
               <Button type="submit" className="w-full" disabled={isRegistering}>

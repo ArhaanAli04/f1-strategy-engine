@@ -2,6 +2,33 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Self-hosted — no runtime request to any third-party font host. Files
+   fetched once from Google Fonts' own CSS API and vendored into
+   public/fonts/ (Latin subset only; this app's UI text is English-only).
+   Titillium Web is F1's own official broadcast/timing-graphics typeface —
+   matches DESIGN.md's "read like a real F1 broadcast screen" principle. */
+@font-face {
+  font-family: "Titillium Web";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/titillium-web-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Titillium Web";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/titillium-web-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Titillium Web";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/titillium-web-700.woff2") format("woff2");
+}
+
 @layer base {
   :root {
     --background: oklch(1 0 0);
@@ -29,6 +56,22 @@
     --chart-4: oklch(0.37 0.013 285.805);
     --chart-5: oklch(0.274 0.006 286.033);
     --radius: 0.625rem;
+
+    /* Shared motion tokens (not theme-dependent — same in light/dark).
+       Strong curves per Emil Kowalski's animation philosophy: built-in CSS
+       ease-out/ease-in-out are too weak for deliberate UI motion. */
+    --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1);
+    --duration-row-reorder: 400ms;
+    --duration-dot-glide: 1.8s;
+    --duration-gauge-sweep: 600ms;
+
+    /* Timing-tower/sector-heatmap zebra + pill tones (DESIGN.md's Neutral
+       palette) — not theme-dependent, same in light/dark like the motion
+       tokens above. Previously repeated as raw hex per-component. */
+    --row-void: #0a0a0a;
+    --row-recede: #141414;
+    --pill-surface: #2a2a2a;
   }
 
   .dark {
@@ -65,6 +108,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: "Titillium Web", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
 
   /* Scroll still works everywhere (wheel/trackpad/keyboard) — this only

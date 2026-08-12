@@ -17,12 +17,12 @@ function formatNetTimeDelta(value: number): { label: string; colorClass: string 
   if (value >= 0) {
     return {
       label: `+${value.toFixed(3)}s net gain`,
-      colorClass: "text-emerald-600 dark:text-emerald-400",
+      colorClass: "text-[#10B981]",
     }
   }
   return {
     label: `${Math.abs(value).toFixed(3)}s net loss`,
-    colorClass: "text-red-600 dark:text-red-400",
+    colorClass: "text-[#EF4444]",
   }
 }
 
@@ -85,10 +85,7 @@ function ThreatRow({ label, otherDriverId, data, isLoading }: ThreatRowProps) {
               {formatNetTimeDelta(data.projected_gap_seconds).label}
             </span>
           </div>
-          <p
-            className="text-[10px] text-muted-foreground"
-            title="Predicted net time after undercut vs staying out"
-          >
+          <p className="text-[10px] text-muted-foreground">
             Predicted net time after undercut vs staying out
           </p>
           <p className="text-xs">{data.recommended_action}</p>

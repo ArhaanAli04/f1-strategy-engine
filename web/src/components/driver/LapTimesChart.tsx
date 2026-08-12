@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
+import { SegmentedLineTooltip } from "@/components/shared/ChartTooltip"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { formatLapTime, getCompoundColor } from "@/utils/formatters"
 import type { LapDataResponse } from "@/types"
@@ -93,8 +94,14 @@ export function LapTimesChart({ sessionId, driverId }: LapTimesChartProps) {
             className="text-xs fill-muted-foreground"
           />
           <Tooltip
-            formatter={(value) => formatLapTime(typeof value === "number" ? value : null)}
-            labelFormatter={(label) => `Tyre age ${label}`}
+            content={(props) => (
+              <SegmentedLineTooltip
+                {...props}
+                xKey="tyre_age_laps"
+                labelText={(label) => `Tyre age ${label}`}
+                valueText={(value) => formatLapTime(typeof value === "number" ? value : null)}
+              />
+            )}
           />
           <Legend />
           {series.map((entry) => (

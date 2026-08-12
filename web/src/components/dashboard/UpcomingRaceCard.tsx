@@ -41,10 +41,24 @@ function pad(value: number): string {
   return value.toString().padStart(2, "0")
 }
 
+// Owns the ticking countdown state itself so the once-a-second re-render
+// this ticking causes stays scoped to this small text node — not the whole
+// UpcomingRaceCard (Card, CircuitOutlineSvg, race-name block), which don't
+// depend on the current second at all.
+function CountdownTimer({ targetIso }: { targetIso: string | null }) {
+  const countdown = useCountdown(targetIso)
+  if (!countdown) return null
+  return (
+    <div className="self-end font-mono text-sm text-muted-foreground">
+      Starts in: {countdown.days}d {pad(countdown.hours)}h {pad(countdown.minutes)}m{" "}
+      {pad(countdown.seconds)}s
+    </div>
+  )
+}
+
 export function UpcomingRaceCard() {
   const { data: upcomingRace, isLoading, isError } = useUpcomingRace()
   const { data: outline } = useCircuitOutline(upcomingRace?.circuit_id ?? null)
-  const countdown = useCountdown(upcomingRace?.scheduled_start ?? null)
 
   if (isLoading) {
     return <LoadingSkeleton className="h-64 w-full" />
@@ -73,12 +87,7 @@ export function UpcomingRaceCard() {
               {upcomingRace.race_name ?? "Next Race"}
             </div>
           </div>
-          {countdown && (
-            <div className="self-end font-mono text-sm text-muted-foreground">
-              Starts in: {countdown.days}d {pad(countdown.hours)}h {pad(countdown.minutes)}m{" "}
-              {pad(countdown.seconds)}s
-            </div>
-          )}
+          <CountdownTimer targetIso={upcomingRace.scheduled_start} />
         </div>
       </div>
     </Card>

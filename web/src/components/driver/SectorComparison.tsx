@@ -4,6 +4,7 @@ import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAx
 import { driverLapsQueryOptions } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
+import { CHART_TOOLTIP_STYLE } from "@/utils/constants"
 import type { LapDataResponse } from "@/types"
 
 interface SectorComparisonProps {
@@ -111,7 +112,10 @@ export function SectorComparison({ sessionId, driverId }: SectorComparisonProps)
             tickFormatter={(value: number) => value.toFixed(1)}
             className="text-xs fill-muted-foreground"
           />
-          <Tooltip formatter={(value) => (typeof value === "number" ? value.toFixed(3) : "—")} />
+          <Tooltip
+            formatter={(value) => (typeof value === "number" ? value.toFixed(3) : "—")}
+            {...CHART_TOOLTIP_STYLE}
+          />
           <Legend />
           <Bar dataKey="driver" name={driver?.code ?? "Driver"} fill="var(--primary)" isAnimationActive={false} />
           <Bar dataKey="teamAvg" name="Team Avg" fill="var(--muted-foreground)" isAnimationActive={false} />

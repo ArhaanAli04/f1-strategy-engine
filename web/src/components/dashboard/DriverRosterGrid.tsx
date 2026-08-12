@@ -4,23 +4,14 @@ import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { TeamLogo } from "@/components/shared/TeamLogo"
 import { useConstructorStandings } from "@/hooks/useConstructorStandings"
 import { useDrivers } from "@/hooks/useDrivers"
-import { ROUTES } from "@/utils/constants"
+import { FALLBACK_TEAM_COLOR, ROUTES } from "@/utils/constants"
+import { isActiveDriver } from "@/utils/drivers"
 import type { DriverResponse } from "@/types"
 
-const FALLBACK_TEAM_COLOR = "#6B7280"
 const ROSTER_SKELETON_COUNT = 22
 // No hardcoded season — derives from wall-clock so this keeps working in
 // 2027, 2028, etc. without a code change.
 const CURRENT_YEAR = new Date().getFullYear()
-
-// GET /drivers returns every driver ever ingested (see
-// backend/apis/v1/drivers.py — no active-roster filter param), including
-// retired/historical drivers with no current-season contract. Only a driver
-// with a real team assignment belongs on a "current roster" grid.
-function isActiveDriver(driver: DriverResponse): boolean {
-  const contract = driver.contracts[0]
-  return Boolean(contract?.team_id) && Boolean(contract?.team?.name)
-}
 
 // Confirmed live against api.jolpi.ca/ergast/f1/2026/constructorStandings/:
 // every 2026 team's Ergast constructorId matches backend/scripts/seed_teams.py's
