@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Check, Trash2 } from "lucide-react"
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
+import { useCurrentRace } from "@/hooks/useCurrentRace"
+import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
 import { Button } from "@/components/ui/button"
@@ -10,10 +13,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
-import { CHART_TOOLTIP_STYLE } from "@/utils/constants"
+import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import { isActiveDriver } from "@/utils/drivers"
 import { formatLapTime } from "@/utils/formatters"
-import type { SimulateStrategyRequest } from "@/types"
+import type { DriverResponse, SimulatedRaceOutcome, SimulateStrategyRequest } from "@/types"
 
 type Step = 1 | 2 | 3 | 4
 
@@ -73,6 +76,116 @@ function StepHeader({ step }: { step: Step }) {
   )
 }
 
+function pluralize(count: number, noun: string): string {
+  return `${count} ${noun}${Math.abs(count) === 1 ? "" : "s"}`
+}
+
+interface PlanExplanationCardProps {
+  planLabel: string
+  strategy: SimulatedRaceOutcome
+  driversById: Map<string, DriverResponse>
+}
+
+// Row styling mirrors LiveTimingTower's timing-tower aesthetic (monospace
+// position, thin team-color bar, semibold code) rather than DriverChip's
+// pill style, per the "matching timing tower aesthetic" request.
+function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanationCardProps) {
+  const { position_gain_loss, explanation } = strategy
+  const isGain = position_gain_loss > 0
+  const isLoss = position_gain_loss < 0
+  const freshCompound = strategy.compounds.at(-1)
+
+  const heading = isGain
+    ? `Why ${planLabel} gains ${pluralize(position_gain_loss, "position")}`
+    : isLoss
+      ? `Why ${planLabel} loses ${pluralize(Math.abs(position_gain_loss), "position")}`
+      : `Why ${planLabel} doesn't change your position`
+
+  const driverListLabel = isGain ? "Drivers you overtake after pit" : "Drivers who overtook you in pitstop"
+  const arrowLabel = isGain ? "→ you overtake" : "→ now ahead of you"
+
+  const sufficient = explanation.total_recoverable_seconds >= explanation.pit_cost_seconds
+
+  return (
+    <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+      <p
+        className={cn(
+          "text-sm font-semibold",
+          isGain ? "text-[#10B981]" : isLoss ? "text-[#EF4444]" : "text-foreground",
+        )}
+      >
+        {heading}
+      </p>
+
+      <p className="text-xs text-muted-foreground">
+        Pit stop cost:{" "}
+        <span className="font-mono tabular-nums text-foreground">
+          {explanation.pit_cost_seconds.toFixed(1)}s
+        </span>
+      </p>
+
+      {explanation.drivers_overtaken.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No drivers within pit stop window — position unchanged by pit stop timing
+        </p>
+      ) : (
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">{driverListLabel}</p>
+          <div className="space-y-0.5">
+            {explanation.drivers_overtaken.map((entry) => {
+              const driver = driversById.get(entry.driver_id)
+              const teamColor = driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR
+              return (
+                <div
+                  key={entry.driver_id}
+                  className="flex items-center gap-2 py-0.5 font-mono text-xs tabular-nums"
+                >
+                  <span className="w-7 text-muted-foreground">P{entry.position}</span>
+                  <span
+                    className="h-3 w-1 flex-shrink-0 rounded-full"
+                    style={{ backgroundColor: teamColor }}
+                  />
+                  <span className="w-10 font-semibold text-foreground">{driver?.code ?? "???"}</span>
+                  <span className="text-muted-foreground">
+                    +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {isLoss && (
+        <p className="text-xs text-muted-foreground">
+          Only {pluralize(explanation.remaining_laps, "lap")} remaining after pit —{" "}
+          {sufficient ? "sufficient" : "not enough"} to recover on fresh tyres.
+        </p>
+      )}
+
+      {explanation.fresh_tyre_gain_per_lap > 0 && freshCompound && (
+        <p className="text-xs text-muted-foreground">
+          Fresh {freshCompound} tyre advantage: ~{explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap —{" "}
+          {isGain
+            ? `recovers ~${explanation.total_recoverable_seconds.toFixed(1)}s over ${pluralize(
+                explanation.remaining_laps,
+                "lap",
+              )}, enough to pass ${pluralize(explanation.drivers_overtaken.length, "driver")}.`
+            : isLoss
+              ? `recovers only ~${explanation.total_recoverable_seconds.toFixed(1)}s in ${pluralize(
+                  explanation.remaining_laps,
+                  "lap",
+                )}.`
+              : `roughly offsets the pit-stop loss over ${pluralize(
+                  explanation.remaining_laps,
+                  "lap",
+                )} (~${explanation.total_recoverable_seconds.toFixed(1)}s recovered).`}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function SimulatorPage() {
   // Pre-filled from whichever race was last viewed (sessionStore is cleared
   // when RacePage unmounts) — SimulatorPage's route carries no sessionId of
@@ -84,6 +197,35 @@ export function SimulatorPage() {
   // DriverRosterGrid.tsx/AlertSubscriptionsForm.tsx, so only drivers on the
   // current grid are selectable here.
   const activeDrivers = (drivers ?? []).filter(isActiveDriver)
+  // driver_id -> DriverResponse for resolving PlanExplanationCard's
+  // drivers_overtaken entries to code/team color, same lookup pattern as
+  // LiveTimingTower's driversById.
+  const driversById = useMemo(() => {
+    const map = new Map<string, DriverResponse>()
+    for (const driver of drivers ?? []) map.set(driver.id, driver)
+    return map
+  }, [drivers])
+
+  // LIVE MODE vs MANUAL MODE for the Session field — invisible to the user,
+  // no error state. LIVE MODE only kicks in when there's no explicit prior
+  // selection from navigating in via RacePage (selectedSessionId), AND
+  // /races/current resolves a Race (not FP/Q) session, AND that session
+  // actually has ingested telemetry (gaps.length > 0) — /races/current
+  // resolves to the next race on the calendar whose date hasn't passed yet
+  // (race_service._fetch_current_race's own docstring: "currently
+  // active/upcoming"), which is scheduled — and therefore has a Race row —
+  // well before it's actually live. Without the gaps check, a race days
+  // away would lock the field to a session with no real data. useSessionGaps
+  // is the same session-level, no-driver-needed hook LiveTimingTower already
+  // polls; empty gaps means nothing's been ingested yet. Otherwise this
+  // falls back to the plain manual text input, unchanged from before this
+  // feature existed. useCurrentRace already treats its own 404 (no
+  // live/upcoming race right now) as a normal, silent state — see its hook.
+  const { data: currentRace } = useCurrentRace()
+  const liveRaceSession = currentRace?.sessions.find((s) => s.session_type === "R")
+  const liveSessionGaps = useSessionGaps(liveRaceSession?.id ?? null)
+  const isLiveSessionMode =
+    !selectedSessionId && Boolean(liveRaceSession) && (liveSessionGaps.data?.gaps.length ?? 0) > 0
 
   const [step, setStep] = useState<Step>(1)
   const [sessionId, setSessionId] = useState(selectedSessionId ?? "")
@@ -94,6 +236,29 @@ export function SimulatorPage() {
   const [remainingLaps, setRemainingLaps] = useState(20)
   const [pitStops, setPitStops] = useState<PitStopRow[]>([{ lap: 15, compound: "HARD" }])
   const [taskId, setTaskId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (isLiveSessionMode && liveRaceSession) setSessionId(liveRaceSession.id)
+  }, [isLiveSessionMode, liveRaceSession])
+
+  // Driver stays a fully manual choice (no default) — once picked, default
+  // Current Lap/Compound/Tyre Age from their latest lap in this session.
+  // lastAutoFilledDriverRef guards against clobbering a manual edit: it only
+  // applies once per driver selection, not on useDriverLaps' background
+  // 10s poll (which changes .data every tick without driverId changing).
+  const driverLaps = useDriverLaps(sessionId || null, driverId || null)
+  const lastAutoFilledDriverRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!driverId || lastAutoFilledDriverRef.current === driverId) return
+    const items = driverLaps.data?.items ?? []
+    if (items.length === 0) return
+    const latest = items.reduce((a, b) => (a.lap_number > b.lap_number ? a : b))
+    setCurrentLap(latest.lap_number)
+    setCurrentCompound(latest.compound)
+    setCurrentTyreAge(latest.tyre_age_laps)
+    lastAutoFilledDriverRef.current = driverId
+  }, [driverId, driverLaps.data])
 
   const simulateMutation = useSimulateStrategy(sessionId)
   const simulationResult = useSimulationResult(taskId)
@@ -157,13 +322,22 @@ export function SimulatorPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="sessionId">Session ID</Label>
-              <Input
-                id="sessionId"
-                value={sessionId}
-                onChange={(e) => setSessionId(e.target.value)}
-                placeholder="Session UUID"
-              />
+              <Label htmlFor="sessionId">Session</Label>
+              {isLiveSessionMode ? (
+                <div
+                  id="sessionId"
+                  className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm text-foreground"
+                >
+                  {currentRace?.event_name ?? currentRace?.circuit?.name ?? "Current race"} — Race
+                </div>
+              ) : (
+                <Input
+                  id="sessionId"
+                  value={sessionId}
+                  onChange={(e) => setSessionId(e.target.value)}
+                  placeholder="Session UUID"
+                />
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="driverId">Driver</Label>
@@ -405,6 +579,19 @@ export function SimulatorPage() {
                       {formatLapTime(entry.confidenceInterval[0])}–{formatLapTime(entry.confidenceInterval[1])}
                     </span>
                   </div>
+                ))}
+              </div>
+            )}
+
+            {strategies.length > 0 && (
+              <div className="space-y-3">
+                {strategies.map((strategy, index) => (
+                  <PlanExplanationCard
+                    key={index}
+                    planLabel={`Plan ${index + 1}`}
+                    strategy={strategy}
+                    driversById={driversById}
+                  />
                 ))}
               </div>
             )}

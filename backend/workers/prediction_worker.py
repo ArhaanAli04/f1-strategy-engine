@@ -7,7 +7,7 @@ import uuid
 import zlib
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import boto3
 import joblib
@@ -60,6 +60,13 @@ _MODEL_VERSION_TAG = "production"
 # undercut/overcut calls, which do need a real cross-module call.
 _COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
 _WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
+
+# Simplified fresh-vs-worn-tyre pace-recovery estimate for the Simulator UI's
+# plan explanation panel — NOT derived from the tire_deg model's own predicted
+# delta (that's computed inside race_simulator.simulate_race's internal
+# per-lap loop and never returned to the caller). INTERMEDIATE/WET default to
+# 0.0 — no dry-tyre degradation-recovery assumption applies to them.
+_FRESH_TYRE_GAIN_PER_LAP_SECONDS = {"HARD": 0.3, "MEDIUM": 0.5, "SOFT": 0.8}
 
 _model_cache: dict[str, Any] = {}
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -659,20 +666,53 @@ async def _build_race_state(
     )
     latest_laps = list((await db.execute(latest_laps_query)).scalars().all())
 
+    # Field position as of current_lap specifically — NOT each driver's own
+    # absolute-latest DB row (that's what latest_laps above is for, and it's
+    # fine for compound/tyre_age, but for a completed/ahead-of-current_lap
+    # session it would silently be each driver's FINAL classification
+    # position rather than their position at the point the what-if starts).
+    # Same "anchor to current_lap" fix as cumulative_race_time_seconds below.
+    position_subq = (
+        select(LapData.driver_id, func.max(LapData.lap_number).label("ref_lap"))
+        .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
+        .group_by(LapData.driver_id)
+        .subquery()
+    )
+    position_join = (LapData.driver_id == position_subq.c.driver_id) & (
+        LapData.lap_number == position_subq.c.ref_lap
+    )
+    position_query = (
+        select(LapData.driver_id, LapData.position)
+        .join(position_subq, position_join)
+        .where(LapData.session_id == session_id)
+    )
+    position_rows = (await db.execute(position_query)).all()
+    position_by_driver: dict[uuid.UUID, int | None] = {row[0]: row[1] for row in position_rows}
+
     drivers: list[DriverRaceState] = []
     requesting_driver_found = False
     for lap in latest_laps:
         driver_id_str = str(lap.driver_id)
         if lap.driver_id == requesting_driver_id:
             requesting_driver_found = True
-            compound, tyre_age_laps, up_to_lap = current_compound, current_tyre_age, current_lap
+            compound, tyre_age_laps = current_compound, current_tyre_age
         else:
-            compound, tyre_age_laps, up_to_lap = lap.compound, lap.tyre_age_laps, lap.lap_number
-        cumulative_time = await _cumulative_race_time(db, session_id, lap.driver_id, up_to_lap)
+            compound, tyre_age_laps = lap.compound, lap.tyre_age_laps
+        # Seeded against the same reference lap (current_lap) for every driver,
+        # not each driver's own independently-latest ingested lap — otherwise
+        # normal async ingestion skew (or the requester's current_lap running
+        # ahead of their own persisted data, per this function's docstring)
+        # bakes a fake multi-lap time gap into cumulative_race_time_seconds
+        # that swamps real on-track gaps of a few seconds, since simulate_race
+        # advances every driver in lockstep from current_lap + 1 onward.
+        cumulative_time = await _cumulative_race_time(db, session_id, lap.driver_id, current_lap)
+        starting_position = (
+            position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
+        )
         drivers.append(
             DriverRaceState(
                 driver_id=driver_id_str,
-                starting_position=lap.position or len(latest_laps),
+                starting_position=starting_position,
                 compound=compound,
                 compound_encoded=_COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"]),
                 tyre_age_laps=tyre_age_laps,
@@ -709,6 +749,73 @@ async def _build_race_state(
         air_temp=air_temp,
         drivers=drivers,
     )
+
+
+class _OvertakingDriverEntry(TypedDict):
+    position: int
+    driver_id: str
+    gap_seconds: float
+
+
+def _build_plan_explanation(
+    race_state: RaceSimulationInput,
+    requester_state: DriverRaceState,
+    pit_laps: list[int],
+    compounds: list[str],
+    total_laps: int,
+    remaining_laps: int,
+) -> dict[str, Any]:
+    """Explain why a plan's position_gain_loss came out the way it did.
+
+    drivers_overtaken lists every OTHER driver currently behind the requester
+    (higher cumulative_race_time_seconds) whose gap is less than
+    race_simulator.PIT_STOP_SECONDS — close enough to leapfrog the requester
+    on a full pit-stop time loss. This is a static property of the field's
+    gaps at current_lap, computed the same way regardless of whether this
+    plan has a forced pit stop — the frontend relabels the same list
+    ("overtake you" vs "you overtake") based on position_gain_loss's sign.
+
+    Args:
+        race_state: The built field state (post _build_race_state).
+        requester_state: race_state.drivers entry for the requesting driver.
+        pit_laps, compounds: This plan's forced pit schedule (may be empty).
+        total_laps: current_lap + remaining_laps from the request.
+        remaining_laps: The request's own remaining_laps — used verbatim only
+            when pit_laps is empty (no forced stop to measure "after" from).
+    Returns:
+        PlanExplanation-shaped dict.
+    """
+    drivers_overtaken: list[_OvertakingDriverEntry] = sorted(
+        (
+            _OvertakingDriverEntry(
+                position=driver.starting_position,
+                driver_id=driver.driver_id,
+                gap_seconds=driver.cumulative_race_time_seconds
+                - requester_state.cumulative_race_time_seconds,
+            )
+            for driver in race_state.drivers
+            if driver.driver_id != requester_state.driver_id
+            and 0.0
+            < driver.cumulative_race_time_seconds - requester_state.cumulative_race_time_seconds
+            < race_simulator.PIT_STOP_SECONDS
+        ),
+        key=lambda entry: entry["gap_seconds"],
+    )
+
+    if pit_laps:
+        laps_after_pit = max(total_laps - pit_laps[-1], 0)
+        fresh_tyre_gain_per_lap = _FRESH_TYRE_GAIN_PER_LAP_SECONDS.get(compounds[-1], 0.0)
+    else:
+        laps_after_pit = remaining_laps
+        fresh_tyre_gain_per_lap = 0.0
+
+    return {
+        "pit_cost_seconds": race_simulator.PIT_STOP_SECONDS,
+        "drivers_overtaken": drivers_overtaken,
+        "remaining_laps": laps_after_pit,
+        "fresh_tyre_gain_per_lap": fresh_tyre_gain_per_lap,
+        "total_recoverable_seconds": fresh_tyre_gain_per_lap * laps_after_pit,
+    }
 
 
 async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
@@ -782,6 +889,14 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
     position_gain_loss = round(
         requester_state.starting_position - requesting_distribution.mean_position
     )
+    explanation = _build_plan_explanation(
+        race_state,
+        requester_state,
+        pit_laps,
+        compounds,
+        total_laps,
+        int(payload["remaining_laps"]),
+    )
 
     return {
         "driver_id": requester_id_str,
@@ -795,6 +910,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                     requesting_distribution.finish_time_p5_seconds,
                     requesting_distribution.finish_time_p95_seconds,
                 ),
+                "explanation": explanation,
             }
         ],
     }

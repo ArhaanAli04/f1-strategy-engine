@@ -34,6 +34,10 @@ class RaceResponse(BaseModel):
     race_date: date
     weather: str | None
     status: str
+    # Display name (e.g. "Abu Dhabi Grand Prix") — nullable, same as the
+    # underlying Race.event_name column (historical rows ingested before
+    # this column existed have no value; callers fall back to circuit.name).
+    event_name: str | None = None
     circuit: CircuitResponse | None = None
     sessions: list[SessionResponse] = []
 
