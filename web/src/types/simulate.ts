@@ -14,12 +14,32 @@ export interface SimulateStrategyRequest {
   compounds: string[]
 }
 
+// driver_id, not driver_code — the frontend resolves id -> code/team color via
+// useDrivers, same pattern as DriverChip/LiveTimingTower.
+export interface OvertakingDriver {
+  position: number
+  driver_id: string
+  gap_seconds: number
+}
+
+// drivers_overtaken is always "drivers behind the requester within
+// pit_cost_seconds at current_lap" regardless of the plan's actual result —
+// the UI relabels the same list depending on position_gain_loss's sign.
+export interface PlanExplanation {
+  pit_cost_seconds: number
+  drivers_overtaken: OvertakingDriver[]
+  remaining_laps: number
+  fresh_tyre_gain_per_lap: number
+  total_recoverable_seconds: number
+}
+
 export interface SimulatedRaceOutcome {
   pit_laps: number[]
   compounds: string[]
   predicted_finish_time: number
   position_gain_loss: number
   confidence_interval: [number, number]
+  explanation: PlanExplanation
 }
 
 export interface SimulateStrategyResponse {

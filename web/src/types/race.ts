@@ -24,6 +24,7 @@ export interface RaceResponse {
   race_date: string
   weather: string | null
   status: string
+  event_name: string | null
   circuit: CircuitResponse | null
   sessions: SessionResponse[]
 }
