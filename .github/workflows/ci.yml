@@ -84,6 +84,15 @@ jobs:
       # secret — no unit test does anything with this value beyond a
       # jwt.encode()/decode() round-trip in-process.
       SECRET_KEY: ci-unit-test-secret-key-not-for-production
+      # Same class of problem, same fix as the integration-tests job below:
+      # backend/workers/celery_app.py reads get_redis_settings().redis_url at
+      # module level, and test_prediction_worker.py imports
+      # backend.workers.prediction_worker (which imports celery_app) at its
+      # own module top level — collection time, before any fixture can run.
+      # Locally satisfied by a gitignored .env; CI has none, so it must come
+      # from the job env. Value is never actually used for a connection, just
+      # needs to exist as a valid-shaped string to satisfy RedisSettings.
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
 
