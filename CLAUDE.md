@@ -187,6 +187,16 @@ readiness until the app is actually up — the standard Kubernetes pattern
 for slow-starting containers, rather than inflating livenessProbe's own
 initialDelaySeconds.
 
+**Monte Carlo simulator fixes (feature/monte-carlo-fix):**
+1. cumulative_race_time_seconds anchored to current_lap 
+   for all drivers (not each driver's own latest DB lap)
+2. starting_position anchored to current_lap + scoped 
+   to session_id (was doing cross-session join)
+3. PlanExplanation added to SimulatedRaceOutcome — 
+   drivers_overtaken, pit_cost_seconds, remaining_laps, 
+   fresh_tyre_gain_per_lap, total_recoverable_seconds
+Validated: STR lap 55 → -8/-9, NOR → -1, OCO → -10"
+
 **Docker Desktop Kubernetes shares its image store directly — no `kind
 load` needed:**
 Despite Docker Desktop's Kubernetes node (`desktop-control-plane`) running
@@ -579,11 +589,6 @@ These are not schema changes but known integration gaps to fix on future days.
   get_pos_data() SessionTime column. ~50ms accuracy (meters at racing speed).
   Needs new logic in extract_circuit_outlines.py + edge case handling for
   missing sector timestamps. Defer to after circuit map feature is complete.
-
-- **Monte Carlo simulator position_gain_loss may not correctly account for
-  current on-track gaps when computing position changes** — VER pitting
-  lap 55/58 returned 0 change despite HAD being only 1.3s behind.
-  Investigate simulation_service.py run_race_simulation() gap handling.
 
 - **retrain_incremental.py FastF1 403→mirror fallback for 2026 data:**
   FastF1 temporarily gets a 403 from livetiming.formula1.com,
