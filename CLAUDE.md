@@ -411,23 +411,21 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      29B
-Status:   Design audit + UI modernization complete. 
-          Dashboard/Settings/Race/Login/Register audits done. 
-          Animation pass: GPU-friendly dot movement, telemetry 
-          gauge transitions, prefers-reduced-motion, shared 
-          motion tokens. Self-hosted Titillium Web font. 
-          Formalized color tokens. NavBar: Dashboard/Simulator 
-          links + Settings/Logout icons. Recharts tooltip fix 
-          (all 5 charts) + phantom compound data bug fixed. 
-          Settings rebuilt as modal with sidebar nav. 
-          DriverPage richer header (WDC position, last win/podium, 
-          team logo). SimulatorPage: real Select dropdowns, 
-          confidence interval surfaced, step indicator redesign.
-Next:     Day 30- Tauri desktop app
+Day:      30
+Status:   Tauri v2 desktop app initialized in desktop/. 
+          System tray (grey/green icon, menu). Always-on-top 
+          overlay window (400x200, frameless, draggable, 
+          top-5 timing tower + undercut alert). Native OS 
+          notifications (undercut opportunity/threat, 
+          probability_pit_now_gains_position > 0.7). 
+          CSV export via native save dialog (fs + dialog plugins). 
+          Full page parity with web. Fixed: timing tower lapped driver 
+          ordering (sort by laps desc then cumulative time).  
+          Desktop sync protocol documented in CLAUDE.md 
+          and desktop/src/README.md.
+Next:     Day 31- React Native mobile app — setup, navigation & core screens
 Blockers: Cloud deployment target undecided (Render/GKE) — 
-          cd.yml Jobs 3-5 remain placeholders, Monte Carlo simulator position_gain_loss may not correctly 
-          account for current on-track gaps (see CLAUDE.md deferred wiring), Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
+          cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
 ```
 
 ---
