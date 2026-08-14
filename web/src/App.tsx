@@ -34,6 +34,9 @@ function App() {
 
         <Route element={<AuthGuard />}>
           <Route path="/dashboard" element={<DashboardPage />} />
+          {/* No :sessionId — RacePage falls back to useResolvedSession's
+              most-recent-completed-race session when there's no live one. */}
+          <Route path="/race" element={<RacePage />} />
           <Route path="/race/:sessionId" element={<RacePage />} />
           <Route path="/race/:sessionId/strategy" element={<RaceStrategyPage />} />
           <Route path="/race/:sessionId/live" element={<RaceLivePage />} />

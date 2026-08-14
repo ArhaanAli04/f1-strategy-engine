@@ -50,6 +50,7 @@ export const ROUTES = {
   LOGIN: "/login",
   REGISTER: "/register",
   DASHBOARD: "/dashboard",
+  LIVE_RACE: "/race",
   race: (sessionId: string) => `/race/${sessionId}`,
   raceStrategy: (sessionId: string) => `/race/${sessionId}/strategy`,
   raceLive: (sessionId: string) => `/race/${sessionId}/live`,

@@ -113,7 +113,7 @@ async def _fetch_races(
         select(Race)
         .options(selectinload(Race.circuit))
         .where(*filters)
-        .order_by(Race.season.desc(), Race.round_number)
+        .order_by(Race.race_date.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )

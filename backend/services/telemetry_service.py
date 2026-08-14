@@ -447,7 +447,16 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
     for row in rows:
         latest_per_driver[str(row["driver_id"])] = row
 
-    ordered = sorted(latest_per_driver.values(), key=lambda r: r["cumulative_seconds"])
+    # Laps completed first (descending), cumulative time only as a tiebreaker
+    # among drivers on the same lap. cumulative_seconds alone inverts a lapped
+    # driver's position: a driver lapped once completes fewer total laps, so
+    # their cumulative sum is smaller than an unlapped driver's full-distance
+    # sum even though they finished behind — confirmed live on 2025 Abu Dhabi
+    # (session b5fafd04-5397-4b51-b732-875ba99d66fd), where lapped HAD/LAW/GAS
+    # sorted ahead of unlapped PIA/NOR/LEC.
+    ordered = sorted(
+        latest_per_driver.values(), key=lambda r: (-r["lap_number"], r["cumulative_seconds"])
+    )
     gaps: list[dict[str, Any]] = []
     for i, row in enumerate(ordered):
         cumulative = row["cumulative_seconds"]

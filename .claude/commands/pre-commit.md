@@ -54,6 +54,23 @@ cd web && npm run lint
 cd web && npm run build
 ```
 
+## Frontend checks (desktop/)
+
+Only run these if files under `desktop/` changed in the current session —
+same conditional logic as the web/ checks above. Stop at the first failure
+and fix it.
+
+```bash
+# 1. Type check
+cd desktop && npx tsc --noEmit
+
+# 2. Lint check — SKIPPED: desktop/package.json has no "lint" script
+# (oxlint is only configured for web/ so far — not added here, noted only).
+
+# 3. Production build verification
+cd desktop && npm run build
+```
+
 ## STOP HERE — hand control back to the user
 
 Once all checks above pass, produce a clean summary table of what passed
