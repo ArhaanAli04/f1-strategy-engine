@@ -1,29 +1,15 @@
-import { useMemo } from "react"
 import { useParams } from "react-router-dom"
 import { LapTimesChart } from "@/components/driver/LapTimesChart"
 import { SectorComparison } from "@/components/driver/SectorComparison"
 import { StyleRadar } from "@/components/driver/StyleRadar"
+import { HistoricalDataBanner } from "@/components/shared/HistoricalDataBanner"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { TeamLogo } from "@/components/shared/TeamLogo"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { useCurrentRace } from "@/hooks/useCurrentRace"
 import { useDriverSeasonStats } from "@/hooks/useDriverSeasonStats"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useResolvedSession } from "@/hooks/useResolvedSession"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
-
-// GET /races/current can 404 (off-season, no race today) — in that case
-// there is no session to scope analysis/laps/sectors to, and the three
-// panels below each render their own "no active session" empty state
-// rather than erroring.
-function useResolvedSessionId() {
-  const { data: race } = useCurrentRace()
-  return useMemo(() => {
-    if (!race || race.sessions.length === 0) return { sessionId: null, season: race?.season ?? null }
-    const raceSession = race.sessions.find((s) => s.session_type === "R")
-    const latest = [...race.sessions].sort((a, b) => b.session_date.localeCompare(a.session_date))[0]
-    return { sessionId: (raceSession ?? latest).id, season: race.season }
-  }, [race])
-}
 
 interface StatTileProps {
   value: number | string
@@ -42,15 +28,19 @@ function StatTile({ value, label }: StatTileProps) {
 export function DriverPage() {
   const { driverId } = useParams<{ driverId: string }>()
   const { data: drivers, isLoading: driversLoading } = useDrivers()
-  const { sessionId, season } = useResolvedSessionId()
+  const { sessionId, isLive, raceName, raceDate } = useResolvedSession()
 
   const driver = drivers?.find((d) => d.id === driverId) ?? null
   const team = driver?.contracts[0]?.team ?? null
   const teamColor = team?.color_hex ?? FALLBACK_TEAM_COLOR
 
+  // Always the current season, regardless of which historical session
+  // resolvedSessionId is scoping the charts below to — season stats are a
+  // "who's leading the championship right now" readout, not tied to
+  // whichever session's lap/sector data happens to be displayed.
   const { data: seasonStats, isLoading: statsLoading } = useDriverSeasonStats(
     driver?.code ?? null,
-    season ?? new Date().getFullYear(),
+    new Date().getFullYear(),
   )
 
   if (driversLoading) {
@@ -71,7 +61,11 @@ export function DriverPage() {
   const hasLastResults = seasonStats && (seasonStats.lastWinCircuit || seasonStats.lastPodiumCircuit)
 
   return (
-    <div className="h-full overflow-y-auto p-6">
+    <div className="flex h-full flex-col overflow-hidden">
+      {sessionId && !isLive && (
+        <HistoricalDataBanner sessionId={sessionId} raceName={raceName} raceDate={raceDate} />
+      )}
+      <div className="flex-1 overflow-y-auto p-6">
       <div className="mx-auto max-w-6xl space-y-4">
         <div className="overflow-hidden rounded-lg border">
           <div className="h-2" style={{ backgroundColor: teamColor }} />
@@ -138,6 +132,7 @@ export function DriverPage() {
             <LapTimesChart sessionId={sessionId} driverId={driver.id} />
           </CardContent>
         </Card>
+      </div>
       </div>
     </div>
   )

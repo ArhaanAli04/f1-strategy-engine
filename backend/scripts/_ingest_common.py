@@ -95,7 +95,7 @@ async def get_or_create_race(
             round_number=round_number,
             circuit_id=circuit_id,
             race_date=race_date,
-            status="completed",
+            status="completed" if race_date <= date.today() else "scheduled",
             event_name=event_name,
         )
         db.add(race)

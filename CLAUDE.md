@@ -1168,3 +1168,26 @@ connect to the locally hosted Docker stack during development and demos.
 
 No cloud VM deployment during the build — see DEPLOYMENT.md for full 
 strategy including ngrok demo workflow and future Render deployment plan.
+
+## Desktop Sync Protocol
+
+`desktop/` (Tauri v2 + React, Day 30) has no monorepo/symlink sharing with
+`web/` — symlinks are unreliable on Windows. Several `desktop/src/` files
+are manual copies of `web/src/` files and must be updated by hand whenever
+the `web/` source changes. Full file-by-file list, including which files
+are verbatim copies vs. copied-and-adapted vs. hand-written-but-logic-
+mirrored: **`desktop/src/README.md`**.
+
+Summary of what's copied: `types/*.ts`, `api/*.ts`, `utils/{constants,
+errors, formatters, drivers}.ts`, `stores/authStore.ts`, `lib/utils.ts`,
+`components/ui/*.tsx` (shadcn), `components/shared/ErrorBoundary.tsx`,
+`index.css`, `tailwind.config.js`, `postcss.config.js`, the self-hosted
+Titillium Web font files, and `favicon.svg`. `pages/SimulatorPage.tsx` is
+copied-and-adapted (live-mode detection removed, session/driver source
+switched to `raceContextStore`, desktop-only CSV export button added) —
+diff against web rather than blind-overwriting on sync. Hooks are
+deliberately **not** copied (window-management/native-API concerns differ
+per platform) — `desktop/src/hooks/{useDrivers,useSessionGaps,
+useDriverLaps,useStrategy,useAuth}.ts` are hand-written re-implementations
+of the same react-query logic and can drift independently; check them too
+when the corresponding web hook changes.

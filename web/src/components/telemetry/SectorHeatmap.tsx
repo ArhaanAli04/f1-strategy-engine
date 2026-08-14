@@ -7,6 +7,7 @@ import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { cn } from "@/lib/utils"
 import { useSessionStore } from "@/stores/sessionStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
+import { isActiveDriver } from "@/utils/drivers"
 import { formatLapTime } from "@/utils/formatters"
 import type { DriverResponse, LapDataResponse } from "@/types"
 
@@ -79,7 +80,10 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
     if (gaps.length > 0) {
       return [...gaps].sort((a, b) => a.position - b.position).map((gap) => gap.driver_id)
     }
-    return [...(drivers ?? [])].sort((a, b) => a.code.localeCompare(b.code)).map((d) => d.id)
+    return [...(drivers ?? [])]
+      .filter(isActiveDriver)
+      .sort((a, b) => a.code.localeCompare(b.code))
+      .map((d) => d.id)
   }, [gapsResponse, drivers])
 
   const positionsByDriver = useMemo(() => {

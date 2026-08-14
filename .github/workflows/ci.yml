@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       web: ${{ steps.filter.outputs.web }}
+      desktop: ${{ steps.filter.outputs.desktop }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,6 +25,8 @@ jobs:
           filters: |
             web:
               - 'web/**'
+            desktop:
+              - 'desktop/**'
 
   frontend-check:
     name: Frontend check
@@ -47,6 +50,35 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      - name: Build (tsc + vite build)
+        run: npm run build
+
+  desktop-check:
+    name: desktop-check
+    needs: [changes]
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # desktop/package.json has no "lint" script yet (oxlint isn't
+      # configured for desktop/ — only web/ has it) — skipped rather than
+      # added today, matching the Day 30 scope this was deferred under.
+      - name: Type check
+        run: npx tsc --noEmit
 
       - name: Build (tsc + vite build)
         run: npm run build

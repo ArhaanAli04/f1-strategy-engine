@@ -271,6 +271,33 @@ async def test_get_session_gaps_returns_gaps(
 
 
 @pytest.mark.unit
+async def test_get_session_gaps_ranks_lapped_driver_behind_despite_smaller_cumulative_time(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    # Driver A completes the full race distance (58 laps); driver B is
+    # lapped once (57 laps) and so has a *smaller* cumulative_seconds sum
+    # purely from running fewer laps — sorting on cumulative_seconds alone
+    # would incorrectly rank B ahead of A. Confirmed live on 2025 Abu Dhabi
+    # (session b5fafd04-5397-4b51-b732-875ba99d66fd): lapped HAD/LAW/GAS
+    # sorted ahead of unlapped PIA/NOR/LEC before this fix.
+    session_id = uuid.uuid4()
+    driver_a = uuid.uuid4()
+    driver_b = uuid.uuid4()
+    rows = [
+        {"driver_id": driver_b, "lap_number": 57, "position": 1, "cumulative_seconds": 5300.0},
+        {"driver_id": driver_a, "lap_number": 58, "position": 1, "cumulative_seconds": 5400.0},
+    ]
+    mock_db_session.execute.return_value = _rows_result(rows)
+
+    result = await telemetry_service.get_session_gaps(
+        fakeredis, mock_db_session, 2026, 10, session_id
+    )
+
+    gaps_by_driver = {gap["driver_id"]: gap for gap in result["gaps"]}
+    assert gaps_by_driver[str(driver_a)]["position"] < gaps_by_driver[str(driver_b)]["position"]
+
+
+@pytest.mark.unit
 async def test_session_scoped_wrappers_resolve_season_round_then_delegate(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
