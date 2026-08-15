@@ -5,17 +5,34 @@ computed from 100ms telemetry. That raw telemetry was never ingested — Day 5 s
 speed/throttle/brake to avoid tens of millions of rows (see CLAUDE.md's Deferred
 Telemetry Features note). This module uses four lap/stint-level proxies instead:
 
-- sector_time_variance: mean of std(sector1/2/3 seconds) per driver-season — a proxy
-  for corner-execution consistency.
+- sector_time_variance: per-circuit std(sector1/2/3 seconds) over that circuit's
+  race-session (session_type == "R"), valid laps only, z-scored against other
+  drivers at the same circuit+season, then averaged across every circuit the
+  driver raced that season — a proxy for corner-execution consistency. Originally
+  a single std() pooled across the driver's entire season (every circuit, every
+  session type) — fixed in feature/style-radar-improvements after that pooled
+  version turned out to mostly measure cross-circuit sector-length differences
+  (e.g. Monaco sector 1 ~17s vs a long circuit's ~99s) rather than driver
+  consistency: the whole 2025 grid spanned barely 6.7-7.9s on the pooled metric,
+  meaning it couldn't discriminate between drivers at all. Now a z-score, same
+  scale and sign convention as tyre_management_index (negative = more consistent
+  than same-circuit peers, positive = less consistent).
 - tyre_management_index: each stint's avg_deg_per_lap, z-scored against the
   population mean/std for that compound+season. This is a population-relative proxy,
   not a literal comparison against the tire_deg model's prediction — reproducing that
   model's training-time categorical encoding here would be a fragile coupling (see
   race_simulator.py's module docstring for the same encoding concern).
-- lap_time_consistency: std of valid lap times per driver-season, a proxy for
-  braking consistency.
+- lap_time_consistency: per-circuit std of valid race-session lap times, z-scored
+  against other drivers at the same circuit+season, then averaged across circuits —
+  a proxy for braking consistency. Same season-pooling bug, and the same fix, as
+  sector_time_variance above.
 - stint_length_tendency: mean stint length per driver-season, a proxy for
-  throttle/tyre management style.
+  throttle/tyre management style. Computed from laps across ALL session types, not
+  just race sessions — build_driver_style_features/compute_stint_length_tendency
+  needs practice/quali laps too, to resolve each session's last lap number for
+  stints with a null end_lap. This is why the race-only + valid-only filter for
+  sector_time_variance/lap_time_consistency lives inside those two functions
+  rather than being applied to the shared laps DataFrame up front.
 
 PCA(n_components=4) on these 4 features is a decorrelation/whitening step before
 K-Means (the features aren't independent — e.g. tyre_management_index and
@@ -59,32 +76,79 @@ class DriverStyleResult:
 
 
 def compute_sector_time_variance(laps: pd.DataFrame) -> pd.DataFrame:
-    """Mean of std(sector1/2/3 seconds) per driver per season.
+    """Per-circuit sector-time std, z-scored against same-circuit peers, averaged across circuits.
+
+    Restricted to race-session (session_type == "R"), valid laps only — practice
+    and qualifying carry different fuel loads, tyre strategies, and track evolution
+    that would otherwise dominate the signal, and only race pace is directly
+    comparable lap-to-lap. Grouping by circuit_id before z-scoring (rather than
+    pooling every circuit a driver visited that season into one std()) isolates
+    genuine corner-execution consistency from cross-circuit sector-length
+    differences — see this module's docstring for the season-pooled bug this
+    replaces.
 
     Args:
-        laps: lap_data rows; must include driver_id, season, sector1_seconds,
-            sector2_seconds, sector3_seconds.
+        laps: lap_data rows; must include driver_id, season, circuit_id,
+            session_type, sector1_seconds, sector2_seconds, sector3_seconds,
+            is_valid.
     Returns:
-        DataFrame with driver_id, season, sector_time_variance.
+        DataFrame with driver_id, season, sector_time_variance — a z-score
+        (negative = more consistent than same-circuit peers, positive = less
+        consistent). NaN/missing for a driver-season with no race-session laps,
+        or whose only shared circuits have a single driver (zero-variance peer
+        group, undefined z-score) — dropped downstream by
+        build_driver_style_features's dropna, same as any other missing feature.
     """
-    grouped = laps.groupby(["driver_id", "season"])[
-        ["sector1_seconds", "sector2_seconds", "sector3_seconds"]
-    ].std()
-    return grouped.mean(axis=1).rename("sector_time_variance").reset_index()
+    race_laps = laps[(laps["session_type"] == "R") & (laps["is_valid"])]
+    per_circuit_std = (
+        race_laps.groupby(["driver_id", "season", "circuit_id"])[
+            ["sector1_seconds", "sector2_seconds", "sector3_seconds"]
+        ]
+        .std()
+        .mean(axis=1)
+        .rename("std")
+        .reset_index()
+    )
+    group_mean = per_circuit_std.groupby(["season", "circuit_id"])["std"].transform("mean")
+    group_std = per_circuit_std.groupby(["season", "circuit_id"])["std"].transform("std")
+    per_circuit_std["z"] = (per_circuit_std["std"] - group_mean) / group_std.replace(0, np.nan)
+    return (
+        per_circuit_std.groupby(["driver_id", "season"])["z"]
+        .mean()
+        .rename("sector_time_variance")
+        .reset_index()
+    )
 
 
 def compute_lap_time_consistency(laps: pd.DataFrame) -> pd.DataFrame:
-    """Std of valid lap times per driver per season.
+    """Per-circuit lap-time std, z-scored against same-circuit peers, averaged across circuits.
+
+    Same restriction and rationale as compute_sector_time_variance — race-session,
+    valid laps only, grouped by circuit before z-scoring — see there and this
+    module's docstring for the season-pooled bug this replaces.
 
     Args:
-        laps: lap_data rows; must include driver_id, season, lap_time_seconds, is_valid.
+        laps: lap_data rows; must include driver_id, season, circuit_id,
+            session_type, lap_time_seconds, is_valid.
     Returns:
-        DataFrame with driver_id, season, lap_time_consistency.
+        DataFrame with driver_id, season, lap_time_consistency — a z-score
+        (negative = more consistent race pace than same-circuit peers, positive =
+        less consistent). Same NaN/missing conditions as
+        compute_sector_time_variance.
     """
-    valid = laps[laps["is_valid"]]
-    return (
-        valid.groupby(["driver_id", "season"])["lap_time_seconds"]
+    race_laps = laps[(laps["session_type"] == "R") & (laps["is_valid"])]
+    per_circuit_std = (
+        race_laps.groupby(["driver_id", "season", "circuit_id"])["lap_time_seconds"]
         .std()
+        .rename("std")
+        .reset_index()
+    )
+    group_mean = per_circuit_std.groupby(["season", "circuit_id"])["std"].transform("mean")
+    group_std = per_circuit_std.groupby(["season", "circuit_id"])["std"].transform("std")
+    per_circuit_std["z"] = (per_circuit_std["std"] - group_mean) / group_std.replace(0, np.nan)
+    return (
+        per_circuit_std.groupby(["driver_id", "season"])["z"]
+        .mean()
         .rename("lap_time_consistency")
         .reset_index()
     )
