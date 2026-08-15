@@ -431,7 +431,11 @@ Status:   Tauri v2 desktop app initialized in desktop/.
           Full page parity with web. Fixed: timing tower lapped driver 
           ordering (sort by laps desc then cumulative time).  
           Desktop sync protocol documented in CLAUDE.md 
-          and desktop/src/README.md.
+          and desktop/src/README.md.StyleRadar completely reworked. Backend fix: 
+          sector_time_variance and lap_time_consistency 
+          now computed per-circuit with z-scoring against 
+          peers (race sessions only), all 4 metrics now 
+          comparable z-scores.
 Next:     Day 31- React Native mobile app — setup, navigation & core screens
 Blockers: Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
