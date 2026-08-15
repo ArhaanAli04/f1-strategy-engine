@@ -98,22 +98,43 @@ def _synthetic_query_rows(season: int, n_drivers: int = 6, n_laps: int = 10) -> 
     """Row tuples in the exact column order _fit_population's laps_query/stints_query select.
 
     laps_query: driver_id, session_id, lap_number, sector1_seconds, sector2_seconds,
-    sector3_seconds, lap_time_seconds, is_valid.
+    sector3_seconds, lap_time_seconds, is_valid, circuit_id, session_type.
     stints_query: driver_id, session_id, compound, avg_deg_per_lap, start_lap, end_lap.
+
+    Drivers alternate between two circuit_ids so compute_sector_time_variance/
+    compute_lap_time_consistency's per-circuit z-scoring has a real peer group
+    (>=2 drivers) at each circuit — see test_driver_style.py's
+    _synthetic_laps_and_stints for why a single driver per circuit would collapse
+    every z-score to NaN.
     """
     rng = np.random.default_rng(11)
+    circuit_ids = [uuid.uuid4(), uuid.uuid4()]
     lap_rows = []
     stint_rows = []
     for i in range(n_drivers):
         driver_id = uuid.uuid4()
         session_id = uuid.uuid4()
+        circuit_id = circuit_ids[i % len(circuit_ids)]
         noise = 0.05 + i * 0.02
         base_s1, base_s2, base_s3 = 28.0 + i * 0.3, 34.0 + i * 0.2, 27.0 + i * 0.25
         for lap_number in range(1, n_laps + 1):
             s1 = base_s1 + rng.normal(0, noise)
             s2 = base_s2 + rng.normal(0, noise)
             s3 = base_s3 + rng.normal(0, noise)
-            lap_rows.append((driver_id, session_id, lap_number, s1, s2, s3, s1 + s2 + s3, True))
+            lap_rows.append(
+                (
+                    driver_id,
+                    session_id,
+                    lap_number,
+                    s1,
+                    s2,
+                    s3,
+                    s1 + s2 + s3,
+                    True,
+                    circuit_id,
+                    "R",
+                )
+            )
         stint_rows.append(
             (driver_id, session_id, "MEDIUM", 0.05 + i * 0.03 + rng.normal(0, 0.005), 1, n_laps)
         )

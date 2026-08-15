@@ -197,6 +197,15 @@ initialDelaySeconds.
    fresh_tyre_gain_per_lap, total_recoverable_seconds
 Validated: STR lap 55 → -8/-9, NOR → -1, OCO → -10"
 
+**Driver style metrics fix (feature/style-radar-improvements):**
+sector_time_variance and lap_time_consistency were previously computed
+across all circuits and session types in a season, conflating
+cross-circuit pace differences with driver skill. Fixed in driver_style.py
+to use per-circuit z-scoring against peers (race sessions only,
+is_valid=True), matching tyre_management_index's existing approach. All 4
+style metrics are now z-scores on a comparable scale (~-2 to +2). Frontend
+normalization bounds updated in StyleRadar.tsx (both web and desktop).
+
 **Docker Desktop Kubernetes shares its image store directly — no `kind
 load` needed:**
 Despite Docker Desktop's Kubernetes node (`desktop-control-plane`) running

@@ -139,7 +139,7 @@ export function DriverAnalyticsPage() {
               <CardTitle className="text-base">Driving Style</CardTitle>
             </CardHeader>
             <CardContent>
-              <StyleRadar driverId={driver.id} sessionId={sessionId} />
+              <StyleRadar driverId={driver.id} sessionId={sessionId} driverCode={driver.code} />
             </CardContent>
           </Card>
 
