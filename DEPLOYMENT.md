@@ -302,7 +302,7 @@ npm install -g eas-cli
 eas login
 
 # From the mobile app directory
-cd clients/mobile
+cd mobile
 
 # Build the development client (runs in EAS cloud, ~15 minutes)
 eas build --profile development --platform ios
@@ -325,7 +325,7 @@ ipconfig  # Windows — look for IPv4 Address under WiFi adapter
 # WS_BASE_URL=ws://192.168.1.105:8000
 
 # 4. Start Expo dev server
-cd clients/mobile
+cd mobile
 npx expo start
 
 # 5. Open the development build app on your iPhone

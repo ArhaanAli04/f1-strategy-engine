@@ -743,6 +743,20 @@ Slack webhook handling.
   K8s deployment — may resolve naturally with multiple backend pods (each
   with its own event loop, less contention per pod).
 
+- **victory-native + @shopify/react-native-skia not installed on mobile —
+  install at the START of Day 32 before building Driver Detail charts.**
+  Deferred during Day 31's mobile build sprint: no screen in Checkpoints
+  1-6's scope (Home/Live/Strategy/Drivers/Alerts/Settings/Driver Detail
+  stub) actually renders a chart. Modern `victory-native` (the Skia-based
+  rewrite, confirmed v41.26.0 via npm registry) hard-requires
+  `@shopify/react-native-skia >=1.2.3 <3.0.0` as a peer dependency — it
+  won't import without it, which wasn't in the original Day 31 dependency
+  list. Install both together via `npx expo install
+  @shopify/react-native-skia && npm install victory-native` before
+  porting `web/src/components/driver/{LapTimesChart,SectorComparison,
+  StyleRadar}.tsx` onto `app/driver/[id].tsx` (currently a minimal
+  identity+snapshot stub, see `mobile/src/README.md`).
+
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
 pyproject.toml lower-bound-only pins caused a silent compatibility 
@@ -1202,3 +1216,51 @@ per platform) — `desktop/src/hooks/{useDrivers,useSessionGaps,
 useDriverLaps,useStrategy,useAuth}.ts` are hand-written re-implementations
 of the same react-query logic and can drift independently; check them too
 when the corresponding web hook changes.
+
+## Mobile Sync Protocol
+
+`mobile/` (Expo SDK 57 + Expo Router + NativeWind v4, Day 31) has no
+monorepo/symlink sharing with `web/` — same reasoning as desktop (symlinks
+unreliable on Windows). Full file-by-file sync table — verbatim copies vs.
+copied-and-adapted vs. hand-written-but-logic-mirrored vs. hand-ported
+components — lives in **`mobile/src/README.md`**, same convention as
+`desktop/src/README.md`.
+
+Summary of what's copied verbatim: `types/*.ts` (10 files), 8 of 9
+`api/*.ts` files (all except `client.ts`), `utils/{errors,formatters,
+drivers}.ts`, `stores/{sessionStore,alertStore}.ts`. Copied-and-adapted:
+`api/client.ts` (SecureStore-backed token reads via the store, not the
+interceptor itself), `stores/authStore.ts` (SecureStore `StateStorage`
+persist adapter, token-slice-only — `user` is never persisted, ~2048-byte
+iOS SecureStore item limit), `utils/constants.ts` (Expo Router paths for
+`ROUTES`, `EXPO_PUBLIC_*` env vars instead of Vite's `import.meta.env`).
+
+Hooks are **not** copied (hand-written per-platform re-implementations,
+same as desktop) — 17 hooks total, mirroring web's react-query logic
+1:1 where web's own hook has no browser API involved. One is a genuine
+rewrite, not a mirror: `hooks/useWebSocket.ts` wraps React Native's
+built-in `WebSocket` (hand-rolled fixed-delay reconnect) instead of the
+browser-only `reconnecting-websocket` package web uses.
+
+Components are hand-built or ported (not copied) — 15 components across
+`shared/`, `circuit/`, `telemetry/`, `strategy/`, `dashboard/`,
+`settings/`. Notably: `CircuitMapPanel.tsx` + `TelemetryGauge.tsx` +
+`CircuitOutlineSvg.tsx` are full react-native-svg ports of the web
+originals (same geometry/math), with live dot movement via a new
+`AnimatedDriverDot.tsx` (Reanimated `useAnimatedProps`) replacing web's
+CSS `transform` transition. `CircuitMapPanel` sits at the top of the
+**Live** tab, not Home — web's Home-equivalent only ever got the static
+outline (`UpcomingRaceCard`), the full live panel belongs where web
+mounts it (`RacePage`). Several simplifications are disclosed inline in
+`mobile/src/README.md` (`TeamLogo` swatch-only, no Ergast-standings sort
+on the Drivers tab, no FLIP row-reorder animation, Driver Detail is a
+minimal stub, `TelemetryGauge`'s arcs snap instead of sweep) — check that
+file before assuming full parity with any given web component.
+
+Push notifications (`src/notifications/notificationHandler.ts`,
+`src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`)
+have no web equivalent — mobile-only capability. Written and verified via
+`tsc`/Metro export only; untestable without a physical device + dev
+build (no Apple Developer account or Android emulator set up this
+sprint — see `mobile/src/README.md`'s Testing Options, including a full
+Android-emulator setup procedure verified against Expo's current docs).
