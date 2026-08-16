@@ -71,6 +71,27 @@ cd desktop && npx tsc --noEmit
 cd desktop && npm run build
 ```
 
+## Frontend checks (mobile/)
+
+Only run these if files under `mobile/` changed in the current session —
+same conditional logic as the web/desktop checks above. Stop at the first
+failure and fix it.
+
+```bash
+# 1. Type check
+cd mobile && npx tsc --noEmit
+
+# 2. Lint check — SKIPPED: mobile/package.json has no "lint" script
+# (not configured yet, same situation as desktop/).
+
+# 3. Metro bundle check — mobile/ is an Expo project (Metro bundler, not
+# Vite), so there's no "npm run build" to fall back on the way web/desktop
+# have. `expo export` runs the real Babel/NativeWind/Reanimated pipeline
+# across the full module graph and fails loudly on any resolution error,
+# same role as web/desktop's production build step.
+cd mobile && npx expo export --platform ios
+```
+
 ## STOP HERE — hand control back to the user
 
 Once all checks above pass, produce a clean summary table of what passed
