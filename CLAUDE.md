@@ -420,24 +420,24 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    7
-Day:      30
-Status:   Tauri v2 desktop app initialized in desktop/. 
-          System tray (grey/green icon, menu). Always-on-top 
-          overlay window (400x200, frameless, draggable, 
-          top-5 timing tower + undercut alert). Native OS 
-          notifications (undercut opportunity/threat, 
-          probability_pit_now_gains_position > 0.7). 
-          CSV export via native save dialog (fs + dialog plugins). 
-          Full page parity with web. Fixed: timing tower lapped driver 
-          ordering (sort by laps desc then cumulative time).  
-          Desktop sync protocol documented in CLAUDE.md 
-          and desktop/src/README.md.StyleRadar completely reworked. Backend fix: 
-          sector_time_variance and lap_time_consistency 
-          now computed per-circuit with z-scoring against 
-          peers (race sessions only), all 4 metrics now 
-          comparable z-scores.
-Next:     Day 31- React Native mobile app — setup, navigation & core screens
-Blockers: Cloud deployment target undecided (Render/GKE) — 
+Day:      31
+Status:   Expo SDK 57 mobile app initialized in mobile/. 
+          NativeWind v4 styling, Expo Router file-based 
+          navigation, 5 tabs (Home/Live/Strategy/Drivers/Alerts). 
+          Auth (login/register with SecureStore JWT). 
+          Core screens: Home (UpcomingRaceCard + countdown + 
+          quick access + alerts feed), Live (22-driver FlatList + 
+          CircuitMapPanel), Strategy (PitWindowCard list), 
+          Drivers (roster), Alerts (swipe-to-dismiss). 
+          CircuitMapPanel fully ported to react-native-svg 
+          (all 3 modes, turn markers, live dots via Reanimated 
+          AnimatedDriverDot, TelemetryGauge). Push notification 
+          hooks written (requires development build to test). 
+          Settings modal. Mobile sync protocol documented. 
+          CI mobile-check job added.
+Next:     Day 32 — Driver detail, simulator, offline support, EAS build
+Blockers: No physical device for testing — Android emulator 
+          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
 ```
 
