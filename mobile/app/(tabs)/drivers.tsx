@@ -1,6 +1,7 @@
 import { router } from "expo-router"
 import { useMemo } from "react"
 import { FlatList, Pressable, Text, View } from "react-native"
+import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { TeamLogo } from "@/components/shared/TeamLogo"
 import { useDrivers } from "@/hooks/useDrivers"
 import { FALLBACK_TEAM_COLOR, ROUTES } from "@/utils/constants"
@@ -23,7 +24,7 @@ function sortByTeamName(drivers: DriverResponse[]): DriverResponse[] {
 }
 
 export default function DriversScreen() {
-  const { data: drivers, isLoading } = useDrivers()
+  const { data: drivers, dataUpdatedAt, isLoading } = useDrivers()
 
   const activeDrivers = useMemo(
     () => sortByTeamName((drivers ?? []).filter(isActiveDriver)),
@@ -31,7 +32,11 @@ export default function DriversScreen() {
   )
 
   if (isLoading) {
-    return <View className="flex-1 bg-background" />
+    return (
+      <View className="flex-1 bg-background">
+        <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+      </View>
+    )
   }
 
   return (
@@ -42,6 +47,7 @@ export default function DriversScreen() {
       data={activeDrivers}
       numColumns={2}
       keyExtractor={(driver) => driver.id}
+      ListHeaderComponent={<OfflineBanner dataUpdatedAt={dataUpdatedAt} />}
       renderItem={({ item: driver }) => {
         const team = driver.contracts[0]?.team
         return (
@@ -49,7 +55,7 @@ export default function DriversScreen() {
             onPress={() => router.push(ROUTES.DRIVER_DETAIL(driver.id))}
             className="flex-1 flex-row items-center gap-2 overflow-hidden rounded-md border border-white/10 bg-surface p-2 active:opacity-70"
           >
-            <TeamLogo teamColor={team?.color_hex ?? FALLBACK_TEAM_COLOR} />
+            <TeamLogo teamName={team?.name} teamColor={team?.color_hex ?? FALLBACK_TEAM_COLOR} />
             <View className="min-w-0 flex-1">
               <Text numberOfLines={1} className="text-sm font-semibold text-foreground">
                 {driver.code}

@@ -37,6 +37,7 @@ export const ROUTES = {
   DRIVERS: "/(tabs)/drivers",
   ALERTS: "/(tabs)/alerts",
   SETTINGS: "/settings",
+  SIMULATOR: "/simulator",
   // Explicit template-literal return type — Expo Router's typed routes
   // (experiments.typedRoutes in app.json) reject a plain `string` return
   // here even once `app/driver/[id].tsx` is a known route.
