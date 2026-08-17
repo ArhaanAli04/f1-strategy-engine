@@ -419,23 +419,20 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    7
-Day:      31
-Status:   Expo SDK 57 mobile app initialized in mobile/. 
-          NativeWind v4 styling, Expo Router file-based 
-          navigation, 5 tabs (Home/Live/Strategy/Drivers/Alerts). 
-          Auth (login/register with SecureStore JWT). 
-          Core screens: Home (UpcomingRaceCard + countdown + 
-          quick access + alerts feed), Live (22-driver FlatList + 
-          CircuitMapPanel), Strategy (PitWindowCard list), 
-          Drivers (roster), Alerts (swipe-to-dismiss). 
-          CircuitMapPanel fully ported to react-native-svg 
-          (all 3 modes, turn markers, live dots via Reanimated 
-          AnimatedDriverDot, TelemetryGauge). Push notification 
-          hooks written (requires development build to test). 
-          Settings modal. Mobile sync protocol documented. 
-          CI mobile-check job added.
-Next:     Day 32 — Driver detail, simulator, offline support, EAS build
+Phase:    8
+Day:      32
+Status:   Mobile app complete. Driver Detail screen 
+          (team color header, segmented Overview/Style/Sectors, 
+          hand-rolled SVG radar, victory-native BarGroup sectors, 
+          Ergast season stats). Simulator screen (4-step flow 
+          matching web/desktop, PlanExplanationCard, victory-native 
+          horizontal bar). Offline support (PersistQueryClientProvider, 
+          AsyncStorage cache for 3 query families, OfflineBanner on 
+          all screens, WebSocket gated on NetInfo). Team logos ported 
+          to mobile (static require map). mobile/README.md created 
+          (setup guide for iOS/Android/emulator/production). 
+          2700 modules bundling clean.
+Next:     Day 33 — Frontend build pipeline & web deployment (Vercel/Netlify)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — 
           cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
