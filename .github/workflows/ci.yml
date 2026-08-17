@@ -10,6 +10,116 @@ env:
   PYTHON_VERSION: "3.12"
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            web:
+              - 'web/**'
+            desktop:
+              - 'desktop/**'
+            mobile:
+              - 'mobile/**'
+
+  frontend-check:
+    name: Frontend check
+    needs: [changes]
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build (tsc + vite build)
+        run: npm run build
+
+  desktop-check:
+    name: desktop-check
+    needs: [changes]
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # desktop/package.json has no "lint" script yet (oxlint isn't
+      # configured for desktop/ — only web/ has it) — skipped rather than
+      # added today, matching the Day 30 scope this was deferred under.
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build (tsc + vite build)
+        run: npm run build
+
+  mobile-check:
+    name: mobile-check
+    needs: [changes]
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # mobile/package.json has no "lint" script yet (not configured for
+      # mobile/ — same situation as desktop/) — skipped rather than added
+      # today.
+      - name: Type check
+        run: npx tsc --noEmit
+
+      # mobile/ is an Expo project (Metro bundler, not Vite) — there's no
+      # "npm run build" the way web/desktop have. `expo export` runs the
+      # real Babel/NativeWind/Reanimated pipeline across the full module
+      # graph and fails loudly on any resolution error, serving the same
+      # role here as web/desktop's production build step.
+      - name: Metro bundle check
+        run: npx expo export --platform ios
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -43,6 +153,15 @@ jobs:
       # secret — no unit test does anything with this value beyond a
       # jwt.encode()/decode() round-trip in-process.
       SECRET_KEY: ci-unit-test-secret-key-not-for-production
+      # Same class of problem, same fix as the integration-tests job below:
+      # backend/workers/celery_app.py reads get_redis_settings().redis_url at
+      # module level, and test_prediction_worker.py imports
+      # backend.workers.prediction_worker (which imports celery_app) at its
+      # own module top level — collection time, before any fixture can run.
+      # Locally satisfied by a gitignored .env; CI has none, so it must come
+      # from the job env. Value is never actually used for a connection, just
+      # needs to exist as a valid-shaped string to satisfy RedisSettings.
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
 

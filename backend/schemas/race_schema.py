@@ -34,6 +34,10 @@ class RaceResponse(BaseModel):
     race_date: date
     weather: str | None
     status: str
+    # Display name (e.g. "Abu Dhabi Grand Prix") — nullable, same as the
+    # underlying Race.event_name column (historical rows ingested before
+    # this column existed have no value; callers fall back to circuit.name).
+    event_name: str | None = None
     circuit: CircuitResponse | None = None
     sessions: list[SessionResponse] = []
 
@@ -49,3 +53,19 @@ class RaceListResponse(BaseModel):
     weather: str | None
     status: str
     circuit: CircuitResponse | None = None
+
+
+class UpcomingRaceResponse(BaseModel):
+    """GET /races/upcoming — minimal shape for the Circuit Map Panel's
+    NON-RACE-mode countdown: display name, circuit, and the Race session's
+    real start instant (see Session.scheduled_start)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    season: int
+    round_number: int
+    race_name: str | None
+    circuit_id: uuid.UUID
+    race_date: date
+    scheduled_start: datetime | None

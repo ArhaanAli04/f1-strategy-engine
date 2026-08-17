@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "F1 Strategy Engine",
+    "slug": "f1-strategy-engine",
+    "version": "1.0.0",
+    "scheme": "f1strategy",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.arhaanali.f1strategy"
+    },
+    "android": {
+      "package": "com.arhaanali.f1strategy",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-notifications",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "2bae19a1-d770-443e-a3d7-8a74c4e77e7b"
+      }
+    }
+  }
+}

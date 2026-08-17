@@ -83,7 +83,7 @@ select = ["E", "F", "I", "N", "UP", "S", "B", "A", "C4", "PT"]
 "backend/tests/**" = ["S101"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 

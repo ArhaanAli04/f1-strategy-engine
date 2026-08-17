@@ -11,10 +11,11 @@ This document covers how the F1 Strategy Engine is run, demonstrated, and develo
 3. [Using the App — Quick Start](#using-the-app--quick-start)
 4. [Demo Videos](#demo-videos)
 5. [Mobile App — Development Build](#mobile-app--development-build)
-6. [General Development Workflow](#general-development-workflow)
-7. [Local Kubernetes Deployment (Docker Desktop)](#local-kubernetes-deployment-docker-desktop)
-8. [Production Deployment — Fly.io (After Day 40)](#production-deployment--flyio-after-day-40)
-9. [Local Kubernetes — When to Use It](#local-kubernetes--when-to-use-it)
+6. [Desktop App Build & Distribution](#desktop-app-build--distribution)
+7. [General Development Workflow](#general-development-workflow)
+8. [Local Kubernetes Deployment (Docker Desktop)](#local-kubernetes-deployment-docker-desktop)
+9. [Production Deployment — Fly.io (After Day 40)](#production-deployment--flyio-after-day-40)
+10. [Local Kubernetes — When to Use It](#local-kubernetes--when-to-use-it)
 
 
 ---
@@ -301,7 +302,7 @@ npm install -g eas-cli
 eas login
 
 # From the mobile app directory
-cd clients/mobile
+cd mobile
 
 # Build the development client (runs in EAS cloud, ~15 minutes)
 eas build --profile development --platform ios
@@ -324,7 +325,7 @@ ipconfig  # Windows — look for IPv4 Address under WiFi adapter
 # WS_BASE_URL=ws://192.168.1.105:8000
 
 # 4. Start Expo dev server
-cd clients/mobile
+cd mobile
 npx expo start
 
 # 5. Open the development build app on your iPhone
@@ -350,6 +351,105 @@ Regular development (new screens, UI changes, API calls, new components) uses li
 
 - 30 builds per month — more than sufficient for a 4-day build sprint
 - No Apple Developer account required for personal device installation
+
+---
+
+## Desktop App Build & Distribution
+
+Covers producing a distributable Windows installer for the Tauri desktop
+app and getting it into reviewers' hands, as opposed to `cargo tauri dev`
+(development, live-reload, used elsewhere in this doc).
+
+### Prerequisites
+
+Already set up as part of Day 30 (see CLAUDE.md's Desktop Sync Protocol /
+Architecture Decisions for how these were verified):
+
+- rustup + cargo (`stable-x86_64-pc-windows-msvc` toolchain)
+- Visual Studio Build Tools 2022 with the "Desktop development with C++"
+  workload (provides the MSVC linker Rust needs on Windows)
+- WebView2 runtime — pre-installed on Windows 10/11, no separate step
+
+### Before Building — Sync Check
+
+`desktop/src/` contains manual copies of several `web/src/` files (types,
+api client, shared UI components — see CLAUDE.md's **Desktop Sync
+Protocol** section and `desktop/src/README.md` for the exact file list).
+Before cutting a release build, diff `desktop/src/` against `web/src/` for
+anything changed since Day 30 and re-sync — a stale copy won't fail the
+build, it'll just ship desktop with outdated types/API calls silently.
+
+### Before Building — Point at the Real Backend
+
+`desktop/.env.production` currently holds a placeholder:
+
+```
+VITE_API_URL=https://placeholder.fly.dev
+```
+
+Replace it with the real Fly.io backend URL once that's deployed (see
+[Production Deployment — Fly.io](#production-deployment--flyio-after-day-40)):
+
+```
+VITE_API_URL=https://f1-strategy-engine-backend.fly.dev
+```
+
+A release build bundles whatever this file says at build time — there's no
+runtime override once the installer is built, so get this right first.
+
+### Production Build
+
+```bash
+cd desktop
+cargo tauri build
+```
+
+First build: 10-15 minutes (full Rust dependency compile, release
+profile). Subsequent builds are much faster (incremental). This is
+separate from — and slower than — the `cargo tauri dev` 15-20 min *first*
+compile mentioned earlier in this repo's setup notes; that one is a debug
+build, this one is release + bundling.
+
+### Output
+
+```
+desktop/src-tauri/target/release/bundle/
+├── nsis/
+│   └── f1-strategy-engine_x.x.x_x64-setup.exe   ← NSIS installer
+└── msi/
+    └── f1-strategy-engine_x.x.x_x64.msi          ← MSI installer
+```
+
+`x.x.x` is the `version` field in `desktop/src-tauri/tauri.conf.json`
+(currently `0.1.0`). Both installers are produced by default
+(`bundle.targets: "all"` in that same file) — either is fine to ship; NSIS
+is the more common choice for a portfolio project since it doesn't require
+elevated install permissions.
+
+### Distributing via GitHub Releases
+
+1. Upload the `.exe` (or `.msi`) installer as a release asset on the same
+   GitHub Releases page already used for ML model releases.
+2. Include a note in the release description warning about the Windows
+   SmartScreen prompt (see below) so reviewers aren't caught off guard —
+   an unexplained "Windows protected your PC" screen reads as broken
+   software, not an unsigned binary.
+
+### Windows SmartScreen Warning
+
+Expected, not a bug. Windows SmartScreen flags any executable that isn't
+code-signed with a certificate from a recognized CA, regardless of what
+the app actually does.
+
+- **Cause:** the installer has no EV code-signing certificate.
+- **Cost to fix:** $300-500/year for an EV cert — out of scope for a
+  portfolio project.
+- **Workaround for reviewers:** on the SmartScreen dialog, click **"More
+  info"** → **"Run anyway"**.
+- **Alternative:** if asking a reviewer to click through a security
+  warning feels like too much friction, share a screen recording of the
+  app instead of the installer (see [Demo Videos](#demo-videos)) — same
+  content, no SmartScreen prompt to explain.
 
 ---
 

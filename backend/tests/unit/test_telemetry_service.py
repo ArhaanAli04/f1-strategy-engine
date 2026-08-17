@@ -271,6 +271,33 @@ async def test_get_session_gaps_returns_gaps(
 
 
 @pytest.mark.unit
+async def test_get_session_gaps_ranks_lapped_driver_behind_despite_smaller_cumulative_time(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    # Driver A completes the full race distance (58 laps); driver B is
+    # lapped once (57 laps) and so has a *smaller* cumulative_seconds sum
+    # purely from running fewer laps — sorting on cumulative_seconds alone
+    # would incorrectly rank B ahead of A. Confirmed live on 2025 Abu Dhabi
+    # (session b5fafd04-5397-4b51-b732-875ba99d66fd): lapped HAD/LAW/GAS
+    # sorted ahead of unlapped PIA/NOR/LEC before this fix.
+    session_id = uuid.uuid4()
+    driver_a = uuid.uuid4()
+    driver_b = uuid.uuid4()
+    rows = [
+        {"driver_id": driver_b, "lap_number": 57, "position": 1, "cumulative_seconds": 5300.0},
+        {"driver_id": driver_a, "lap_number": 58, "position": 1, "cumulative_seconds": 5400.0},
+    ]
+    mock_db_session.execute.return_value = _rows_result(rows)
+
+    result = await telemetry_service.get_session_gaps(
+        fakeredis, mock_db_session, 2026, 10, session_id
+    )
+
+    gaps_by_driver = {gap["driver_id"]: gap for gap in result["gaps"]}
+    assert gaps_by_driver[str(driver_a)]["position"] < gaps_by_driver[str(driver_b)]["position"]
+
+
+@pytest.mark.unit
 async def test_session_scoped_wrappers_resolve_season_round_then_delegate(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
@@ -322,3 +349,95 @@ async def test_session_scoped_wrappers_resolve_season_round_then_delegate(
     )
     gaps_mock.assert_awaited_once_with(fakeredis, mock_db_session, season, round_number, session_id)
     assert gaps_result.session_id == session_id
+
+
+@pytest.mark.unit
+async def test_get_driver_positions_returns_all_cached_cars_for_that_weekend(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    await cache_service.cache_set(
+        fakeredis, "f1:2026:10:car:44:position", {"x": 1.0, "y": 2.0, "z": 3.0, "timestamp": "t1"}
+    )
+    await cache_service.cache_set(
+        fakeredis, "f1:2026:10:car:1:position", {"x": 4.0, "y": 5.0, "z": None, "timestamp": "t2"}
+    )
+    # Different round — must not be picked up.
+    await cache_service.cache_set(
+        fakeredis, "f1:2026:11:car:1:position", {"x": 9.0, "y": 9.0, "z": None, "timestamp": "t3"}
+    )
+
+    result = await telemetry_service.get_driver_positions(fakeredis, 2026, 10)
+
+    by_number = {entry["driver_number"]: entry for entry in result}
+    assert set(by_number) == {"44", "1"}
+    assert by_number["44"] == {
+        "driver_number": "44",
+        "x": 1.0,
+        "y": 2.0,
+        "z": 3.0,
+        "timestamp": "t1",
+    }
+    assert by_number["1"]["z"] is None
+
+
+@pytest.mark.unit
+async def test_get_driver_positions_returns_empty_list_when_session_not_live(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    result = await telemetry_service.get_driver_positions(fakeredis, 2026, 10)
+
+    assert result == []
+
+
+@pytest.mark.unit
+async def test_get_driver_positions_for_session_resolves_season_round_then_delegates(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = uuid.uuid4()
+    season, round_number = 2026, 10
+
+    async def _fake_resolve(db: Any, sid: uuid.UUID) -> tuple[int, int]:
+        assert sid == session_id
+        return season, round_number
+
+    monkeypatch.setattr(telemetry_service, "resolve_season_round", _fake_resolve)
+
+    positions_mock = AsyncMock(
+        return_value=[{"driver_number": "44", "x": 1.0, "y": 2.0, "z": None, "timestamp": None}]
+    )
+    monkeypatch.setattr(telemetry_service, "get_driver_positions", positions_mock)
+
+    result = await telemetry_service.get_driver_positions_for_session(
+        fakeredis, mock_db_session, session_id
+    )
+
+    positions_mock.assert_awaited_once_with(fakeredis, season, round_number)
+    assert len(result) == 1
+    assert result[0].driver_number == "44"
+
+
+@pytest.mark.unit
+async def test_get_driver_car_numbers_returns_all_cached_mappings_for_that_weekend(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    driver_a, driver_b = uuid.uuid4(), uuid.uuid4()
+    await cache_service.cache_set(fakeredis, f"f1:2026:10:driver:{driver_a}:car_number", 44)
+    await cache_service.cache_set(fakeredis, f"f1:2026:10:driver:{driver_b}:car_number", 1)
+    # Different round — must not be picked up.
+    await cache_service.cache_set(fakeredis, f"f1:2026:11:driver:{driver_a}:car_number", 99)
+
+    result = await telemetry_service.get_driver_car_numbers(fakeredis, 2026, 10)
+
+    by_driver = {entry["driver_id"]: entry["car_number"] for entry in result}
+    assert by_driver == {str(driver_a): "44", str(driver_b): "1"}
+
+
+@pytest.mark.unit
+async def test_get_driver_car_numbers_returns_empty_list_when_session_not_live(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    result = await telemetry_service.get_driver_car_numbers(fakeredis, 2026, 10)
+
+    assert result == []

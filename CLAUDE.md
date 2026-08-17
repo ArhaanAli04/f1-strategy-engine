@@ -187,6 +187,25 @@ readiness until the app is actually up — the standard Kubernetes pattern
 for slow-starting containers, rather than inflating livenessProbe's own
 initialDelaySeconds.
 
+**Monte Carlo simulator fixes (feature/monte-carlo-fix):**
+1. cumulative_race_time_seconds anchored to current_lap 
+   for all drivers (not each driver's own latest DB lap)
+2. starting_position anchored to current_lap + scoped 
+   to session_id (was doing cross-session join)
+3. PlanExplanation added to SimulatedRaceOutcome — 
+   drivers_overtaken, pit_cost_seconds, remaining_laps, 
+   fresh_tyre_gain_per_lap, total_recoverable_seconds
+Validated: STR lap 55 → -8/-9, NOR → -1, OCO → -10"
+
+**Driver style metrics fix (feature/style-radar-improvements):**
+sector_time_variance and lap_time_consistency were previously computed
+across all circuits and session types in a season, conflating
+cross-circuit pace differences with driver skill. Fixed in driver_style.py
+to use per-circuit z-scoring against peers (race sessions only,
+is_valid=True), matching tyre_management_index's existing approach. All 4
+style metrics are now z-scores on a comparable scale (~-2 to +2). Frontend
+normalization bounds updated in StyleRadar.tsx (both web and desktop).
+
 **Docker Desktop Kubernetes shares its image store directly — no `kind
 load` needed:**
 Despite Docker Desktop's Kubernetes node (`desktop-control-plane`) running
@@ -400,21 +419,23 @@ Current endpoints overview:
 Update this section at the start of each day's session:
 
 ```
-Phase:    5
-Day:      24
-Status:   All smoke tests passed against local K8s + Supabase + 
-          Upstash. 4 production bugs found and fixed: SENTRY_DSN 
-          not wired (docker-compose + Helm), create-secrets.sh 
-          wrong URL source (localhost vs Supabase/Upstash), asyncpg 
-          prepared-statement collision on PgBouncer (statement_cache_size=0), 
-          Celery rediss:// crash (ssl_cert_reqs). Monitoring verified: 
-          Grafana, Prometheus, Sentry (3s delivery), Alertmanager → Slack. 
-          train-models.yml weekly cron enabled. cd.yml Job 5 updated to 
-          Fly.io plan. runbook.md corrected for real deployment target. 
-          Docker image tag caching behavior corrected in CLAUDE.md.
-Next:     Day 25 — React web app setup
-Blockers: Cloud deployment target undecided (Render/GKE) — 
-          cd.yml Jobs 3-5 remain placeholders
+Phase:    8
+Day:      32
+Status:   Mobile app complete. Driver Detail screen 
+          (team color header, segmented Overview/Style/Sectors, 
+          hand-rolled SVG radar, victory-native BarGroup sectors, 
+          Ergast season stats). Simulator screen (4-step flow 
+          matching web/desktop, PlanExplanationCard, victory-native 
+          horizontal bar). Offline support (PersistQueryClientProvider, 
+          AsyncStorage cache for 3 query families, OfflineBanner on 
+          all screens, WebSocket gated on NetInfo). Team logos ported 
+          to mobile (static require map). mobile/README.md created 
+          (setup guide for iOS/Android/emulator/production). 
+          2700 modules bundling clean.
+Next:     Day 33 — Frontend build pipeline & web deployment (Vercel/Netlify)
+Blockers: No physical device for testing — Android emulator 
+          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — 
+          cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
 ```
 
 ---
@@ -566,6 +587,30 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 These are not schema changes but known integration gaps to fix on future days.
 
+- **extract_circuit_outlines.py (Checkpoint C) must be run manually against
+  Supabase after Checkpoint C is complete** — same pattern as seed_circuits.py
+  on Day 23. Set DATABASE_URL to SUPABASE_DATABASE_URL temporarily, run the
+  script, reset back.
+
+- **Circuit map sector boundaries (S1/S2/S3):** requires timestamp-correlation
+  between Lap.Sector1SessionTime/Sector2SessionTime and position telemetry
+  get_pos_data() SessionTime column. ~50ms accuracy (meters at racing speed).
+  Needs new logic in extract_circuit_outlines.py + edge case handling for
+  missing sector timestamps. Defer to after circuit map feature is complete.
+
+- **retrain_incremental.py FastF1 403→mirror fallback for 2026 data:**
+  FastF1 temporarily gets a 403 from livetiming.formula1.com,
+  incorrectly falls back to livetiming-mirror.fastf1.dev which
+  has no 2026 data (mirror only patches corrupted 2021-2022 sessions),
+  resulting in SessionNotAvailableError for all 2026 rounds.
+  Current fix: rounds are skipped gracefully. Real fix needed:
+  (1) call fastf1.Cache.clear_cache() before fetching 2026 rounds,
+  (2) add retry loop (max 3 attempts, 30s delay) around load_session()
+  for current season data specifically,
+  (3) add FASTF1_CACHE_DIR setup step in train-models.yml.
+  Non-blocking — pipeline trains on 2018-2025 base corpus correctly.
+  Fix before next season when 2026 data becomes critical for MAE improvement.
+
 - prometheus.yml Basic Auth credentials are hardcoded as dev defaults 
 (metrics/metrics-dev). Fix on Day 19 when setting up GitHub Secrets — 
 use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD} 
@@ -694,6 +739,20 @@ Slack webhook handling.
   cold path, starving asyncio ping/pong. Investigate after DB pool fix and
   K8s deployment — may resolve naturally with multiple backend pods (each
   with its own event loop, less contention per pod).
+
+- **victory-native + @shopify/react-native-skia not installed on mobile —
+  install at the START of Day 32 before building Driver Detail charts.**
+  Deferred during Day 31's mobile build sprint: no screen in Checkpoints
+  1-6's scope (Home/Live/Strategy/Drivers/Alerts/Settings/Driver Detail
+  stub) actually renders a chart. Modern `victory-native` (the Skia-based
+  rewrite, confirmed v41.26.0 via npm registry) hard-requires
+  `@shopify/react-native-skia >=1.2.3 <3.0.0` as a peer dependency — it
+  won't import without it, which wasn't in the original Day 31 dependency
+  list. Install both together via `npx expo install
+  @shopify/react-native-skia && npm install victory-native` before
+  porting `web/src/components/driver/{LapTimesChart,SectorComparison,
+  StyleRadar}.tsx` onto `app/driver/[id].tsx` (currently a minimal
+  identity+snapshot stub, see `mobile/src/README.md`).
 
 ### Dependency version drift — prometheus-fastapi-instrumentator
 
@@ -1131,3 +1190,74 @@ connect to the locally hosted Docker stack during development and demos.
 
 No cloud VM deployment during the build — see DEPLOYMENT.md for full 
 strategy including ngrok demo workflow and future Render deployment plan.
+
+## Desktop Sync Protocol
+
+`desktop/` (Tauri v2 + React, Day 30) has no monorepo/symlink sharing with
+`web/` — symlinks are unreliable on Windows. Several `desktop/src/` files
+are manual copies of `web/src/` files and must be updated by hand whenever
+the `web/` source changes. Full file-by-file list, including which files
+are verbatim copies vs. copied-and-adapted vs. hand-written-but-logic-
+mirrored: **`desktop/src/README.md`**.
+
+Summary of what's copied: `types/*.ts`, `api/*.ts`, `utils/{constants,
+errors, formatters, drivers}.ts`, `stores/authStore.ts`, `lib/utils.ts`,
+`components/ui/*.tsx` (shadcn), `components/shared/ErrorBoundary.tsx`,
+`index.css`, `tailwind.config.js`, `postcss.config.js`, the self-hosted
+Titillium Web font files, and `favicon.svg`. `pages/SimulatorPage.tsx` is
+copied-and-adapted (live-mode detection removed, session/driver source
+switched to `raceContextStore`, desktop-only CSV export button added) —
+diff against web rather than blind-overwriting on sync. Hooks are
+deliberately **not** copied (window-management/native-API concerns differ
+per platform) — `desktop/src/hooks/{useDrivers,useSessionGaps,
+useDriverLaps,useStrategy,useAuth}.ts` are hand-written re-implementations
+of the same react-query logic and can drift independently; check them too
+when the corresponding web hook changes.
+
+## Mobile Sync Protocol
+
+`mobile/` (Expo SDK 57 + Expo Router + NativeWind v4, Day 31) has no
+monorepo/symlink sharing with `web/` — same reasoning as desktop (symlinks
+unreliable on Windows). Full file-by-file sync table — verbatim copies vs.
+copied-and-adapted vs. hand-written-but-logic-mirrored vs. hand-ported
+components — lives in **`mobile/src/README.md`**, same convention as
+`desktop/src/README.md`.
+
+Summary of what's copied verbatim: `types/*.ts` (10 files), 8 of 9
+`api/*.ts` files (all except `client.ts`), `utils/{errors,formatters,
+drivers}.ts`, `stores/{sessionStore,alertStore}.ts`. Copied-and-adapted:
+`api/client.ts` (SecureStore-backed token reads via the store, not the
+interceptor itself), `stores/authStore.ts` (SecureStore `StateStorage`
+persist adapter, token-slice-only — `user` is never persisted, ~2048-byte
+iOS SecureStore item limit), `utils/constants.ts` (Expo Router paths for
+`ROUTES`, `EXPO_PUBLIC_*` env vars instead of Vite's `import.meta.env`).
+
+Hooks are **not** copied (hand-written per-platform re-implementations,
+same as desktop) — 17 hooks total, mirroring web's react-query logic
+1:1 where web's own hook has no browser API involved. One is a genuine
+rewrite, not a mirror: `hooks/useWebSocket.ts` wraps React Native's
+built-in `WebSocket` (hand-rolled fixed-delay reconnect) instead of the
+browser-only `reconnecting-websocket` package web uses.
+
+Components are hand-built or ported (not copied) — 15 components across
+`shared/`, `circuit/`, `telemetry/`, `strategy/`, `dashboard/`,
+`settings/`. Notably: `CircuitMapPanel.tsx` + `TelemetryGauge.tsx` +
+`CircuitOutlineSvg.tsx` are full react-native-svg ports of the web
+originals (same geometry/math), with live dot movement via a new
+`AnimatedDriverDot.tsx` (Reanimated `useAnimatedProps`) replacing web's
+CSS `transform` transition. `CircuitMapPanel` sits at the top of the
+**Live** tab, not Home — web's Home-equivalent only ever got the static
+outline (`UpcomingRaceCard`), the full live panel belongs where web
+mounts it (`RacePage`). Several simplifications are disclosed inline in
+`mobile/src/README.md` (`TeamLogo` swatch-only, no Ergast-standings sort
+on the Drivers tab, no FLIP row-reorder animation, Driver Detail is a
+minimal stub, `TelemetryGauge`'s arcs snap instead of sweep) — check that
+file before assuming full parity with any given web component.
+
+Push notifications (`src/notifications/notificationHandler.ts`,
+`src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`)
+have no web equivalent — mobile-only capability. Written and verified via
+`tsc`/Metro export only; untestable without a physical device + dev
+build (no Apple Developer account or Android emulator set up this
+sprint — see `mobile/src/README.md`'s Testing Options, including a full
+Android-emulator setup procedure verified against Expo's current docs).

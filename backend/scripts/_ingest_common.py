@@ -2,7 +2,8 @@
 
 import logging
 import uuid
-from datetime import date
+from datetime import UTC, date, datetime
+from typing import cast
 
 import fastf1
 import pandas as pd
@@ -76,7 +77,12 @@ async def get_or_create_circuit(db: AsyncSession, location: str) -> Circuit:
 
 
 async def get_or_create_race(
-    db: AsyncSession, season: int, round_number: int, circuit_id: uuid.UUID, race_date: date
+    db: AsyncSession,
+    season: int,
+    round_number: int,
+    circuit_id: uuid.UUID,
+    race_date: date,
+    event_name: str | None = None,
 ) -> Race:
     result = await db.execute(
         select(Race).where(Race.season == season, Race.round_number == round_number)
@@ -89,15 +95,62 @@ async def get_or_create_race(
             round_number=round_number,
             circuit_id=circuit_id,
             race_date=race_date,
-            status="completed",
+            status="completed" if race_date <= date.today() else "scheduled",
+            event_name=event_name,
         )
         db.add(race)
         await db.flush()
     return race
 
 
+# Maps this project's session_type codes to FastF1's event-schedule session
+# names (schedule.SessionN / SessionNDateUtc columns, N=1..5). Matched by
+# name rather than fixed Session{N} position: a sprint weekend renumbers
+# Practice 2/3 into "Sprint Qualifying"/"Sprint" at those same slots, so a
+# position-based lookup would silently attach the wrong session's time to
+# FP2/FP3 instead of correctly finding no match.
+_SESSION_TYPE_TO_EVENT_NAME: dict[str, str] = {
+    "FP1": "Practice 1",
+    "FP2": "Practice 2",
+    "FP3": "Practice 3",
+    "Q": "Qualifying",
+    "R": "Race",
+}
+
+
+def resolve_scheduled_start(event: pd.Series, session_type: str) -> datetime | None:
+    """Resolve a session's real start instant from its parent event's schedule row.
+
+    `event` is `fastf1_session.event` — the same get_event_schedule(season) row
+    both ingest scripts already read EventDate/Location from, not a second
+    API/cache call.
+
+    Args:
+        event: FastF1 event-schedule row for this round (fastf1_session.event).
+        session_type: FastF1 session type code (R, Q, FP1, FP2, FP3).
+    Returns:
+        The session's UTC start datetime, or None if this event doesn't run a
+        session under the expected name (e.g. FP2/FP3 on a sprint weekend) or
+        the schedule has no time for it.
+    """
+    expected_name = _SESSION_TYPE_TO_EVENT_NAME[session_type]
+    for i in range(1, 6):
+        if event.get(f"Session{i}") != expected_name:
+            continue
+        raw = event.get(f"Session{i}DateUtc")
+        if raw is None or pd.isna(raw):
+            return None
+        parsed = cast(datetime, raw.to_pydatetime() if hasattr(raw, "to_pydatetime") else raw)
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+    return None
+
+
 async def get_or_create_session(
-    db: AsyncSession, race_id: uuid.UUID, session_type: str, session_date: date
+    db: AsyncSession,
+    race_id: uuid.UUID,
+    session_type: str,
+    session_date: date,
+    scheduled_start: datetime | None = None,
 ) -> SessionModel:
     result = await db.execute(
         select(SessionModel).where(
@@ -111,6 +164,7 @@ async def get_or_create_session(
             race_id=race_id,
             session_type=session_type,
             session_date=session_date,
+            scheduled_start=scheduled_start,
         )
         db.add(session_row)
         await db.flush()

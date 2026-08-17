@@ -32,12 +32,22 @@ _N_LAPS = 12
 
 
 def _synthetic_laps_and_stints(n_drivers: int = _N_DRIVERS, n_laps: int = _N_LAPS) -> Any:
+    """Two circuits, drivers alternating between them so compute_sector_time_variance/
+    compute_lap_time_consistency's per-circuit z-scoring has a real peer group
+    (>=2 drivers) at each circuit — a single driver per circuit would leave every
+    z-score undefined (zero-variance peer group -> NaN -> dropped by
+    build_driver_style_features's dropna, collapsing the whole fixture to 0 rows).
+    All laps are session_type "R" so the race-only filter in those two functions
+    doesn't drop anything here.
+    """
     rng = np.random.default_rng(7)
     driver_ids = [uuid.uuid4() for _ in range(n_drivers)]
+    circuit_ids = [uuid.uuid4(), uuid.uuid4()]
     lap_rows = []
     stint_rows = []
     for i, driver_id in enumerate(driver_ids):
         session_id = uuid.uuid4()
+        circuit_id = circuit_ids[i % len(circuit_ids)]
         noise_scale = 0.05 + i * 0.02
         base_s1, base_s2, base_s3 = 28.0 + i * 0.3, 34.0 + i * 0.2, 27.0 + i * 0.25
         for lap_number in range(1, n_laps + 1):
@@ -54,6 +64,8 @@ def _synthetic_laps_and_stints(n_drivers: int = _N_DRIVERS, n_laps: int = _N_LAP
                     "sector3_seconds": s3,
                     "lap_time_seconds": s1 + s2 + s3,
                     "is_valid": True,
+                    "circuit_id": circuit_id,
+                    "session_type": "R",
                     "season": _SEASON,
                 }
             )
@@ -117,6 +129,8 @@ def test_missing_season_data_raises_error() -> None:
             "sector3_seconds",
             "lap_time_seconds",
             "is_valid",
+            "circuit_id",
+            "session_type",
             "season",
         ]
     )

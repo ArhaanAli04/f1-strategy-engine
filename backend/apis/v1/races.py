@@ -16,7 +16,12 @@ from backend.core.database import get_db
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.schemas.common import PaginatedResponse
-from backend.schemas.race_schema import RaceListResponse, RaceResponse, SessionResponse
+from backend.schemas.race_schema import (
+    RaceListResponse,
+    RaceResponse,
+    SessionResponse,
+    UpcomingRaceResponse,
+)
 from backend.services import race_service
 
 router = APIRouter(prefix="/races", tags=["races"])
@@ -30,6 +35,18 @@ async def get_current_race(
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
 ) -> RaceResponse:
     return await race_service.get_current_race(redis_client, db)
+
+
+# Registered ahead of /{race_id} (same reason as /current above) so a literal
+# "upcoming" segment never gets swallowed by the UUID path param.
+@router.get("/upcoming", response_model=UpcomingRaceResponse)
+@limiter.limit(rate_limit_value)
+async def get_upcoming_race(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+) -> UpcomingRaceResponse:
+    return await race_service.get_upcoming_race(redis_client, db)
 
 
 @router.get("", response_model=PaginatedResponse[RaceListResponse])

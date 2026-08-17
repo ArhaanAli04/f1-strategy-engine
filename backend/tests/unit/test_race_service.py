@@ -389,3 +389,160 @@ async def test_get_current_race_lock_release_swallows_lock_not_owned_error(
     result = await race_service.get_current_race(fakeredis, mock_db_session)
 
     assert result == sentinel
+
+
+def _fake_upcoming_session(session_type: str, scheduled_start: datetime | None) -> Any:
+    class _FakeSession:
+        pass
+
+    session = _FakeSession()
+    session.session_type = session_type  # type: ignore[attr-defined]
+    session.scheduled_start = scheduled_start  # type: ignore[attr-defined]
+    return session
+
+
+@pytest.mark.unit
+def test_race_session_scheduled_start_finds_matching_type() -> None:
+    race = _fake_race(uuid.uuid4())
+    race_start = datetime(2026, 8, 23, 13, 0, tzinfo=UTC)
+    race.sessions = [
+        _fake_upcoming_session("FP1", datetime(2026, 8, 21, 10, 30, tzinfo=UTC)),
+        _fake_upcoming_session("R", race_start),
+    ]
+
+    assert race_service._race_session_scheduled_start(race, "R") == race_start
+    assert race_service._race_session_scheduled_start(race, "Q") is None
+
+
+@pytest.mark.unit
+def test_to_upcoming_race_response_maps_race_fields() -> None:
+    race = _fake_race(uuid.uuid4())
+    race.event_name = "Dutch Grand Prix"
+    race.season = 2026
+    race.round_number = 12
+    race_start = datetime(2026, 8, 23, 13, 0, tzinfo=UTC)
+    race.sessions = [_fake_upcoming_session("R", race_start)]
+
+    data = race_service._to_upcoming_race_response(race)
+
+    assert data["race_name"] == "Dutch Grand Prix"
+    assert data["round_number"] == 12
+    assert data["circuit_id"] == str(race.circuit_id)
+    assert data["scheduled_start"] == "2026-08-23T13:00:00Z"
+
+
+@pytest.mark.unit
+async def test_fetch_upcoming_race_from_db_returns_race_when_found(
+    mock_db_session: AsyncMock,
+) -> None:
+    race = _fake_race(uuid.uuid4())
+    mock_db_session.execute.return_value = _scalar_one_or_none_result(race)
+
+    result = await race_service._fetch_upcoming_race_from_db(
+        mock_db_session, 2026, date(2026, 8, 1)
+    )
+
+    assert result is race
+
+
+@pytest.mark.unit
+async def test_fetch_upcoming_race_from_db_returns_none_when_nothing_found(
+    mock_db_session: AsyncMock,
+) -> None:
+    mock_db_session.execute.return_value = _scalar_one_or_none_result(None)
+
+    result = await race_service._fetch_upcoming_race_from_db(
+        mock_db_session, 2026, date(2026, 8, 1)
+    )
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_fetch_upcoming_race_from_fastf1_raises_when_schedule_has_no_future_events(
+    mock_db_session: AsyncMock,
+) -> None:
+    past_event = pd.DataFrame(
+        {
+            "RoundNumber": [1],
+            "EventName": ["Old Grand Prix"],
+            "Location": ["Somewhere"],
+            "EventDate": [pd.Timestamp("2026-01-01", tz="UTC")],
+        }
+    )
+
+    with patch("fastf1.get_event_schedule", return_value=past_event):
+        with pytest.raises(NotFoundError):
+            await race_service._fetch_upcoming_race_from_fastf1(
+                mock_db_session, 2026, date(2026, 8, 1)
+            )
+
+
+@pytest.mark.unit
+async def test_fetch_upcoming_race_from_fastf1_raises_when_circuit_unresolvable(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.scripts._ingest_common import RoundSkippedError
+
+    future_event = pd.DataFrame(
+        {
+            "RoundNumber": [15],
+            "EventName": ["Made Up Grand Prix"],
+            "Location": ["Nowhereville"],
+            "EventDate": [pd.Timestamp("2026-09-01", tz="UTC")],
+        }
+    )
+    circuit_mock = AsyncMock(side_effect=RoundSkippedError("no circuit mapping"))
+    monkeypatch.setattr(race_service, "get_or_create_circuit", circuit_mock)
+
+    with patch("fastf1.get_event_schedule", return_value=future_event):
+        with pytest.raises(NotFoundError):
+            await race_service._fetch_upcoming_race_from_fastf1(
+                mock_db_session, 2026, date(2026, 8, 1)
+            )
+
+
+@pytest.mark.unit
+async def test_get_upcoming_race_returns_cached_race(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    cached_race = {
+        "id": str(uuid.uuid4()),
+        "season": 2026,
+        "round_number": 12,
+        "race_name": "Dutch Grand Prix",
+        "circuit_id": str(uuid.uuid4()),
+        "race_date": "2026-08-23",
+        "scheduled_start": "2026-08-23T13:00:00Z",
+    }
+    key = race_service._key_upcoming_race()
+    await cache_service.cache_set(fakeredis, key, cached_race, ttl=300)
+
+    result = await race_service.get_upcoming_race(fakeredis, mock_db_session)
+
+    assert result.round_number == 12
+    mock_db_session.execute.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_get_upcoming_race_caches_negative_result(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_fetch_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(race_service, "_fetch_upcoming_race_from_db", db_fetch_mock)
+    fastf1_fetch_mock = AsyncMock(side_effect=NotFoundError("no upcoming race for season 2026"))
+    monkeypatch.setattr(race_service, "_fetch_upcoming_race_from_fastf1", fastf1_fetch_mock)
+
+    with pytest.raises(NotFoundError):
+        await race_service.get_upcoming_race(fakeredis, mock_db_session)
+    assert fastf1_fetch_mock.call_count == 1
+
+    with pytest.raises(NotFoundError):
+        await race_service.get_upcoming_race(fakeredis, mock_db_session)
+    assert fastf1_fetch_mock.call_count == 1  # second call hit the cached negative result
+
+    key = race_service._key_upcoming_race()
+    ttl = await fakeredis.ttl(key)
+    assert 0 < ttl <= race_service.UPCOMING_RACE_NOT_FOUND_TTL_SECONDS

@@ -125,6 +125,13 @@ async def _fit_population(db: AsyncSession, season: int) -> list[dict[str, Any]]
     Returns:
         One JSON-serialisable dict per driver-season assignment.
     """
+    # circuit_id + session_type: needed by driver_style.py's
+    # compute_sector_time_variance/compute_lap_time_consistency to z-score each
+    # driver's race-session std against same-circuit peers, rather than pooling
+    # every circuit visited that season into one std() (see driver_style.py's
+    # module docstring). Not filtered to session_type == "R" here —
+    # compute_stint_length_tendency needs practice/quali laps too, to resolve
+    # non-race sessions' last lap number for stints with a null end_lap.
     laps_query = (
         select(
             LapData.driver_id,
@@ -135,6 +142,8 @@ async def _fit_population(db: AsyncSession, season: int) -> list[dict[str, Any]]
             LapData.sector3_seconds,
             LapData.lap_time_seconds,
             LapData.is_valid,
+            Race.circuit_id,
+            SessionModel.session_type,
         )
         .join(SessionModel, LapData.session_id == SessionModel.id)
         .join(Race, SessionModel.race_id == Race.id)
@@ -152,6 +161,8 @@ async def _fit_population(db: AsyncSession, season: int) -> list[dict[str, Any]]
             "sector3_seconds",
             "lap_time_seconds",
             "is_valid",
+            "circuit_id",
+            "session_type",
         ],
     )
     laps_df["season"] = season

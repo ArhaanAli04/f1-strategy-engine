@@ -24,7 +24,7 @@ raw) vs. get_pit_window_with_explanation (uncached wrapper).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -37,7 +37,25 @@ from backend.core.exceptions import NotFoundError
 from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.schemas.common import PaginatedResponse
-from backend.schemas.race_schema import RaceListResponse, RaceResponse, SessionResponse
+from backend.schemas.race_schema import (
+    RaceListResponse,
+    RaceResponse,
+    SessionResponse,
+    UpcomingRaceResponse,
+)
+
+# get_or_create_circuit/get_or_create_session/resolve_scheduled_start are pure
+# DB-upsert/data-mapping helpers shared with the ingest scripts (see
+# scripts/_ingest_common.py's own docstring) — not a services-importing-
+# services violation (CLAUDE.md's rule targets cross-service business-logic
+# coupling), just reuse of the same circuit-name mapping and session-time
+# resolution get_upcoming_race's FastF1-schedule fallback below needs.
+from backend.scripts._ingest_common import (
+    RoundSkippedError,
+    get_or_create_circuit,
+    get_or_create_session,
+    resolve_scheduled_start,
+)
 from backend.services.cache_service import cache_get, cache_lock, cache_set, cacheable
 
 DEFAULT_PAGE_SIZE = 20
@@ -95,7 +113,7 @@ async def _fetch_races(
         select(Race)
         .options(selectinload(Race.circuit))
         .where(*filters)
-        .order_by(Race.season.desc(), Race.round_number)
+        .order_by(Race.race_date.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
@@ -398,4 +416,209 @@ async def get_current_race(
         except LockNotOwnedError:
             # Our own timeout already expired and another caller took over
             # ownership — nothing left for us to release.
+            pass
+
+
+# --- Upcoming race (self-updating: DB first, FastF1-schedule fallback + cache) ---
+
+# Same TTL bucket as CURRENT_RACE_TTL_SECONDS/CURRENT_RACE_NOT_FOUND_TTL_SECONDS
+# above and for the same reason — the FastF1-schedule fallback path is an
+# external call every cold miss would otherwise pay.
+UPCOMING_RACE_TTL_SECONDS = 300
+UPCOMING_RACE_NOT_FOUND_TTL_SECONDS = 60
+
+
+def _key_upcoming_race() -> str:
+    return f"f1:races:upcoming:{datetime.now(UTC).year}"
+
+
+async def _fetch_upcoming_race_from_db(db: AsyncSession, season: int, today: date) -> Race | None:
+    query = (
+        select(Race)
+        .options(selectinload(Race.circuit), selectinload(Race.sessions))
+        .where(Race.season == season, Race.race_date >= today)
+        .order_by(Race.race_date.asc())
+        .limit(1)
+    )
+    return (await db.execute(query)).scalar_one_or_none()
+
+
+def _race_session_scheduled_start(race: Race, session_type: str) -> datetime | None:
+    for session in race.sessions:
+        if session.session_type == session_type:
+            return session.scheduled_start
+    return None
+
+
+def _to_upcoming_race_response(race: Race) -> dict[str, Any]:
+    return UpcomingRaceResponse(
+        id=race.id,
+        season=race.season,
+        round_number=race.round_number,
+        race_name=race.event_name,
+        circuit_id=race.circuit_id,
+        race_date=race.race_date,
+        scheduled_start=_race_session_scheduled_start(race, "R"),
+    ).model_dump(mode="json")
+
+
+async def _fetch_upcoming_race_from_fastf1(
+    db: AsyncSession, season: int, today: date
+) -> dict[str, Any]:
+    """Self-updating fallback: pull the season schedule directly from FastF1 and
+    persist it, so a brand-new season needs no manual seed script before this
+    endpoint works. scripts/seed_race_schedule.py (optional, manual) can still
+    pre-populate a season's schedule ahead of time — see CLAUDE.md.
+
+    Args:
+        db: Async DB session.
+        season, today: Same as get_upcoming_race — passed through rather than
+            recomputed, so a single "now" is used across the whole lookup.
+    Returns:
+        JSON-serialisable dict matching UpcomingRaceResponse.
+    Raises:
+        NotFoundError: FastF1 has no remaining events for this season, or the
+            resolved event's circuit can't be resolved (unmapped/unseeded —
+            same "don't paper over a real data gap" precedent as
+            _fetch_current_race).
+    """
+    from fastf1 import get_event_schedule
+
+    schedule = get_event_schedule(season, include_testing=False)
+    upcoming = schedule[schedule["EventDate"].dt.date >= today].sort_values("EventDate")
+    if upcoming.empty:
+        raise NotFoundError(f"No upcoming race found for season {season}")
+    event = upcoming.iloc[0]
+
+    try:
+        circuit = await get_or_create_circuit(db, event["Location"])
+    except RoundSkippedError as exc:
+        raise NotFoundError(
+            f"Season {season} round {int(event['RoundNumber'])} resolved from FastF1's "
+            f"schedule but its circuit could not be resolved: {exc}"
+        ) from exc
+
+    race = Race(
+        id=uuid.uuid4(),
+        season=season,
+        round_number=int(event["RoundNumber"]),
+        circuit_id=circuit.id,
+        race_date=event["EventDate"].date(),
+        status="scheduled",
+        event_name=event["EventName"],
+    )
+    db.add(race)
+    await db.flush()
+
+    for session_type in ("FP1", "FP2", "FP3", "Q", "R"):
+        await get_or_create_session(
+            db,
+            race_id=race.id,
+            session_type=session_type,
+            session_date=event["EventDate"].date(),
+            scheduled_start=resolve_scheduled_start(event, session_type),
+        )
+    await db.commit()
+
+    await db.refresh(race, attribute_names=["circuit", "sessions"])
+    return _to_upcoming_race_response(race)
+
+
+async def _read_upcoming_race_cache(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    key: str,
+) -> UpcomingRaceResponse | None:
+    """Read and interpret a cached get_upcoming_race outcome, if present.
+
+    Same two-outcome cache shape as _read_current_race_cache — see that
+    function's docstring.
+    """
+    cached = await cache_get(client, key)
+    if cached is None:
+        return None
+    if cached.get(_NOT_FOUND_SENTINEL_FIELD):
+        raise NotFoundError(cached["reason"])
+    return UpcomingRaceResponse.model_validate(cached)
+
+
+async def _fetch_and_cache_upcoming_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    key: str,
+) -> UpcomingRaceResponse:
+    today = datetime.now(UTC).date()
+    season = today.year
+    try:
+        race = await _fetch_upcoming_race_from_db(db, season, today)
+        data = (
+            _to_upcoming_race_response(race)
+            if race is not None
+            else await _fetch_upcoming_race_from_fastf1(db, season, today)
+        )
+    except NotFoundError as exc:
+        await cache_set(
+            client,
+            key,
+            {_NOT_FOUND_SENTINEL_FIELD: True, "reason": str(exc)},
+            UPCOMING_RACE_NOT_FOUND_TTL_SECONDS,
+        )
+        raise
+
+    await cache_set(client, key, data, UPCOMING_RACE_TTL_SECONDS)
+    return UpcomingRaceResponse.model_validate(data)
+
+
+async def get_upcoming_race(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> UpcomingRaceResponse:
+    """Resolve the next race after today in the current year — DB first, FastF1-schedule fallback.
+
+    Checks the races table for the earliest race_date >= today in
+    datetime.now(UTC).year first (fast, no external call). If nothing is
+    ingested yet for the current year (e.g. a brand-new season before any
+    ingestion has run), falls back to FastF1's own event schedule
+    (fastf1.get_event_schedule) and persists what it finds — circuit,
+    race, and all 5 sessions — so this is self-updating season over season
+    with no manual seed script required (scripts/seed_race_schedule.py
+    exists only as an optional, manual pre-population convenience).
+
+    Single-flight (same rationale as get_current_race): the FastF1-schedule
+    fallback is an external call every cold miss would otherwise pay, and a
+    burst of concurrent requests hitting a cold cache key would otherwise
+    each try to insert the same race independently.
+
+    Args:
+        client: Redis client (cache-aside).
+        db: Async DB session.
+    Returns:
+        The next race after today in the current year.
+    Raises:
+        NotFoundError: No race found for the current year in the DB, and
+            FastF1's schedule has no remaining events for the current year
+            either (season concluded), or the resolved event's circuit
+            can't be resolved.
+    """
+    key = _key_upcoming_race()
+    cached = await _read_upcoming_race_cache(client, key)
+    if cached is not None:
+        return cached
+
+    lock = cache_lock(client, key)
+    acquired = await lock.acquire()
+    if not acquired:
+        cached = await _read_upcoming_race_cache(client, key)
+        if cached is not None:
+            return cached
+        return await _fetch_and_cache_upcoming_race(client, db, key)
+
+    try:
+        cached = await _read_upcoming_race_cache(client, key)
+        if cached is not None:
+            return cached
+        return await _fetch_and_cache_upcoming_race(client, db, key)
+    finally:
+        try:
+            await lock.release()
+        except LockNotOwnedError:
             pass

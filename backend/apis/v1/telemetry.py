@@ -31,6 +31,8 @@ from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import decode_token
 from backend.schemas.telemetry_schema import (
+    DriverCarNumber,
+    DriverPosition,
     LapCompletedEvent,
     LapHistoryBucket,
     LiveTelemetryResponse,
@@ -103,6 +105,28 @@ async def get_session_gaps(
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
 ) -> SessionGapsResponse:
     return await telemetry_service.get_session_gaps_for_session(redis_client, db, session_id)
+
+
+@router.get("/{session_id}/positions", response_model=list[DriverPosition])
+@limiter.limit(rate_limit_value)
+async def get_session_positions(
+    request: Request,
+    session_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+) -> list[DriverPosition]:
+    return await telemetry_service.get_driver_positions_for_session(redis_client, db, session_id)
+
+
+@router.get("/{session_id}/car-numbers", response_model=list[DriverCarNumber])
+@limiter.limit(rate_limit_value)
+async def get_session_car_numbers(
+    request: Request,
+    session_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+) -> list[DriverCarNumber]:
+    return await telemetry_service.get_driver_car_numbers_for_session(redis_client, db, session_id)
 
 
 class _SessionBroadcaster:
