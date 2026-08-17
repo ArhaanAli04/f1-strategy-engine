@@ -15,6 +15,7 @@ their `web/` source changes.
 | `utils/errors.ts` | `web/src/utils/errors.ts` |
 | `utils/formatters.ts` | `web/src/utils/formatters.ts` |
 | `utils/drivers.ts` | `web/src/utils/drivers.ts` |
+| `utils/ergastDriverIds.ts` | `web/src/utils/ergastDriverIds.ts` (copied Day 32 Checkpoint 3 — was undeployed until `useDriverSeasonStats` was ported) |
 | `stores/sessionStore.ts` | `web/src/stores/sessionStore.ts` |
 | `stores/alertStore.ts` | `web/src/stores/alertStore.ts` |
 
@@ -41,7 +42,9 @@ shapes, etc).
 | `hooks/useCurrentRace.ts` | `web/src/hooks/useCurrentRace.ts` |
 | `hooks/useResolvedSession.ts` | `web/src/hooks/useResolvedSession.ts` |
 | `hooks/useSessionGaps.ts` | `web/src/hooks/useSessionGaps.ts` |
-| `hooks/useStrategy.ts` | `web/src/hooks/useStrategy.ts` (only `usePitWindow`/`useStrategyOverview` ported — `useUndercut`/`useSimulateStrategy`/`useSimulationResult` belong to the Simulator, not built on mobile yet) |
+| `hooks/useStrategy.ts` | `web/src/hooks/useStrategy.ts` (`usePitWindow`/`useStrategyOverview` ported first for the Strategy tab; `useSimulateStrategy`/`useSimulationResult` added Day 32 Checkpoint 4 for the Simulator screen. `useUndercut` still isn't ported — no mobile consumer yet) |
+| `hooks/useDriverSeasonStats.ts` | `web/src/hooks/useDriverSeasonStats.ts` (ported Day 32 Checkpoint 3, verbatim logic — pure react-query + fetch, no browser API to adapt) |
+| `hooks/useDriverAnalysis.ts` | inline `useQuery` in `web/src/components/driver/StyleRadar.tsx` | web defines this query inline since `StyleRadar` is its only consumer; mobile's Driver Detail header also needs `archetype`, so it's a shared hook here — same queryKey, so react-query dedupes the request between the header and `StyleRadar` instead of firing it twice. |
 | `hooks/useUpcomingRace.ts` | `web/src/hooks/useUpcomingRace.ts` |
 | `hooks/useCircuitOutline.ts` | `web/src/hooks/useCircuitOutline.ts` |
 | `hooks/useDriverLaps.ts` | `web/src/hooks/useDriverLaps.ts` |
@@ -73,11 +76,6 @@ alphabetical driver list rather than web's team-grouped chips with
 per-team select-all — same `GET`/`PUT /alerts/subscriptions` contract,
 grouping polish deferred.
 
-`utils/ergastDriverIds.ts` was **not** copied — it's only consumed by web's
-`useDriverSeasonStats` hook (season standings on `DriverPage`), which is out
-of scope for mobile today (Driver Detail is a minimal stub — see CLAUDE.md's
-Day 31 notes). Copy it if/when a future day ports driver season stats.
-
 ## Ported components (Checkpoint 4)
 
 Hand-ported to React Native primitives, same logic/geometry as their web
@@ -86,22 +84,21 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
 | mobile/src path | web/ source | Notes |
 |---|---|---|
 | `components/shared/DriverChip.tsx` | `web/src/components/shared/DriverChip.tsx` | Same driverId -> code/team-color resolution. |
+| `components/shared/TeamLogo.tsx` | `web/src/components/shared/TeamLogo.tsx` | Ported Day 32 (Checkpoint 2) — was a swatch-only stub through Day 31. Same slug map, same large-logo/Cadillac-backdrop special cases, same swatch fallback for unknown teams. Web's dynamic `/teams/${slug}.png` URL becomes a static `Record<string, ImageSourcePropType>` of `require()` calls (Metro requires static require paths); PNGs copied verbatim from `web/public/teams/*.png` into `mobile/assets/teams/`. |
 | `components/circuit/CircuitOutlineSvg.tsx` | `web/src/components/circuit/CircuitOutlineSvg.tsx` | `svg`/`path`/`circle`/`text` -> react-native-svg's `Svg`/`Path`/`Circle`/`Text`. Web's actual markup uses `<path>` (built from `points`), not `<polyline>` — ported as literally written, not per the primitive-mapping note's general guidance. `dominantBaseline="central"` has no react-native-svg equivalent — approximated with a `dy` nudge. |
 | `components/telemetry/TyreIcon.tsx` | inline `TyreIcon` function in `web/src/components/telemetry/LiveTimingTower.tsx` | Extracted into its own file since mobile reuses it on both the Live tab and Driver Detail; web only uses it in one place. Same two-arc geometry. |
 | `components/strategy/PitWindowCard.tsx` | `web/src/components/strategy/PitWindowCard.tsx` | Same compact/full modes, same SHAP top-contribution formatting. |
+| `components/strategy/PlanExplanationCard.tsx` | inline `PlanExplanationCard` in `web/src/pages/SimulatorPage.tsx` (desktop's copy-and-adapted version is identical here, minus CSV export) | Ported Day 32 (Checkpoint 4). Same gain/loss heading logic, same pit-cost/recoverable-seconds text. `drivers_overtaken` renders as a `FlatList` (`scrollEnabled={false}`, nested inside the Simulator screen's outer `ScrollView` — lists here are short enough that the nested-list perf warning doesn't matter in practice) using `LiveTimingTower`'s team-color-bar + code row convention (`app/(tabs)/live.tsx`), not `DriverChip`'s pill style — same choice web/desktop made for the same reason. |
 | `components/dashboard/UpcomingRaceCard.tsx` | `web/src/components/dashboard/UpcomingRaceCard.tsx` | Same countdown logic. |
 | `components/dashboard/QuickAccessCards.tsx` | `web/src/components/dashboard/QuickAccessCards.tsx` | Two cards, not three — web's third card scroll-anchors to an in-page `#driver-roster` section that doesn't exist on mobile's Home; navigates to the Drivers tab instead. |
 | `components/dashboard/RecentAlertsFeed.tsx` | `web/src/components/dashboard/RecentAlertsFeed.tsx` | Shows last 3, not 5 (Day 31 spec explicitly calls for 3 on mobile). |
+| `components/driver/StyleRadar.tsx` | `web/src/components/driver/StyleRadar.tsx` | Ported Day 32 (Checkpoint 3). Same 4 axes/metrics/normalization/archetype-description logic, copied verbatim where it's pure data transformation. The chart itself is **not** a victory-native chart — victory-native 41.x (confirmed against its installed source) has no radar/spider chart; its `PolarChart` only supports a `Pie.Chart` child. Hand-rolled instead with `react-native-svg` (`Polygon`/`Line`/`Text`), same manual polar-trig convention as `TelemetryGauge.tsx`/`CircuitOutlineSvg.tsx`. Web's "About this chart" `Dialog` modal becomes a `Pressable`-toggled inline expand section (no modal-in-a-Card pattern established on mobile). |
+| `components/driver/SectorComparison.tsx` | `web/src/components/driver/SectorComparison.tsx` | Ported Day 32 (Checkpoint 3). Same per-driver-mean-then-averaged team calculation, copied verbatim. Grouped bars use victory-native's real `CartesianChart` + `BarGroup` API (confirmed against the installed 41.26.0 source) — the classic web `victory` package's `VictoryBar`/`VictoryChart` naming this project's own CLAUDE.md/spec text referenced doesn't apply to this Skia rewrite. Axis tick labels need a real Skia `Font` object (`useFont`) — reuses the same bundled Titillium Web `.ttf` already loaded for RN `Text` via `expo-font`, as a second independent load into Skia's own font subsystem (Skia's Canvas doesn't share React Native's font registration). No `Legend` component exists in victory-native's exports — hand-rolled a small swatch row below the chart instead, same as web's `<Legend/>` visually. |
 | `components/circuit/CircuitMapPanel.tsx` | `web/src/components/circuit/CircuitMapPanel.tsx` | Same 3 modes (live/non-race/finished/unknown), same `applyTransform` geometry, same turn markers/countdown/telemetry gauge. Placed at the top of the **Live tab**, not Home — web's Home-equivalent (`DashboardPage`) only ever got the static `UpcomingRaceCard`; the full live panel lives on web's `RacePage` instead, which this mirrors by putting it above `live.tsx`'s driver `FlatList` (as a `ListHeaderComponent`, always rendered regardless of the gaps list's own loading/empty state, same as web mounting both `CircuitMapPanel` and `LiveTimingTower` independently). Live dot movement uses a new `AnimatedDriverDot.tsx` (Reanimated `useAnimatedProps` on an `Animated.createAnimatedComponent(Circle)`) instead of web's CSS `transform` transition — react-native-svg has nothing CSS transitions can hook into. |
 | `components/circuit/TelemetryGauge.tsx` | `web/src/components/circuit/TelemetryGauge.tsx` | Same arc-geometry math (`polarToCartesian`/`describeArc`), same 5 readouts. Two disclosed drops: (1) no arc-sweep animation on data updates — web transitions the `d` attribute via CSS, which browsers can interpolate directly; react-native-svg can't animate `Path`'s `d` as a single tweenable value without a path-morphing library (not installed), so arcs snap to their new value each 8s poll instead of sweeping. (2) accessibility: dropped `role="img"`/`aria-label` (`describeGauge`) and `useId()`-based unique SVG path ids (fixed string ids used instead) — the fixed ids are safe since only one `TelemetryGauge` instance mounts at a time on mobile (unlike web, where nothing prevents two instances existing at once). |
 
 **Simplified vs. web — disclosed, not full parity:**
 
-- `components/shared/TeamLogo.tsx` always renders the plain team-color
-  swatch. Web's version renders real per-team PNG logos from
-  `web/public/teams/*.png` with the swatch as a fallback for unknown teams —
-  those PNG assets were never copied into `mobile/assets/`. Visually
-  identical to web's fallback path, just always taking that path.
 - `app/(tabs)/drivers.tsx` sorts alphabetically by team name rather than by
   real Ergast constructor-standings position
   (`web/src/hooks/useConstructorStandings.ts` was not ported — it's an
@@ -114,12 +111,77 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
   technique is DOM-measurement-specific with no direct React Native
   equivalent. `FlatList` re-renders rows in their new sorted order on every
   gaps poll with no animated glide between old/new positions.
-- `app/driver/[id].tsx` is a minimal stub (identity + current-session
-  snapshot: position, last lap, gap, tyre), not a port of
-  `web/src/pages/DriverPage.tsx`. The web page's charts
-  (`LapTimesChart`/`SectorComparison`/`StyleRadar`) need a chart library —
-  `victory-native` + `@shopify/react-native-skia` are deferred to the start
-  of Day 32 (see CLAUDE.md's Deferred Wiring).
+- `app/driver/[id].tsx` was a minimal stub (identity + current-session
+  snapshot only) through Day 31 — full-ported Day 32 (Checkpoint 3) into a
+  team-color header + segmented Overview/Driving Style/Sector Times control,
+  mirroring `web/src/pages/DriverPage.tsx`. One chart is intentionally not
+  ported: web's `LapTimesChart.tsx` (lap time by compound, over a session)
+  isn't in the Day 32 spec's 3 sub-views — Overview/Driving Style/Sector
+  Times only. Add it as a 4th sub-view if a future day wants full parity.
+  The historical-data banner (shown when `!isLive`) doesn't persist
+  dismissal to `AsyncStorage` like web's `localStorage`-backed version does
+  — plain component state, resets each time the screen mounts.
+- `app/simulator.tsx` is new Day 32 (Checkpoint 4) — a port of
+  `web/src/pages/SimulatorPage.tsx`/`desktop/src/pages/SimulatorPage.tsx`'s
+  4-step flow, reached via a "Run Simulator" button at the top of the
+  Strategy tab (`app/(tabs)/strategy.tsx`) rather than a 6th tab bar entry.
+  Session ID is always a plain manual text input, matching desktop's
+  version — no web-only live-mode auto-detect (`useCurrentRace`/
+  `useSessionGaps`-driven read-only field). No CSV export (desktop-only) and
+  no drag-drop (add/remove buttons only, same as web). Uses
+  `@react-native-picker/picker` (added Day 32 Checkpoint 4) for the
+  driver/compound selects — confirmed via Expo's docs as still current and
+  Expo-SDK-57-compatible; `@expo/ui/community/picker` (a newer Jetpack-
+  Compose/SwiftUI-backed drop-in Expo also documents) was not used, to avoid
+  pulling in the larger `@expo/ui` package for a single form control. Step
+  4's chart is a horizontal bar (victory-native's `CartesianChart` +
+  `HorizontalBar`, `orientation="horizontal"`) — per-bar gain/loss coloring
+  isn't a built-in prop (no Recharts-style per-`Cell` coloring), so the
+  chart data carries two synthetic y-series (`gain`/`loss`, only one nonzero
+  per row) rendered as two independently-colored `HorizontalBar` layers.
+  That chart data is passed to `CartesianChart` inline in JSX, not through a
+  separately-typed component prop — routing it through a named interface
+  first breaks TypeScript's overload resolution for `CartesianChart`'s
+  generic `RawData` (confirmed while building this screen; see the inline
+  comment at the call site).
+
+## Offline support (Day 32 Checkpoint 5)
+
+`app/_layout.tsx`'s `QueryClientProvider` was replaced with
+`PersistQueryClientProvider` (`@tanstack/react-query-persist-client`), backed
+by `createAsyncStoragePersister` (`@tanstack/query-async-storage-persister`)
+writing to `@react-native-async-storage/async-storage`. No web equivalent —
+this is mobile-only, web has no offline story. Persistence is scoped to
+exactly 3 query-key-prefix families via a `shouldDehydrateQuery` filter in
+`app/_layout.tsx` (`PERSISTED_QUERY_KEY_PREFIXES`): `["race","upcoming"]`
+(`useUpcomingRace`), `["drivers"]` (`useDrivers`), and `["strategy"]` (every
+`useStrategy.ts` query — `usePitWindow`/`useStrategyOverview`/
+`useSimulationResult`). Everything else (live telemetry, alerts, session
+gaps, circuit outlines) stays in-memory-only — react-query's own cache still
+serves each query's last-successful value while offline, it just isn't
+written to disk across app restarts, which is the same "last known" effect
+for as long as the app process stays alive.
+
+`mobile/src/components/shared/OfflineBanner.tsx` is new — same informational
+blue-tone styling family as `HistoricalDataBanner`'s RN port, different
+trigger (`@react-native-community/netinfo`'s `useNetInfo().isConnected`, not
+"no live session"). Added to all 5 tab screens plus Driver Detail. Each
+screen passes its own most-relevant query's `dataUpdatedAt` for the banner's
+stale-timestamp text — including screens whose query isn't one of the 3
+persisted families above (e.g. Live's `useSessionGaps`, Alerts' own query) —
+the timestamp is about "when did we last successfully fetch this", which
+react-query tracks for every query regardless of whether it's written to
+AsyncStorage.
+
+`hooks/useWebSocket.ts` now calls `useNetInfo()` internally and folds
+`isConnected === false` into its connect-effect's early-return condition
+(alongside the existing `!url`/`!enabled` checks), with `isConnected` added
+to the effect's dependency array so connectivity returning triggers a normal
+reconnect. `hooks/useLiveTelemetry.ts` needed no separate change — it sits on
+top of `useWebSocket`, so it inherits the gate automatically; `live.tsx`'s
+existing REST-fallback-per-driver logic (`liveLap?.compound ??
+latestRestLap?.compound`) already covers "show last cached data" once the WS
+stream itself is gated off.
 
 ## Testing Options
 

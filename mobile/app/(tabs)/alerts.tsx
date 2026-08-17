@@ -5,6 +5,7 @@ import { FlatList, Text, View } from "react-native"
 import { Swipeable } from "react-native-gesture-handler"
 import * as alertsApi from "@/api/alerts"
 import { DriverChip } from "@/components/shared/DriverChip"
+import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { useAlertStore } from "@/stores/alertStore"
 import { AlertType, type AlertResponse } from "@/types"
 
@@ -89,7 +90,7 @@ export default function AlertsScreen() {
   const alerts = useAlertStore((state) => state.alerts)
   const queryClient = useQueryClient()
 
-  const { data, isLoading } = useQuery({
+  const { data, dataUpdatedAt, isLoading } = useQuery({
     queryKey: ALERTS_QUERY_KEY,
     queryFn: () => alertsApi.getAlerts(),
   })
@@ -107,13 +108,20 @@ export default function AlertsScreen() {
   })
 
   if (isLoading) {
-    return <View className="flex-1 bg-background" />
+    return (
+      <View className="flex-1 bg-background">
+        <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+      </View>
+    )
   }
 
   if (alerts.length === 0) {
     return (
-      <View className="flex-1 items-center justify-center bg-background p-6">
-        <Text className="text-sm text-muted">No alerts yet.</Text>
+      <View className="flex-1 bg-background">
+        <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+        <View className="flex-1 items-center justify-center p-6">
+          <Text className="text-sm text-muted">No alerts yet.</Text>
+        </View>
       </View>
     )
   }
@@ -123,6 +131,7 @@ export default function AlertsScreen() {
       className="flex-1 bg-background"
       data={alerts}
       keyExtractor={(alert) => alert.id}
+      ListHeaderComponent={<OfflineBanner dataUpdatedAt={dataUpdatedAt} />}
       renderItem={({ item: alert }) => (
         <AlertRow alert={alert} onMarkRead={markReadMutation.mutate} />
       )}

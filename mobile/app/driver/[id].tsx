@@ -1,17 +1,35 @@
 import { useLocalSearchParams } from "expo-router"
-import { useMemo } from "react"
-import { ScrollView, Text, View } from "react-native"
-import { TyreIcon } from "@/components/telemetry/TyreIcon"
-import { useDriverLaps } from "@/hooks/useDriverLaps"
+import { useState } from "react"
+import { Pressable, ScrollView, Text, View } from "react-native"
+import { SectorComparison } from "@/components/driver/SectorComparison"
+import { StyleRadar } from "@/components/driver/StyleRadar"
+import { OfflineBanner } from "@/components/shared/OfflineBanner"
+import { TeamLogo } from "@/components/shared/TeamLogo"
+import { useDriverAnalysis } from "@/hooks/useDriverAnalysis"
+import { useDriverSeasonStats } from "@/hooks/useDriverSeasonStats"
 import { useDrivers } from "@/hooks/useDrivers"
-import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { useResolvedSession } from "@/hooks/useResolvedSession"
-import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
-import { formatLapTime } from "@/utils/formatters"
+
+// Full port of web/src/pages/DriverPage.tsx, replacing the Day 31 identity-
+// only stub (which deferred all 3 charts until victory-native +
+// @shopify/react-native-skia were installed — see CLAUDE.md's Day 32
+// deferred-wiring note). Segmented control instead of web's always-visible
+// 3-card grid — 3 charts don't fit one mobile screen at once, so this
+// paginates them behind Overview / Driving Style / Sector Times, per the
+// Day 32 spec's explicit choice of a hand-rolled tab switcher over pulling
+// in @react-navigation/material-top-tabs.
+
+type SubView = "overview" | "style" | "sectors"
+
+const SUB_VIEWS: { key: SubView; label: string }[] = [
+  { key: "overview", label: "Overview" },
+  { key: "style", label: "Driving Style" },
+  { key: "sectors", label: "Sector Times" },
+]
 
 interface StatTileProps {
-  value: string | number
+  value: number | string
   label: string
 }
 
@@ -24,39 +42,70 @@ function StatTile({ value, label }: StatTileProps) {
   )
 }
 
-// Minimal stub, not a full port of web/src/pages/DriverPage.tsx — per Day 31
-// scope, this shows identity + current-session snapshot only (no
-// LapTimesChart/SectorComparison/StyleRadar, all of which need charts —
-// deferred until victory-native + @shopify/react-native-skia are installed,
-// see CLAUDE.md's Day 32 deferred-wiring note).
+function formatRaceDate(raceDate: string): string {
+  return new Date(raceDate).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  })
+}
+
+interface HistoricalDataBannerProps {
+  raceName?: string | null
+  raceDate?: string | null
+}
+
+// RN port of web/src/components/shared/HistoricalDataBanner.tsx — informational
+// blue tone, not the destructive/red used elsewhere. Simplified vs. web:
+// dismissal is plain component state here, not persisted to AsyncStorage —
+// web remembers a dismissal per session id across visits (localStorage);
+// this resets each time the screen mounts. Not requested for this checkpoint,
+// and adds an async-storage round trip before first paint for a banner whose
+// whole job is a same-session "heads up" notice.
+function HistoricalDataBanner({ raceName, raceDate }: HistoricalDataBannerProps) {
+  const [dismissed, setDismissed] = useState(false)
+  if (dismissed) return null
+
+  const message =
+    raceName && raceDate
+      ? `No live race session active — showing data from the last completed race: ${raceName} (${formatRaceDate(raceDate)})`
+      : "No live race session active — showing data from the last completed race"
+
+  return (
+    <View className="flex-row items-center justify-between gap-3 border-b border-blue-900/40 bg-blue-950/40 px-4 py-2">
+      <Text className="flex-1 text-xs text-blue-200">{message}</Text>
+      <Pressable onPress={() => setDismissed(true)} hitSlop={8} accessibilityLabel="Dismiss">
+        <Text className="text-xs text-blue-300">Dismiss</Text>
+      </Pressable>
+    </View>
+  )
+}
+
 export default function DriverDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>()
-  const { data: drivers, isLoading } = useDrivers()
-  const { sessionId } = useResolvedSession()
-  const { data: gapsResponse } = useSessionGaps(sessionId)
-  const { lapsByDriver } = useLiveTelemetry(sessionId)
-  const { data: recentLaps } = useDriverLaps(sessionId, id ?? null)
+  const driverId = id ?? null
+  const [subView, setSubView] = useState<SubView>("overview")
 
-  const driver = drivers?.find((d) => d.id === id) ?? null
+  const { data: drivers, dataUpdatedAt, isLoading: driversLoading } = useDrivers()
+  const { sessionId, isLive, raceName, raceDate } = useResolvedSession()
+
+  const driver = drivers?.find((d) => d.id === driverId) ?? null
   const team = driver?.contracts[0]?.team ?? null
   const teamColor = team?.color_hex ?? FALLBACK_TEAM_COLOR
 
-  const gap = useMemo(
-    () => gapsResponse?.gaps.find((g) => g.driver_id === id) ?? null,
-    [gapsResponse, id],
+  // Shared with StyleRadar (same queryKey) so the header's archetype text and
+  // the chart itself dedupe onto one request instead of firing it twice.
+  const { data: analysis } = useDriverAnalysis(driverId, sessionId)
+
+  // Always the current season regardless of which historical session
+  // sessionId is scoping the other 2 tabs to — season stats are a "who's
+  // leading the championship right now" readout. Mirrors web's DriverPage.
+  const { data: seasonStats, isLoading: statsLoading } = useDriverSeasonStats(
+    driver?.code ?? null,
+    new Date().getFullYear(),
   )
 
-  const latestRestLap = useMemo(() => {
-    const items = recentLaps?.items ?? []
-    if (items.length === 0) return null
-    return items.reduce((a, b) => (a.lap_number > b.lap_number ? a : b))
-  }, [recentLaps])
-
-  const liveLap = id ? lapsByDriver[id] : undefined
-  const lastLapSeconds = liveLap?.lap_time_seconds ?? latestRestLap?.lap_time_seconds ?? null
-  const compound = liveLap?.compound ?? latestRestLap?.compound ?? null
-
-  if (isLoading) {
+  if (driversLoading) {
     return <View className="flex-1 bg-background" />
   }
 
@@ -68,28 +117,95 @@ export default function DriverDetailScreen() {
     )
   }
 
-  return (
-    <ScrollView className="flex-1 bg-background">
-      <View className="h-1.5" style={{ backgroundColor: teamColor }} />
-      <View className="gap-4 p-4">
-        <View>
-          <Text className="text-2xl font-bold text-foreground">{driver.full_name}</Text>
-          <Text className="text-sm text-muted">{team?.name ?? "No team"}</Text>
-        </View>
+  const hasLastResults = seasonStats && (seasonStats.lastWinCircuit || seasonStats.lastPodiumCircuit)
 
-        <View className="flex-row items-center justify-around rounded-lg border border-white/10 bg-surface p-4">
-          <StatTile value={gap?.position ?? "—"} label="Position" />
-          <StatTile value={formatLapTime(lastLapSeconds)} label="Last lap" />
-          <StatTile
-            value={gap?.gap_to_ahead_seconds != null ? `+${gap.gap_to_ahead_seconds.toFixed(3)}s` : "—"}
-            label="Gap ahead"
-          />
-          <View className="items-center gap-0.5">
-            <TyreIcon compound={compound} />
-            <Text className="text-[10px] uppercase tracking-wide text-muted">Tyre</Text>
+  return (
+    <View className="flex-1 bg-background">
+      <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+      {sessionId && !isLive && <HistoricalDataBanner raceName={raceName} raceDate={raceDate} />}
+      <ScrollView className="flex-1">
+        <View className="h-1.5" style={{ backgroundColor: teamColor }} />
+        <View className="gap-4 p-4">
+          <View className="flex-row items-center gap-3">
+            <TeamLogo teamName={team?.name} teamColor={teamColor} />
+            <View className="flex-1">
+              <Text className="text-2xl font-bold text-foreground">{driver.full_name}</Text>
+              <Text className="text-sm text-muted">{team?.name ?? "No team"}</Text>
+            </View>
           </View>
+          {analysis && (
+            <Text className="text-xs text-muted">
+              Archetype: <Text className="font-semibold text-foreground">{analysis.archetype}</Text>
+            </Text>
+          )}
+
+          <View className="flex-row rounded-md border border-white/10 bg-surface">
+            {SUB_VIEWS.map(({ key, label }) => {
+              const active = subView === key
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => setSubView(key)}
+                  className={`flex-1 items-center border-b-2 py-2.5 ${active ? "border-foreground" : "border-transparent"}`}
+                >
+                  <Text className={`text-xs font-medium ${active ? "text-foreground" : "text-muted"}`}>
+                    {label}
+                  </Text>
+                </Pressable>
+              )
+            })}
+          </View>
+
+          {subView === "overview" && (
+            <View className="gap-4">
+              <View className="rounded-md border border-white/10 bg-surface p-4">
+                {statsLoading ? (
+                  <View className="h-10 w-full" />
+                ) : seasonStats ? (
+                  <View className="flex-row justify-around">
+                    <StatTile value={seasonStats.wins} label="Wins" />
+                    <StatTile value={seasonStats.podiums} label="Podiums" />
+                    <StatTile value={seasonStats.points} label="Points" />
+                    <StatTile value={seasonStats.wdcPosition ?? "—"} label="WDC Pos" />
+                  </View>
+                ) : (
+                  <Text className="text-center text-sm text-muted">No season stats available.</Text>
+                )}
+                {hasLastResults && (
+                  <View className="mt-3 gap-1 border-t border-white/10 pt-2">
+                    {seasonStats.lastWinCircuit && (
+                      <Text className="text-xs text-muted">
+                        Last win: <Text className="text-foreground">{seasonStats.lastWinCircuit}</Text>
+                      </Text>
+                    )}
+                    {seasonStats.lastPodiumCircuit && (
+                      <Text className="text-xs text-muted">
+                        Last podium:{" "}
+                        <Text className="text-foreground">{seasonStats.lastPodiumCircuit}</Text>
+                      </Text>
+                    )}
+                  </View>
+                )}
+              </View>
+            </View>
+          )}
+
+          {subView === "style" && (
+            <View className="rounded-md border border-white/10 bg-surface p-4">
+              <StyleRadar driverId={driver.id} sessionId={sessionId} driverCode={driver.code} />
+            </View>
+          )}
+
+          {subView === "sectors" && (
+            <View className="rounded-md border border-white/10 bg-surface p-4">
+              <Text className="mb-3 text-sm font-semibold text-foreground">
+                Sector Times vs. Team Average
+              </Text>
+              <SectorComparison sessionId={sessionId} driverId={driver.id} />
+            </View>
+          )}
         </View>
-      </View>
-    </ScrollView>
+      </ScrollView>
+    </View>
   )
 }

@@ -1,3 +1,4 @@
+import { useNetInfo } from "@react-native-community/netinfo"
 import { useCallback, useEffect, useRef, useState } from "react"
 
 export type WebSocketReadyState = "connecting" | "open" | "closed"
@@ -28,9 +29,15 @@ export function useWebSocket(
   const socketRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [readyState, setReadyState] = useState<WebSocketReadyState>("connecting")
+  // isConnected === false is the only state that blocks connecting — null
+  // (still determining, most platforms' default on first render) shouldn't
+  // stop an otherwise-valid connection attempt. Offline -> back online
+  // transitions re-run this effect (isConnected is a dependency below),
+  // reopening the socket automatically.
+  const { isConnected } = useNetInfo()
 
   useEffect(() => {
-    if (!url || !enabled) return
+    if (!url || !enabled || isConnected === false) return
     let cancelled = false
 
     function connect() {
@@ -60,7 +67,7 @@ export function useWebSocket(
       socketRef.current?.close()
       socketRef.current = null
     }
-  }, [url, enabled, onMessage])
+  }, [url, enabled, isConnected, onMessage])
 
   const send = useCallback((data: string) => {
     socketRef.current?.send(data)

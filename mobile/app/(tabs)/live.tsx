@@ -3,6 +3,7 @@ import { router } from "expo-router"
 import { useMemo } from "react"
 import { FlatList, Pressable, RefreshControl, Text, View } from "react-native"
 import { CircuitMapPanel } from "@/components/circuit/CircuitMapPanel"
+import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { TyreIcon } from "@/components/telemetry/TyreIcon"
 import { driverLapsQueryOptions } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
@@ -65,7 +66,13 @@ function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
 export default function LiveScreen() {
   const { sessionId } = useResolvedSession()
   const { data: drivers } = useDrivers()
-  const { data: gapsResponse, isLoading: gapsLoading, refetch, isRefetching } = useSessionGaps(sessionId)
+  const {
+    data: gapsResponse,
+    dataUpdatedAt,
+    isLoading: gapsLoading,
+    refetch,
+    isRefetching,
+  } = useSessionGaps(sessionId)
   const { lapsByDriver } = useLiveTelemetry(sessionId)
 
   const gaps = useMemo(() => gapsResponse?.gaps ?? [], [gapsResponse])
@@ -129,6 +136,7 @@ export default function LiveScreen() {
   if (gapsLoading && rows.length === 0) {
     return (
       <View className="flex-1 bg-background">
+        <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
         {header}
       </View>
     )
@@ -137,6 +145,7 @@ export default function LiveScreen() {
   if (!gapsLoading && rows.length === 0) {
     return (
       <View className="flex-1 bg-background">
+        <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
         {header}
         <View className="flex-1 items-center justify-center gap-1 p-6">
           <Text className="text-sm font-medium text-foreground">No live race session active</Text>
@@ -149,27 +158,30 @@ export default function LiveScreen() {
   }
 
   return (
-    <FlatList
-      className="flex-1 bg-background"
-      data={rows}
-      keyExtractor={(row) => row.driverId}
-      ListHeaderComponent={header}
-      refreshControl={
-        <RefreshControl refreshing={isRefetching} onRefresh={refetch} tintColor="#fafafa" />
-      }
-      renderItem={({ item: row }) => (
-        <Pressable
-          onPress={() => router.push(ROUTES.DRIVER_DETAIL(row.driverId))}
-          className="flex-row items-center justify-between border-b border-white/10 px-3 py-2.5 active:bg-surface"
-        >
-          <Text className="w-6 text-center font-mono text-xs text-muted">{row.position}</Text>
-          <View className="h-5 w-1 rounded-full" style={{ backgroundColor: row.teamColor }} />
-          <Text className="w-12 text-sm font-semibold text-foreground">{row.code}</Text>
-          <Text className="w-16 text-xs text-muted">{formatLapTime(row.lastLapSeconds)}</Text>
-          <Text className="w-20 text-right font-mono text-xs text-muted">{row.gapLabel}</Text>
-          <TyreIcon compound={row.compound} />
-        </Pressable>
-      )}
-    />
+    <View className="flex-1 bg-background">
+      <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+      <FlatList
+        className="flex-1"
+        data={rows}
+        keyExtractor={(row) => row.driverId}
+        ListHeaderComponent={header}
+        refreshControl={
+          <RefreshControl refreshing={isRefetching} onRefresh={refetch} tintColor="#fafafa" />
+        }
+        renderItem={({ item: row }) => (
+          <Pressable
+            onPress={() => router.push(ROUTES.DRIVER_DETAIL(row.driverId))}
+            className="flex-row items-center justify-between border-b border-white/10 px-3 py-2.5 active:bg-surface"
+          >
+            <Text className="w-6 text-center font-mono text-xs text-muted">{row.position}</Text>
+            <View className="h-5 w-1 rounded-full" style={{ backgroundColor: row.teamColor }} />
+            <Text className="w-12 text-sm font-semibold text-foreground">{row.code}</Text>
+            <Text className="w-16 text-xs text-muted">{formatLapTime(row.lastLapSeconds)}</Text>
+            <Text className="w-20 text-right font-mono text-xs text-muted">{row.gapLabel}</Text>
+            <TyreIcon compound={row.compound} />
+          </Pressable>
+        )}
+      />
+    </View>
   )
 }
