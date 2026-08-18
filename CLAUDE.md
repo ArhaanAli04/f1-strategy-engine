@@ -421,20 +421,14 @@ Update this section at the start of each day's session:
 ```
 Phase:    8
 Day:      33
-Status:   Vitest installed (v4.1.10), 4 test files 
-          (12 tests passing) — formatters, LiveTimingTower, 
-          AuthGuard, PitWindowCard. npm run test added to 
-          pre-commit and frontend-check CI job. cd-web.yml: 
-          workflow_run-gated Vercel cloud build deploy on 
-          merge to main. web/vercel.json: SPA rewrites + 
-          asset cache headers. cd-desktop.yml: Windows-only 
-          cargo tauri build on v* tag push, uploads .exe/.msi 
-          to GitHub Releases. Mac/Linux/auto-updater deferred.
-Next:     Day 34 — Security hardening, HTTPS, CORS, secrets audit & penetration checklist
+Status:   Security hardening complete. Rate limiting: 
+          slowapi with explicit limits (login 10/min, register 5/min), SlowAPIMiddleware added. CORS: env-var driven ALLOWED_ORIGINS 
+          (default * for dev, comma-separated list for prod). Security headers middleware: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection, Referrer-Policy, CSP (no HSTS — reverse proxy concern). JWT 
+          secret validator: rejects <32 chars and known weak defaults. Refresh tokens: now stored as SHA-256 hashes in Redis (not plaintext). .gitignore: added mobile/.expo/ and web/.vercel/. dependabot.yml: pip + 
+          npm (web/desktop/mobile) + github-actions, weekly, targeting develop.
+Next:     Day 35 — Performance profiling & query optimization
 Blockers: No physical device for testing — Android emulator 
-          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — 
-          cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io 
-          deployed Day 40
+          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
 
 ---
