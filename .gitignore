@@ -229,3 +229,7 @@ backend/tests/load/.token_cache.json
 # Kubernetes local secrets helper (infra/k8s/create-secrets.sh) — reads
 # .env and creates cluster Secrets at runtime; never committed.
 infra/k8s/create-secrets.sh
+
+# Expo local dev/build cache (mobile/) and Vercel CLI project link (web/)
+mobile/.expo/
+web/.vercel/
