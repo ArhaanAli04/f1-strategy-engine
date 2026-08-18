@@ -56,7 +56,9 @@ def _point_settings_at_containers(
     os.environ["DATABASE_URL"] = db_url
     os.environ["TIMESCALE_URL"] = db_url
     os.environ["REDIS_URL"] = redis_url
-    os.environ.setdefault("SECRET_KEY", "test-secret-key")
+    # Must be >= 32 chars — see AuthSettings.secret_key's field_validator
+    # (Day 34 security hardening); a short placeholder here raises ValidationError.
+    os.environ.setdefault("SECRET_KEY", "test-secret-key-for-ci-integration-00")
 
     get_db_settings.cache_clear()
     get_redis_settings.cache_clear()
