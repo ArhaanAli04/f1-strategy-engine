@@ -1,8 +1,30 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _ENV = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+_MIN_SECRET_KEY_LENGTH = 32
+
+# Known-weak SECRET_KEY values to reject outright, regardless of length —
+# includes the .env.example placeholder itself, so copying that file
+# without generating a real key fails loudly instead of shipping a
+# guessable production secret.
+_WEAK_SECRET_KEYS = frozenset(
+    {
+        "secret",
+        "changeme",
+        "your-secret-key-here",
+        "dev",
+        "test",
+        "password",
+        "supersecret",
+        "f1strategy",
+        "development",
+        "change-me-to-a-256-bit-random-hex-string",
+    }
+)
 
 
 class DatabaseSettings(BaseSettings):
@@ -27,6 +49,22 @@ class AuthSettings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+
+    @field_validator("secret_key")
+    @classmethod
+    def _validate_secret_key(cls, value: str) -> str:
+        if len(value) < _MIN_SECRET_KEY_LENGTH:
+            raise ValueError(
+                f"SECRET_KEY must be at least {_MIN_SECRET_KEY_LENGTH} characters "
+                f"(got {len(value)}). Generate one with: "
+                'python -c "import secrets; print(secrets.token_hex(32))"'
+            )
+        if value.strip().lower() in _WEAK_SECRET_KEYS:
+            raise ValueError(
+                "SECRET_KEY matches a known-weak default value. Generate a real one with: "
+                'python -c "import secrets; print(secrets.token_hex(32))"'
+            )
+        return value
 
 
 class AWSSettings(BaseSettings):
@@ -69,6 +107,17 @@ class AppSettings(BaseSettings):
     # replaces these with real values via GitHub Secrets in production.
     metrics_user: str = "metrics"
     metrics_password: str = "metrics-dev"  # noqa: S105
+    # "*" for local dev (works out of the box). Production must set a real
+    # comma-separated allowlist via the ALLOWED_ORIGINS env var — CORS with
+    # allow_credentials=True and origin "*" is rejected by browsers anyway,
+    # so "*" is only ever meaningful in development.
+    allowed_origins: str = "*"
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        if self.allowed_origins == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
 
 @lru_cache

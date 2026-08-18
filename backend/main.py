@@ -13,6 +13,7 @@ from sentry_sdk.integrations.celery import CeleryIntegration
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 
 from backend.apis.v1 import api_v1_router
@@ -23,7 +24,12 @@ from backend.core.exceptions import (
     f1_strategy_error_handler,
     unhandled_error_handler,
 )
-from backend.core.middleware import RequestIDMiddleware, TimingMiddleware, register_cors
+from backend.core.middleware import (
+    RequestIDMiddleware,
+    SecurityHeadersMiddleware,
+    TimingMiddleware,
+    register_cors,
+)
 from backend.core.rate_limit import limiter
 from backend.core.redis_client import _get_pool
 
@@ -115,9 +121,11 @@ app = FastAPI(
 app.state.limiter = limiter
 
 # --- middleware (outermost first) ---
-register_cors(app, allowed_origins=["*"])
+register_cors(app, allowed_origins=get_app_settings().allowed_origins_list)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(TimingMiddleware)
+app.add_middleware(SlowAPIMiddleware)
 
 # --- exception handlers ---
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]

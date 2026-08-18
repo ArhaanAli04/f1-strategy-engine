@@ -30,6 +30,24 @@ def register_cors(app: FastAPI, allowed_origins: list[str]) -> None:
     )
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Baseline security headers on every response.
+
+    No Strict-Transport-Security here — HSTS is a reverse-proxy concern
+    (the proxy terminates TLS; the app itself doesn't know if it's being
+    served over HTTPS), see CLAUDE.md Day 34 notes.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = "default-src 'self'"
+        return response
+
+
 class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = str(uuid.uuid4())

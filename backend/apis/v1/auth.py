@@ -37,7 +37,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit(rate_limit_value)
+@limiter.limit("5/minute")
 async def register(
     request: Request, payload: UserCreate, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> UserResponse:
@@ -45,7 +45,7 @@ async def register(
 
 
 @router.post("/login", response_model=LoginResponse)
-@limiter.limit(rate_limit_value)
+@limiter.limit("10/minute")
 async def login(
     request: Request,
     payload: UserLogin,

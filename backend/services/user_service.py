@@ -7,10 +7,15 @@ whatever refresh token was issued before. logout deletes the key outright.
 refresh_token checks the presented token against the stored value, so a
 deleted or superseded token is rejected even though the JWT itself is still
 cryptographically valid until its own exp claim.
+
+Refresh tokens are stored as SHA-256 hashes, never plaintext. Existing
+plaintext tokens in Redis will fail validation and force re-login — this
+is acceptable and expected behavior after this change.
 """
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 
@@ -43,6 +48,10 @@ TOKEN_TYPE = "bearer"  # noqa: S105 — this is an OAuth2 scheme name, not a sec
 
 def _refresh_key(user_id: uuid.UUID | str) -> str:
     return f"f1:auth:refresh:{user_id}"
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def _token_expiry(token: str) -> datetime:
@@ -130,7 +139,7 @@ async def login_user(
     await redis_set(
         redis_client,
         _refresh_key(user.id),
-        refresh_token,
+        _hash_token(refresh_token),
         ttl=settings.refresh_token_expire_days * 86400,
     )
 
@@ -164,8 +173,8 @@ async def refresh_token(
         raise AuthenticationError("Token is not a refresh token")
 
     user_id = payload["sub"]
-    stored = await redis_get(redis_client, _refresh_key(user_id))
-    if stored is None or stored != token:
+    stored_hash = await redis_get(redis_client, _refresh_key(user_id))
+    if stored_hash is None or stored_hash != _hash_token(token):
         raise AuthenticationError("Refresh token has been invalidated")
 
     result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
