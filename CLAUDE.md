@@ -420,22 +420,21 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      32
-Status:   Mobile app complete. Driver Detail screen 
-          (team color header, segmented Overview/Style/Sectors, 
-          hand-rolled SVG radar, victory-native BarGroup sectors, 
-          Ergast season stats). Simulator screen (4-step flow 
-          matching web/desktop, PlanExplanationCard, victory-native 
-          horizontal bar). Offline support (PersistQueryClientProvider, 
-          AsyncStorage cache for 3 query families, OfflineBanner on 
-          all screens, WebSocket gated on NetInfo). Team logos ported 
-          to mobile (static require map). mobile/README.md created 
-          (setup guide for iOS/Android/emulator/production). 
-          2700 modules bundling clean.
-Next:     Day 33 — Frontend build pipeline & web deployment (Vercel/Netlify)
+Day:      33
+Status:   Vitest installed (v4.1.10), 4 test files 
+          (12 tests passing) — formatters, LiveTimingTower, 
+          AuthGuard, PitWindowCard. npm run test added to 
+          pre-commit and frontend-check CI job. cd-web.yml: 
+          workflow_run-gated Vercel cloud build deploy on 
+          merge to main. web/vercel.json: SPA rewrites + 
+          asset cache headers. cd-desktop.yml: Windows-only 
+          cargo tauri build on v* tag push, uploads .exe/.msi 
+          to GitHub Releases. Mac/Linux/auto-updater deferred.
+Next:     Day 34 — Security hardening, HTTPS, CORS, secrets audit & penetration checklist
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — 
-          cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md
+          cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io 
+          deployed Day 40
 ```
 
 ---
