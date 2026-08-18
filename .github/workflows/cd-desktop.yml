@@ -1,0 +1,55 @@
+name: CD — Desktop
+
+# Only triggers on version tags (v1.0.0 etc), not every commit.
+# To test: git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & release Windows desktop app
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      # windows-latest already carries the MSVC Build Tools Tauri needs at
+      # build time — no separate VS Build Tools install step required.
+      #
+      # x86_64-pc-windows-msvc is this runner's native target, so this only
+      # produces a Windows .exe (NSIS) + .msi (WiX) — the two bundle formats
+      # tauri.conf.json's "targets": "all" resolves to on Windows:
+      #   - macOS (.dmg) requires a macos-latest runner — deferred.
+      #   - Linux (.AppImage) requires an ubuntu-latest runner — deferred.
+      #   - Cross-compilation (--target for another OS) isn't supported by
+      #     Tauri's bundler; each platform's installer must be built on that
+      #     platform's own runner.
+      #   - Auto-updater is deferred — it needs a code-signing certificate
+      #     this project doesn't have yet.
+      - name: Build Tauri app
+        run: npx tauri build
+
+      - name: Upload installers to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/release/bundle/msi/*.msi

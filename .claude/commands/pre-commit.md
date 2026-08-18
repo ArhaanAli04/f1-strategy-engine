@@ -50,7 +50,10 @@ cd web && npx tsc -b --noEmit
 # 2. Lint check
 cd web && npm run lint
 
-# 3. Production build verification
+# 3. Unit tests (Vitest)
+cd web && npm run test
+
+# 4. Production build verification
 cd web && npm run build
 ```
 
