@@ -1,11 +1,12 @@
 """Unit tests for workers/prediction_worker.py.
 
 mock_db_session (AsyncMock spec'd to AsyncSession) stands in for the DB; the real
-fakeredis fixture stands in for Redis. _cumulative_race_time is monkeypatched to a
-recording stub in the test below rather than mocked at the db.execute() level, since
-the behavior under test is which `up_to_lap` argument _build_race_state passes to it
-per driver, not _cumulative_race_time's own SQL summing logic (already covered
-indirectly by strategy_service's equivalent tests).
+fakeredis fixture stands in for Redis. _build_race_state's own cumulative-time lookup
+is a single batched GROUP BY query (not a per-driver call to _cumulative_race_time —
+see Day 35's N+1 fix), so it's mocked the same way as the other db.execute() calls in
+this file rather than monkeypatched; _cumulative_race_time itself (still used by
+_resolve_position_context, unrelated to _build_race_state) is covered indirectly by
+strategy_service's equivalent tests.
 """
 
 import json
@@ -16,23 +17,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis as fakeredis_lib
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.workers import prediction_worker
 
 
 @pytest.mark.unit
-async def test_build_race_state_seeds_cumulative_time_from_current_lap_for_every_driver(
+async def test_build_race_state_batches_cumulative_time_into_one_query(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every driver's cumulative_race_time_seconds must be seeded as-of the same
-    current_lap, not each driver's own independently-latest ingested lap — otherwise
+    """cumulative_race_time_seconds for every driver must come from a single batched
+    GROUP BY query anchored to current_lap, not one db.execute() call per driver (the
+    N+1 this function previously had: ~20 separate round trips for a 20-driver field).
+    Also covers the original current_lap-anchoring invariant this test predates: driver
+    A's latest DB row is ahead of current_lap (56 > 55), driver B's is behind it
+    (54 < 55) — the batched query's lap_number <= current_lap filter must apply
+    uniformly to both regardless of either driver's own latest lap_number, otherwise
     normal async ingestion skew bakes a fake multi-lap time gap into the simulation's
-    starting point (the bug this test guards against: driver A's latest DB row is
-    ahead of current_lap, driver B's is behind it; both must still be queried at
-    current_lap).
+    starting point.
     """
     session_id = uuid.uuid4()
     circuit_id = uuid.uuid4()
@@ -60,25 +62,35 @@ async def test_build_race_state_seeds_cumulative_time_from_current_lap_for_every
         (driver_b_id, lap_b.position),
     ]
 
-    mock_db_session.execute.side_effect = [context_result, latest_laps_result, position_result]
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [
+        (driver_a_id, 4321.5),
+        (driver_b_id, 4310.0),
+    ]
 
-    # Weather cache hit so _resolve_weather never falls through to a 3rd db.execute().
+    captured_queries: list[Any] = []
+
+    async def _execute_side_effect(query: Any, *args: Any, **kwargs: Any) -> Any:
+        captured_queries.append(query)
+        if len(captured_queries) == 1:
+            return context_result
+        if len(captured_queries) == 2:
+            return latest_laps_result
+        if len(captured_queries) == 3:
+            return position_result
+        if len(captured_queries) == 4:
+            return cumulative_time_result
+        raise AssertionError(f"unexpected extra db.execute call: {query}")
+
+    mock_db_session.execute.side_effect = _execute_side_effect
+
+    # Weather cache hit so _resolve_weather never falls through to an extra db.execute().
     await fakeredis.set(
         prediction_worker._weather_key(season, round_number),
         json.dumps({"track_temp": 40.0, "air_temp": 28.0}),
     )
 
-    recorded_up_to_laps: dict[uuid.UUID, int] = {}
-
-    async def _fake_cumulative_race_time(
-        db: AsyncSession, sid: uuid.UUID, driver_id: uuid.UUID, up_to_lap: int
-    ) -> float:
-        recorded_up_to_laps[driver_id] = up_to_lap
-        return 0.0
-
-    monkeypatch.setattr(prediction_worker, "_cumulative_race_time", _fake_cumulative_race_time)
-
-    await prediction_worker._build_race_state(
+    race_state = await prediction_worker._build_race_state(
         mock_db_session,
         fakeredis,
         session_id,
@@ -89,17 +101,27 @@ async def test_build_race_state_seeds_cumulative_time_from_current_lap_for_every
         58,
     )
 
-    assert recorded_up_to_laps[driver_a_id] == current_lap
-    assert recorded_up_to_laps[driver_b_id] == current_lap
-    assert recorded_up_to_laps[driver_a_id] != lap_a.lap_number
-    assert recorded_up_to_laps[driver_b_id] != lap_b.lap_number
+    # Exactly one query for cumulative time regardless of field size — the N+1 fix
+    # this test guards: 4 total db.execute() calls (context, latest_laps, position,
+    # cumulative_time), never one more per driver.
+    assert len(captured_queries) == 4
+
+    cumulative_time_query = captured_queries[3]
+    compiled = str(cumulative_time_query.compile(compile_kwargs={"literal_binds": True}))
+    assert str(current_lap) in compiled
+    assert str(lap_a.lap_number) not in compiled
+    assert str(lap_b.lap_number) not in compiled
+
+    driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
+    driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
+    assert driver_a_state.cumulative_race_time_seconds == 4321.5
+    assert driver_b_state.cumulative_race_time_seconds == 4310.0
 
 
 @pytest.mark.unit
 async def test_build_race_state_starting_position_uses_current_lap_not_final_position(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """starting_position must reflect the driver's position AT current_lap, not
     their absolute-latest DB row's position — for a completed session (or any
@@ -129,17 +151,20 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
     position_result = MagicMock()
     position_result.all.return_value = [(driver_id, 10)]
 
-    mock_db_session.execute.side_effect = [context_result, latest_laps_result, position_result]
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
 
     await fakeredis.set(
         prediction_worker._weather_key(season, round_number),
         json.dumps({"track_temp": 40.0, "air_temp": 28.0}),
     )
-
-    async def _stub_cumulative_race_time(*args: Any, **kwargs: Any) -> float:
-        return 0.0
-
-    monkeypatch.setattr(prediction_worker, "_cumulative_race_time", _stub_cumulative_race_time)
 
     race_state = await prediction_worker._build_race_state(
         mock_db_session,
@@ -161,7 +186,6 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
 async def test_build_race_state_position_query_filters_by_session_id(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The position-as-of-current_lap query must filter by session_id on the
     outer select, not just inside its subquery — otherwise (the regression this
@@ -198,6 +222,9 @@ async def test_build_race_state_position_query_filters_by_session_id(
     position_result = MagicMock()
     position_result.all.return_value = [(driver_id, 10)]
 
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+
     captured_queries: list[Any] = []
 
     async def _execute_side_effect(query: Any, *args: Any, **kwargs: Any) -> Any:
@@ -208,6 +235,8 @@ async def test_build_race_state_position_query_filters_by_session_id(
             return latest_laps_result
         if len(captured_queries) == 3:
             return position_result
+        if len(captured_queries) == 4:
+            return cumulative_time_result
         raise AssertionError(f"unexpected extra db.execute call: {query}")
 
     mock_db_session.execute.side_effect = _execute_side_effect
@@ -216,11 +245,6 @@ async def test_build_race_state_position_query_filters_by_session_id(
         prediction_worker._weather_key(season, round_number),
         json.dumps({"track_temp": 40.0, "air_temp": 28.0}),
     )
-
-    async def _stub_cumulative_race_time(*args: Any, **kwargs: Any) -> float:
-        return 0.0
-
-    monkeypatch.setattr(prediction_worker, "_cumulative_race_time", _stub_cumulative_race_time)
 
     race_state = await prediction_worker._build_race_state(
         mock_db_session,

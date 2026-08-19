@@ -689,6 +689,29 @@ async def _build_race_state(
     position_rows = (await db.execute(position_query)).all()
     position_by_driver: dict[uuid.UUID, int | None] = {row[0]: row[1] for row in position_rows}
 
+    # Batched replacement for what was previously one _cumulative_race_time()
+    # call per driver inside the loop below (an N+1: ~20 separate DB round
+    # trips for a 20-driver field, the confirmed dominant cost behind this
+    # task's 65-88s end-to-end runtime — see CLAUDE.md's Deferred Wiring
+    # "Single --pool=solo Celery worker" entry). Same filter shape as
+    # _cumulative_race_time (session_id, lap_number <= current_lap,
+    # lap_time_seconds IS NOT NULL), just grouped by driver_id instead of
+    # scoped to one — every driver in this loop shares the same up_to_lap
+    # (current_lap), so one GROUP BY query covers all of them.
+    cumulative_time_query = (
+        select(LapData.driver_id, func.sum(LapData.lap_time_seconds))
+        .where(
+            LapData.session_id == session_id,
+            LapData.lap_number <= current_lap,
+            LapData.lap_time_seconds.is_not(None),
+        )
+        .group_by(LapData.driver_id)
+    )
+    cumulative_time_rows = (await db.execute(cumulative_time_query)).all()
+    cumulative_time_by_driver: dict[uuid.UUID, float] = {
+        row[0]: float(row[1] or 0.0) for row in cumulative_time_rows
+    }
+
     drivers: list[DriverRaceState] = []
     requesting_driver_found = False
     for lap in latest_laps:
@@ -705,7 +728,7 @@ async def _build_race_state(
         # bakes a fake multi-lap time gap into cumulative_race_time_seconds
         # that swamps real on-track gaps of a few seconds, since simulate_race
         # advances every driver in lockstep from current_lap + 1 onward.
-        cumulative_time = await _cumulative_race_time(db, session_id, lap.driver_id, current_lap)
+        cumulative_time = cumulative_time_by_driver.get(lap.driver_id, 0.0)
         starting_position = (
             position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
         )
