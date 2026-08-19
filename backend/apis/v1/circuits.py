@@ -16,7 +16,17 @@ from backend.services import circuit_service
 router = APIRouter(prefix="/circuits", tags=["circuits"])
 
 
-@router.get("/{circuit_id}/outline", response_model=CircuitOutlineResponse)
+@router.get(
+    "/{circuit_id}/outline",
+    response_model=CircuitOutlineResponse,
+    summary="Get circuit track outline for the map view",
+    description=(
+        "Returns the rotated/normalized SVG-viewBox track polyline and corner "
+        "markers for one circuit, extracted once from a real FastF1 session's "
+        "fastest-lap position telemetry. Used to draw the static track outline "
+        "behind the live Circuit Map Panel's driver dots."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_circuit_outline(
     request: Request,

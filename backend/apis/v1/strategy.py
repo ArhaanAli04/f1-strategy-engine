@@ -66,7 +66,57 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
 # uuid.UUID-typed, so a literal "simulate" first segment already fails that
 # conversion and falls through correctly regardless of order — but declaring
 # the static-prefix route first is the safer, more explicit convention.
-@router.get("/simulate/{task_id}", response_model=SimulateTaskStatusResponse)
+@router.get(
+    "/simulate/{task_id}",
+    response_model=SimulateTaskStatusResponse,
+    summary="Poll a race simulation task for its result",
+    description=(
+        "Polls the Celery result backend for a task_id returned by POST "
+        "/{session_id}/simulate. status is PENDING/STARTED while running; "
+        "result is populated only once status is SUCCESS."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "task_id": "3f9c1e2a-7b4d-4e6a-8c1f-2a5d9b8e4c10",
+                            "status": "SUCCESS",
+                            "result": {
+                                "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "strategies": [
+                                    {
+                                        "pit_laps": [22, 41],
+                                        "compounds": ["MEDIUM", "HARD"],
+                                        "predicted_finish_time": 5423.7,
+                                        "position_gain_loss": 1,
+                                        "confidence_interval": [5401.2, 5449.8],
+                                        "explanation": {
+                                            "pit_cost_seconds": 22.5,
+                                            "drivers_overtaken": [
+                                                {
+                                                    "position": 7,
+                                                    "driver_id": (
+                                                        "2c6b1f8e-4a3d-4b2c-9e7f-1d8a5c3b6f42"
+                                                    ),
+                                                    "gap_seconds": 3.2,
+                                                }
+                                            ],
+                                            "remaining_laps": 30,
+                                            "fresh_tyre_gain_per_lap": 0.41,
+                                            "total_recoverable_seconds": 12.3,
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
 @limiter.limit(rate_limit_value)
 async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskStatusResponse:
     result = AsyncResult(task_id, app=celery_app)
@@ -80,6 +130,48 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
     "/{session_id}/simulate",
     response_model=SimulateTaskAccepted,
     status_code=status.HTTP_202_ACCEPTED,
+    summary="Queue a Monte Carlo race strategy simulation",
+    description=(
+        "Enqueues a 1000-run Monte Carlo simulation (Celery task) for one driver "
+        "at their current race state. Leave pit_laps empty to let the simulation "
+        "decide pit timing autonomously, or set pit_laps + compounds to force a "
+        "specific what-if pit plan. Returns immediately with a task_id — poll "
+        "GET /simulate/{task_id} for the result."
+    ),
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "autonomous": {
+                            "summary": "Let the simulation decide pit timing",
+                            "value": {
+                                "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "current_lap": 18,
+                                "current_compound": "MEDIUM",
+                                "current_tyre_age": 12,
+                                "remaining_laps": 40,
+                                "pit_laps": [],
+                                "compounds": [],
+                            },
+                        },
+                        "what_if_forced_pit": {
+                            "summary": "Force a two-stop plan (MEDIUM then HARD)",
+                            "value": {
+                                "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "current_lap": 18,
+                                "current_compound": "MEDIUM",
+                                "current_tyre_age": 12,
+                                "remaining_laps": 40,
+                                "pit_laps": [22, 41],
+                                "compounds": ["MEDIUM", "HARD"],
+                            },
+                        },
+                    }
+                }
+            }
+        }
+    },
 )
 @limiter.limit(rate_limit_value)
 async def simulate_strategy(
@@ -101,7 +193,48 @@ async def simulate_strategy(
     return SimulateTaskAccepted(task_id=task.id, status=task.status)
 
 
-@router.get("/{session_id}/{driver_id}/pit-window", response_model=list[PitWindowResponse])
+@router.get(
+    "/{session_id}/{driver_id}/pit-window",
+    response_model=list[PitWindowResponse],
+    summary="Get predicted optimal pit windows for a driver",
+    description=(
+        "Returns predicted pit lap(s) with a projected total time delta and, "
+        "when available, the top SHAP feature contributions behind the "
+        "prediction (tyre age, gap to rivals, safety car probability, etc.)."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "example": [
+                            {
+                                "pit_lap": 24,
+                                "window_start": 22,
+                                "window_end": 26,
+                                "projected_total_delta_seconds": -4.8,
+                                "shap_explanation": [
+                                    {
+                                        "feature_name": "predicted_life_remaining",
+                                        "value": 3.0,
+                                        "contribution": 0.31,
+                                        "direction": "+",
+                                    },
+                                    {
+                                        "feature_name": "safety_car_probability",
+                                        "value": 0.12,
+                                        "contribution": -0.05,
+                                        "direction": "-",
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    },
+)
 @limiter.limit(rate_limit_value)
 async def get_pit_window(
     request: Request,
@@ -116,7 +249,15 @@ async def get_pit_window(
     )
 
 
-@router.get("/{session_id}/{driver_id}/undercut", response_model=UndercutThreatResponse)
+@router.get(
+    "/{session_id}/{driver_id}/undercut",
+    response_model=UndercutThreatResponse,
+    summary="Get undercut threat probability against a rival",
+    description=(
+        "Returns the probability that pitting now gains track position over "
+        "the target rival, plus the projected gap."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_undercut(
     request: Request,
@@ -132,7 +273,16 @@ async def get_undercut(
     )
 
 
-@router.get("/{session_id}/overview", response_model=StrategyOverviewResponse)
+@router.get(
+    "/{session_id}/overview",
+    response_model=StrategyOverviewResponse,
+    summary="Get predicted pit strategy for every driver in a session",
+    description=(
+        "Returns each driver's predicted pit lap and pit probability for the "
+        "whole field — the compute-heaviest endpoint (cache-aside, ~16-17s "
+        "on a cold miss)."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_strategy_overview(
     request: Request,
