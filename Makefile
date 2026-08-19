@@ -1,8 +1,15 @@
-.PHONY: install dev test test-unit test-int test-e2e lint migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data ingest-live warm-cache
+.PHONY: install dev dev-down test test-unit test-int test-integration test-e2e lint type-check migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data ingest-live warm-cache
 
+# Installs the backend (editable, with dev extras — there is no
+# backend/requirements.txt, dependencies are declared in pyproject.toml)
+# plus all three JS clients. Matches what ci.yml's jobs install per-target,
+# just gathered into one entrypoint for a fresh clone.
 install:
 	pip install -e ".[dev]"
 	pre-commit install
+	cd web && npm ci
+	cd desktop && npm ci
+	cd mobile && npm ci
 
 dev:
 	# --env-file .env (only if present): Compose otherwise looks for .env
@@ -14,6 +21,9 @@ dev:
 	# in docker-compose.yml — a fresh clone with no .env must still boot.
 	docker compose -f infra/docker/docker-compose.yml $(if $(wildcard .env),--env-file .env,) up --build
 
+dev-down:
+	docker compose -f infra/docker/docker-compose.yml down
+
 test:
 	pytest backend/tests/ -v
 
@@ -23,13 +33,21 @@ test-unit:
 test-int:
 	pytest backend/tests/integration/ -m integration -v
 
+# Alias for test-int — kept alongside it since some docs/scripts refer to
+# this target by the longer name. Both run the same suite.
+test-integration: test-int
+
 test-e2e:
 	pytest backend/tests/e2e/ -m e2e -v
 
 lint:
-	ruff check .
+	ruff check backend/ --fix
 	ruff format --check .
+	cd web && npm run lint
+
+type-check:
 	mypy backend/ --strict
+	cd web && npx tsc -b
 
 migrate:
 	alembic upgrade head

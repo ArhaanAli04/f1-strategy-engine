@@ -69,7 +69,38 @@ def _get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
-@router.get("/{session_id}/{driver_id}/live", response_model=LiveTelemetryResponse)
+@router.get(
+    "/{session_id}/{driver_id}/live",
+    response_model=LiveTelemetryResponse,
+    summary="Get a driver's latest live car telemetry sample",
+    description=(
+        "Returns the most recent decoded CarData sample (speed, gear, "
+        "throttle, brake, DRS status) for one driver from the live Redis "
+        "cache — empty/None fields if no live ingestor is currently running "
+        "for this session."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "session_id": "3f9c1e2a-7b4d-4e6a-8c1f-2a5d9b8e4c10",
+                            "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                            "data": {
+                                "speed_kmh": 312.0,
+                                "gear": 7,
+                                "throttle_pct": 100.0,
+                                "brake": False,
+                                "drs": "open",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
 @limiter.limit(rate_limit_value)
 async def get_live_telemetry(
     request: Request,
@@ -81,7 +112,15 @@ async def get_live_telemetry(
     return await telemetry_service.get_live_lap_for_session(redis_client, db, session_id, driver_id)
 
 
-@router.get("/{session_id}/{driver_id}/history", response_model=list[LapHistoryBucket])
+@router.get(
+    "/{session_id}/{driver_id}/history",
+    response_model=list[LapHistoryBucket],
+    summary="Get a driver's recent lap-time history buckets",
+    description=(
+        "Returns average sector/lap times over the last N laps for one "
+        "driver — used for pace-trend charts."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_driver_lap_history(
     request: Request,
@@ -96,7 +135,15 @@ async def get_driver_lap_history(
     )
 
 
-@router.get("/{session_id}/gaps", response_model=SessionGapsResponse)
+@router.get(
+    "/{session_id}/gaps",
+    response_model=SessionGapsResponse,
+    summary="Get gap-to-ahead/behind for every driver in a session",
+    description=(
+        "Returns each driver's current position and gap (seconds) to the "
+        "car ahead and behind — feeds the timing tower."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_session_gaps(
     request: Request,
@@ -107,7 +154,15 @@ async def get_session_gaps(
     return await telemetry_service.get_session_gaps_for_session(redis_client, db, session_id)
 
 
-@router.get("/{session_id}/positions", response_model=list[DriverPosition])
+@router.get(
+    "/{session_id}/positions",
+    response_model=list[DriverPosition],
+    summary="Get every car's latest live X/Y position",
+    description=(
+        "Returns each car's latest live track position (keyed by car "
+        "number, not driver_id) for the Circuit Map Panel's moving dots."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_session_positions(
     request: Request,
@@ -118,7 +173,16 @@ async def get_session_positions(
     return await telemetry_service.get_driver_positions_for_session(redis_client, db, session_id)
 
 
-@router.get("/{session_id}/car-numbers", response_model=list[DriverCarNumber])
+@router.get(
+    "/{session_id}/car-numbers",
+    response_model=list[DriverCarNumber],
+    summary="Get the driver_id-to-car-number mapping for a session",
+    description=(
+        "Bridges live position data (keyed by car number) to the driver "
+        "roster (keyed by driver_id) — self-corrects for reserve-driver "
+        "substitutions."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_session_car_numbers(
     request: Request,
