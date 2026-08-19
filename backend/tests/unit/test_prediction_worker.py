@@ -108,9 +108,14 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
 
     cumulative_time_query = captured_queries[3]
     compiled = str(cumulative_time_query.compile(compile_kwargs={"literal_binds": True}))
-    assert str(current_lap) in compiled
-    assert str(lap_a.lap_number) not in compiled
-    assert str(lap_b.lap_number) not in compiled
+    # Targeted on the "lap_number <= N" clause specifically, not a bare substring
+    # check on the numbers themselves — a bare `str(current_lap) in compiled` (or
+    # the drivers' own lap numbers) is a false-negative trap: session_id/driver_id
+    # UUIDs are also in this compiled SQL (literal_binds renders them inline) and
+    # can coincidentally contain the same digits as a substring.
+    assert f"lap_number <= {current_lap}" in compiled
+    assert f"lap_number <= {lap_a.lap_number}" not in compiled
+    assert f"lap_number <= {lap_b.lap_number}" not in compiled
 
     driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
     driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
