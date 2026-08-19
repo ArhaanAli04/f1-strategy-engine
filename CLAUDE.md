@@ -420,13 +420,14 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      35
-Status:   Index audit — all composite indexes already 
-          exist from Days 8-16, no migration needed 
-          (EXPLAIN ANALYZE confirmed on 166,453 rows). 
-          N+1 fix: _build_race_state batches per-driver cumulative time into one GROUP BY query (was ~20 sequential DB calls). Impact: /strategy/simulate p50 3000ms→300ms (10x), p95 6300ms→2500ms. Regression test added 
-          asserting exactly 4 db.execute() calls. Load test: 100 users, all targets met(overview p95 1300ms, simulate p95 2500ms, failure rate 0.29%).
-Next:     Day 37 — Documentation, README, API docs (Day 36 dry run scheduled for Dutch GP race weekend, August 24)
+Day:      37
+Status:   Comprehensive documentation complete. 
+          README.md rewritten (9 sections, ASCII 
+          architecture diagram, tech stack table, 
+          docs navigation table). docs/architecture.md (8 architectural decisions with Decision/Alternatives/Reasoning/Tradeoffs structure).docs/ml-models.md (7 models documented with real metrics, feature columns, retrain commands). docs/runbook.md expanded (race day checklist, 
+          common issues, replay session guide). FastAPI Swagger audit: 31 endpoints with summary/description, 6 with openapi_extra examples. CONTRIBUTING.md written. Makefile extended (dev-down, type-check, multi-client 
+          install). .env.example updated with missing Supabase/Upstash vars.
+Next:     Day 38 — Edge cases, error handling audit & resilience testing (Day 36 dry run scheduled for Dutch GP race weekend, August 24)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
