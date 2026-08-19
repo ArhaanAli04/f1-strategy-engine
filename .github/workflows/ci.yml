@@ -148,6 +148,7 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # test_security.py calls get_auth_settings() directly, which requires
       # SECRET_KEY with no default (backend/core/config.py's AuthSettings).
@@ -176,8 +177,16 @@ jobs:
       # dlopen()s at import time (see CLAUDE.md's libgomp1 note). ubuntu-latest
       # runners carry it via build-essential already, but pin the install here
       # too so a runner-image change can't silently reintroduce this failure.
-      - name: Install libgomp1
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      # The sed rewrite matches the e2e-tests job's fix: the azure.archive.ubuntu.com
+      # mirror GitHub-hosted runners default to intermittently hangs on
+      # `apt-get update` for 20+ minutes instead of failing fast — falling back
+      # to the main archive.ubuntu.com mirror avoids that hang.
+      - name: Install system dependencies
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -195,6 +204,7 @@ jobs:
     name: Integration tests
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # Not strictly required today: conftest.py's session-scoped autouse
       # fixture already does os.environ.setdefault("SECRET_KEY",
@@ -226,8 +236,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install libgomp1
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      # Same azure.archive.ubuntu.com hang and fix as unit-tests/e2e-tests above.
+      - name: Install system dependencies
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
