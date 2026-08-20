@@ -488,13 +488,65 @@ Update this list as each service is configured.
 - sentry.io → New Project → Python → FastAPI
 - Add DSN to .env: SENTRY_DSN=https://...
 
-**GitHub Secrets (add before Day 19):**
-- AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-- DATABASE_URL (production Supabase)
-- REDIS_URL (production Upstash)
-- SECRET_KEY (fresh 64-char random string for production)
-- SENTRY_DSN
-- KUBECONFIG (base64-encoded kubectl config)
+**GitHub Secrets:** see the "GitHub Secrets Checklist" section below for the
+full, verified-against-the-actual-workflow-files list — the original Day 19
+list above (`DATABASE_URL`/`REDIS_URL`/`KUBECONFIG`) named secrets that no
+current workflow actually references and is kept here only as history.
+
+## GitHub Secrets Checklist
+
+Audited Day 39 by reading every `.github/workflows/*.yml` file and listing
+every `${{ secrets.X }}` actually referenced, then cross-checked Day 39
+against the real GitHub Secrets page (repo Settings → Secrets and variables
+→ Actions) — every secret below is **confirmed set as of 2026-08-20**.
+Re-audit the "referenced in" column whenever a workflow file changes which
+secrets it reads.
+
+### Referenced by a workflow today
+
+| Secret | Referenced in | Status | Notes |
+|---|---|---|---|
+| `AWS_ACCESS_KEY_ID` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | S3 model storage + ECR push |
+| `AWS_SECRET_ACCESS_KEY` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | |
+| `AWS_REGION` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | |
+| `ECR_REGISTRY` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | `build-and-push`/`migrate` are NOT deferred — they run on every merge to `main` even though the K8s deploy stages after them (`deploy-staging`/`deploy-production`) are still placeholders. |
+| `ECR_BACKEND_REPO` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | Same as above. |
+| `ECR_WORKER_REPO` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | Same as above. Once Fly.io is live (Day 40) and `deploy-production` builds straight from the Dockerfile, ECR push may become dead weight worth removing — not done today, out of scope for this audit. |
+| `SUPABASE_DIRECT_URL` | `cd.yml` (`migrate`), `keep-supabase-alive.yml` | ✅ set, confirmed 2026-08-20 | Session-mode pooler, port 5432 — the Supabase secret CI/CD actually uses for migrations + the keep-alive ping. |
+| `SLACK_WEBHOOK_DEPLOY` | `cd.yml`, `train-models.yml`, `load-test.yml`, `keep-supabase-alive.yml` | ✅ set, confirmed 2026-08-20 | Distinct from `.env`'s `SLACK_WEBHOOK_CRITICAL`/`SLACK_WEBHOOK_WARNING` (Alertmanager, local `.env` only, never a GitHub Secret) — three differently-scoped Slack webhooks exist in this project; don't conflate them. |
+| `VERCEL_TOKEN` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VERCEL_ORG_ID` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VERCEL_PROJECT_ID` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VITE_API_URL_PROD` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | Even set, this points at nothing real until the Fly.io backend exists (Day 40) — see the "VITE_API_URL_PROD placeholder" blocker note in Current Project Phase. Revisit its value after Day 40. |
+| `GITHUB_TOKEN` | `train-models.yml`, `cd-desktop.yml` | ✅ auto-provided | Injected automatically by GitHub Actions per run — not something to add manually, doesn't appear on the Secrets page. |
+
+### Set on the Secrets page but not yet read by any workflow
+
+Confirmed present 2026-08-20. These mirror `.env.example`'s app-runtime
+vars — set proactively so they're ready for the Day 40 Fly.io
+`deploy-production` job (via `fly secrets set` or an env-passthrough step)
+rather than something to fix today; no current workflow file reads them via
+`${{ secrets.X }}`.
+
+- `AWS_BUCKET_NAME`, `ENVIRONMENT`, `FASTF1_CACHE_DIR`, `METRICS_PASSWORD`,
+  `METRICS_USER`, `RELEASE_VERSION` — app runtime config, not yet wired into
+  any deploy step.
+- `SECRET_KEY` — every CI job that needs one (`unit-tests`/`integration-tests`/
+  `e2e-tests` in `ci.yml`) hardcodes a non-secret placeholder value directly
+  in the job `env:` block instead, by design (see each job's own comment) —
+  this real secret is reserved for the Day 40 production app.
+- `SENTRY_DSN` — same reasoning; needed once Day 40's real Fly.io deploy step
+  lands and passes it through to the running app.
+- `SUPABASE_DATABASE_URL` — the transaction-mode pooler URL (port 6543, app
+  runtime), as opposed to `SUPABASE_DIRECT_URL` (session-mode pooler, port
+  5432, migrations) above. Both are correctly present; `SUPABASE_DATABASE_URL`
+  just isn't consumed by any workflow file yet — it's for the app's own
+  `DATABASE_URL`/`TIMESCALE_URL` once a real deploy job sets them.
+- `UPSTASH_REDIS_URL` — same category, for the app's own `REDIS_URL` once wired
+  into a real deploy job.
+
+`KUBECONFIG` is not on the Secrets page and none is needed — production
+target is Fly.io (decided Day 24), not Kubernetes.
 
 
 ## Development Tooling Notes
