@@ -138,6 +138,13 @@ celerybeat.pid
 
 # Environments
 .env
+# Explicit alongside bare .env above so this is checkable at a glance —
+# web/ and desktop/ already have their own .gitignore rules covering this
+# (web/.gitignore's `.env*`, desktop/.gitignore's `*.local`/`.env.production`),
+# this is redundant defense-in-depth for anything at the repo root.
+# .env.example is intentionally exempted — it's committed as setup docs.
+.env.*
+!.env.example
 .envrc
 .venv
 env/

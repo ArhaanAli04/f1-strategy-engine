@@ -56,7 +56,7 @@ f1-strategy-engine/
 | ML               | XGBoost, LightGBM, scikit-learn, NumPy, SciPy, Numba   |
 | Explainability   | SHAP (TreeExplainer for XGBoost/LightGBM)               |
 | Data Ingestion   | FastF1, httpx (async), websockets, APScheduler          |
-| Primary DB       | PostgreSQL + TimescaleDB extension (Supabase cloud)     |
+| Primary DB       | PostgreSQL (Supabase)                                   |
 | Cache            | Redis (Upstash cloud), in-memory fallback on Redis down |
 | Migrations       | Alembic (async engine, autogenerate)                    |
 | Tests            | pytest, testcontainers, Playwright, Locust              |
@@ -488,13 +488,65 @@ Update this list as each service is configured.
 - sentry.io → New Project → Python → FastAPI
 - Add DSN to .env: SENTRY_DSN=https://...
 
-**GitHub Secrets (add before Day 19):**
-- AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
-- DATABASE_URL (production Supabase)
-- REDIS_URL (production Upstash)
-- SECRET_KEY (fresh 64-char random string for production)
-- SENTRY_DSN
-- KUBECONFIG (base64-encoded kubectl config)
+**GitHub Secrets:** see the "GitHub Secrets Checklist" section below for the
+full, verified-against-the-actual-workflow-files list — the original Day 19
+list above (`DATABASE_URL`/`REDIS_URL`/`KUBECONFIG`) named secrets that no
+current workflow actually references and is kept here only as history.
+
+## GitHub Secrets Checklist
+
+Audited Day 39 by reading every `.github/workflows/*.yml` file and listing
+every `${{ secrets.X }}` actually referenced, then cross-checked Day 39
+against the real GitHub Secrets page (repo Settings → Secrets and variables
+→ Actions) — every secret below is **confirmed set as of 2026-08-20**.
+Re-audit the "referenced in" column whenever a workflow file changes which
+secrets it reads.
+
+### Referenced by a workflow today
+
+| Secret | Referenced in | Status | Notes |
+|---|---|---|---|
+| `AWS_ACCESS_KEY_ID` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | S3 model storage + ECR push |
+| `AWS_SECRET_ACCESS_KEY` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | |
+| `AWS_REGION` | `cd.yml`, `train-models.yml` | ✅ set, confirmed 2026-08-20 | |
+| `ECR_REGISTRY` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | `build-and-push`/`migrate` are NOT deferred — they run on every merge to `main` even though the K8s deploy stages after them (`deploy-staging`/`deploy-production`) are still placeholders. |
+| `ECR_BACKEND_REPO` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | Same as above. |
+| `ECR_WORKER_REPO` | `cd.yml` (`build-and-push`) | ✅ set, confirmed 2026-08-20 | Same as above. Once Fly.io is live (Day 40) and `deploy-production` builds straight from the Dockerfile, ECR push may become dead weight worth removing — not done today, out of scope for this audit. |
+| `SUPABASE_DIRECT_URL` | `cd.yml` (`migrate`), `keep-supabase-alive.yml` | ✅ set, confirmed 2026-08-20 | Session-mode pooler, port 5432 — the Supabase secret CI/CD actually uses for migrations + the keep-alive ping. |
+| `SLACK_WEBHOOK_DEPLOY` | `cd.yml`, `train-models.yml`, `load-test.yml`, `keep-supabase-alive.yml` | ✅ set, confirmed 2026-08-20 | Distinct from `.env`'s `SLACK_WEBHOOK_CRITICAL`/`SLACK_WEBHOOK_WARNING` (Alertmanager, local `.env` only, never a GitHub Secret) — three differently-scoped Slack webhooks exist in this project; don't conflate them. |
+| `VERCEL_TOKEN` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VERCEL_ORG_ID` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VERCEL_PROJECT_ID` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | |
+| `VITE_API_URL_PROD` | `cd-web.yml` | ✅ set, confirmed 2026-08-20 | Even set, this points at nothing real until the Fly.io backend exists (Day 40) — see the "VITE_API_URL_PROD placeholder" blocker note in Current Project Phase. Revisit its value after Day 40. |
+| `GITHUB_TOKEN` | `train-models.yml`, `cd-desktop.yml` | ✅ auto-provided | Injected automatically by GitHub Actions per run — not something to add manually, doesn't appear on the Secrets page. |
+
+### Set on the Secrets page but not yet read by any workflow
+
+Confirmed present 2026-08-20. These mirror `.env.example`'s app-runtime
+vars — set proactively so they're ready for the Day 40 Fly.io
+`deploy-production` job (via `fly secrets set` or an env-passthrough step)
+rather than something to fix today; no current workflow file reads them via
+`${{ secrets.X }}`.
+
+- `AWS_BUCKET_NAME`, `ENVIRONMENT`, `FASTF1_CACHE_DIR`, `METRICS_PASSWORD`,
+  `METRICS_USER`, `RELEASE_VERSION` — app runtime config, not yet wired into
+  any deploy step.
+- `SECRET_KEY` — every CI job that needs one (`unit-tests`/`integration-tests`/
+  `e2e-tests` in `ci.yml`) hardcodes a non-secret placeholder value directly
+  in the job `env:` block instead, by design (see each job's own comment) —
+  this real secret is reserved for the Day 40 production app.
+- `SENTRY_DSN` — same reasoning; needed once Day 40's real Fly.io deploy step
+  lands and passes it through to the running app.
+- `SUPABASE_DATABASE_URL` — the transaction-mode pooler URL (port 6543, app
+  runtime), as opposed to `SUPABASE_DIRECT_URL` (session-mode pooler, port
+  5432, migrations) above. Both are correctly present; `SUPABASE_DATABASE_URL`
+  just isn't consumed by any workflow file yet — it's for the app's own
+  `DATABASE_URL`/`TIMESCALE_URL` once a real deploy job sets them.
+- `UPSTASH_REDIS_URL` — same category, for the app's own `REDIS_URL` once wired
+  into a real deploy job.
+
+`KUBECONFIG` is not on the Secrets page and none is needed — production
+target is Fly.io (decided Day 24), not Kubernetes.
 
 
 ## Development Tooling Notes
@@ -581,176 +633,122 @@ to avoid out-of-scope migrations. Add these on the specified day.
 
 ## Deferred Wiring & Integration Gaps
 
-These are not schema changes but known integration gaps to fix on future days.
+These are not schema changes but known integration gaps. Audited Day 39:
+each item below is tagged genuinely deferred (real future work), out of
+scope for this portfolio project (documented and closed, not going to
+happen), or was found already fixed and moved into ### Notes below instead.
 
-- **extract_circuit_outlines.py (Checkpoint C) must be run manually against
-  Supabase after Checkpoint C is complete** — same pattern as seed_circuits.py
-  on Day 23. Set DATABASE_URL to SUPABASE_DATABASE_URL temporarily, run the
-  script, reset back.
+- **[deferred] extract_circuit_outlines.py must still be run manually
+  against Supabase.** `backend/scripts/extract_circuit_outlines.py`'s and
+  `seed_circuit_outlines.py`'s own docstrings still read "run locally
+  first... then set DATABASE_URL to SUPABASE_DATABASE_URL and re-run
+  against production" as an instruction, not a completed step — no
+  completion note exists anywhere in this file for the production run, and
+  this session has no way to query Supabase directly to confirm either way.
+  **Action needed:** confirm whether `circuits.map_geometry` is actually
+  populated in the production Supabase DB; if not, run both scripts against
+  it (same pattern as `seed_circuits.py`/`seed_teams.py`) before relying on
+  the live circuit map feature against production data.
 
-- **Circuit map sector boundaries (S1/S2/S3):** requires timestamp-correlation
-  between Lap.Sector1SessionTime/Sector2SessionTime and position telemetry
-  get_pos_data() SessionTime column. ~50ms accuracy (meters at racing speed).
-  Needs new logic in extract_circuit_outlines.py + edge case handling for
-  missing sector timestamps. Defer to after circuit map feature is complete.
+- **[deferred] Circuit map sector boundaries (S1/S2/S3):** requires
+  timestamp-correlation between `Lap.Sector1SessionTime`/
+  `Sector2SessionTime` and position telemetry's `get_pos_data()`
+  `SessionTime` column (~50ms accuracy at racing speed). Needs new logic in
+  `extract_circuit_outlines.py` plus edge-case handling for missing sector
+  timestamps. The circuit map feature itself (Days 25-28) is complete, so
+  this is no longer gated on anything — genuinely still open, not started.
 
-- **retrain_incremental.py FastF1 403→mirror fallback for 2026 data:**
-  FastF1 temporarily gets a 403 from livetiming.formula1.com,
-  incorrectly falls back to livetiming-mirror.fastf1.dev which
-  has no 2026 data (mirror only patches corrupted 2021-2022 sessions),
-  resulting in SessionNotAvailableError for all 2026 rounds.
-  Current fix: rounds are skipped gracefully. Real fix needed:
-  (1) call fastf1.Cache.clear_cache() before fetching 2026 rounds,
-  (2) add retry loop (max 3 attempts, 30s delay) around load_session()
-  for current season data specifically,
-  (3) add FASTF1_CACHE_DIR setup step in train-models.yml.
-  Non-blocking — pipeline trains on 2018-2025 base corpus correctly.
-  Fix before next season when 2026 data becomes critical for MAE improvement.
+- **[deferred] retrain_incremental.py FastF1 403→mirror fallback for 2026
+  data:** FastF1 gets a 403 from `livetiming.formula1.com` and falls back
+  to `livetiming-mirror.fastf1.dev`, which has no 2026 data (only patches a
+  couple of corrupted 2021-2022 sessions), so 2026 rounds raise
+  `SessionNotAvailableError`. Current behavior: rounds are skipped
+  gracefully — non-blocking, the pipeline trains correctly on the
+  2018-2025 base corpus. Real fix (retry loop + cache clear +
+  `FASTF1_CACHE_DIR` setup in `train-models.yml`) needed before 2026 data
+  becomes important for MAE improvement — i.e. before next season, not
+  urgent today.
 
-- prometheus.yml Basic Auth credentials are hardcoded as dev defaults 
-(metrics/metrics-dev). Fix on Day 19 when setting up GitHub Secrets — 
-use an entrypoint script to substitute ${METRICS_USER}/${METRICS_PASSWORD} 
-into prometheus.yml at container startup, same pattern as alertmanager.yml's 
-Slack webhook handling.
+- **[deferred, reworded] WS keepalive ping timeouts under heavy CPU load:**
+  28,603 closures (85.7% of WS traffic) in the Day 18 500-user run. Likely
+  cause: Uvicorn's single event loop blocked by synchronous CPU-bound ML
+  inference in `/overview`'s cold path, starving asyncio ping/pong. The DB
+  pool fix has since landed (see Notes below); the originally-proposed
+  "may resolve naturally with multiple backend pods" fix assumed a
+  Kubernetes deployment, which is now out of scope (see note at the top of
+  this section) — if this is revisited, the equivalent lever on Fly.io
+  would be running multiple machines, not K8s pods. Still open; not
+  re-measured since the DB pool fix.
 
-- **WebSocket JWT in query param (?token=):** access token appears in 
-  server logs and browser history. Acceptable for now. Production fix: 
-  short-lived WebSocket ticket — exchange via REST before connection, 
-  use one-time token for WS auth instead of the full JWT.
+- **[deferred, reworded] Mobile Driver Detail charts (victory-native +
+  @shopify/react-native-skia):** still not installed — the Mobile Sync
+  Protocol section confirms Driver Detail remains "a minimal stub" with no
+  ported charts. The original "install at the start of Day 32" framing is
+  stale (Day 32 passed without this happening); the substance is unchanged
+  — `npx expo install @shopify/react-native-skia && npm install
+  victory-native` is still needed before porting
+  `web/src/components/driver/{LapTimesChart,SectorComparison,
+  StyleRadar}.tsx` onto `app/driver/[id].tsx`. Post-v1.0.0 polish, not
+  blocking.
 
-- **Cache stampede fix does not address the underlying 16-17s compute
-  floor:** the single-flight lock added to `cache_service.cacheable` (see
-  Notes: "Cache stampede single-flight lock") removes the *redundant*
-  computation cost, but does nothing about the *underlying* ~16-17s
-  single-computation cost itself (`get_competitor_predicted_strategy`'s
-  nested per-driver ML inference loop in `strategy_service.py`) — confirmed
-  in the Day 13 re-run: `/strategy/overview`'s p95/p99/max were *unchanged*
-  (16000/19000/20070ms) even with the stampede fixed, because a request
-  that's unlucky enough to need a fresh computation (or wait behind one)
-  still pays close to that full 16-17s floor. This is now the single
-  highest-leverage remaining target — a future day should profile why ~20
-  drivers' worth of pit_predictor + tire_deg calls costs 16-17s (candidate
-  causes: no batching across drivers, redundant per-lap looping inside
-  `_first_pit_lap_over_threshold`) before reaching for anything more
-  drastic.
+- **[deferred, consolidated] `/strategy/{session_id}/overview`'s 16-17s
+  cold-compute floor — partially addressed, not fully closed.** Originally
+  two separate entries (per-driver ML inference loop cost, and the cache
+  stampede fix not touching the underlying compute cost) describing the
+  same root problem; merged here. Batching was applied pre-Day-22
+  (`_first_pit_laps_over_threshold_batch`, verified 35% per-call
+  improvement, 0.937s → 0.612s models-warm) and the DB connection pool
+  fix landed 2026-07-30 (QueuePool timeouts: 493 → 16 → 0 across three
+  re-runs — see Notes below), which was suspected to be the dominant
+  remaining cause of the 16-17s *concurrent-load* tail (p95/p99). **Not
+  yet verified:** no load test has re-measured `/overview`'s p95/p99/max
+  specifically since the DB pool fix landed — the QueuePool-timeout-count
+  evidence confirms the *symptom* (connection exhaustion) is gone, not
+  that `/overview`'s tail latency itself dropped. A fresh load test
+  against `/overview` would close this out definitively.
 
-- **`broker_pool_limit` 10->50 — applied 2026-07-16, confirmed live, did NOT
-  fix POST `/strategy/{session_id}/simulate`'s enqueue latency on its own.**
-  Original hypothesis: Celery's producer-side `broker_pool_limit` (default
-  10, confirmed via `app.conf.broker_pool_limit` before the change) capped
-  concurrent `.delay()` calls from the API process, explaining why a call
-  that should be a near-instant broker publish was taking ~12s median at 100
-  concurrent users. Raised to 50 in `workers/celery_app.py`'s
-  `app.conf.update(...)`; confirmed live post-restart. Re-ran the identical
-  baseline: p50 went from 12000ms to 14000ms — unchanged at best.
-  **Real cause identified and fixed (pre-Day-14):** `apis/v1/strategy.py`'s
-  `simulate_strategy` was wrapping `.delay()` in
-  `loop.run_in_executor(None, run_race_simulation.delay, task_payload)` —
-  passing `None` uses asyncio's *default* `ThreadPoolExecutor`, capped at
-  `min(32, cpu_count+4)` (= 20 on this container's 16 CPUs). Fixed with a
-  dedicated `_SIMULATE_ENQUEUE_EXECUTOR` (50 workers, matching
-  `broker_pool_limit=50`) — confirmed working in isolated (WS-free) load
-  test runs: p50 630-2400ms, down from ~12-14s.
-  **Regression under combined load is not a new bug — it's the WS fan-out
-  issue tracked above:** a combined Locust run (`RaceDayViewerUser` +
-  `StrategyUser` + `WebSocketUser` together, real WS traffic) showed this
-  same enqueue latency regress back to ~12s p50 even with the
-  dedicated-executor fix in place, traced to Redis's single-threaded
-  command queue backing up under the WS telemetry fan-out's
-  Nx-redundant-per-event `get_live_car_channels` GETs (see Notes: "WS
-  telemetry broadcast fan-out redundancy" for the fix). **Confirmed
-  resolved:** the 2026-07-28 100-user combined-load re-run (after the
-  fan-out fix landed) showed this enqueue latency back to p50=1900ms,
-  matching the isolated dedicated-executor fix's 630-2400ms range — fixing
-  the fan-out did resolve this regression as predicted.
+- **[out of scope — documented and closed] prometheus.yml Basic Auth
+  hardcoded dev defaults (metrics/metrics-dev):** confirmed still hardcoded
+  in `infra/monitoring/prometheus.yml` as of Day 39 — the planned Day 19
+  entrypoint-substitution fix (mirroring `alertmanager.yml`'s
+  `api_url_file` pattern) was never built, even though `METRICS_USER`/
+  `METRICS_PASSWORD` are set as real GitHub Secrets. Closing as out of
+  scope: `infra/monitoring/` is a local docker-compose-only stack (see
+  Deployment Strategy) — Prometheus is never internet-exposed in this
+  project's actual deployment plan (Fly.io hosts the backend/worker only),
+  so the dev-default credential is a genuine no-op risk, not a production
+  gap. Revisit only if Prometheus is ever deployed somewhere reachable.
 
-- **get_competitor_predicted_strategy 16-17s cold compute floor:**
-  `/strategy/{session_id}/overview` has p50=55ms (cache hits) but 
-  p99=17,000ms (cold misses). The cold path iterates all 20 drivers 
-  sequentially with ML inference per driver — no batching, no parallelism. 
-  Candidate fixes: parallelise with asyncio.gather() across drivers, 
-  or batch the tire_deg/pit_predictor calls across all 20 drivers 
-  simultaneously. Profile _first_pit_lap_over_threshold first — 
-  redundant per-lap looping may be the dominant cost.
+- **[out of scope — documented and closed] WebSocket JWT in query param
+  (`?token=`):** access token appears in server logs and browser history.
+  The proper fix (short-lived WebSocket ticket, exchanged via REST before
+  connection) is real production hardening beyond this portfolio's
+  remaining scope — closing rather than leaving open-ended. Documented here
+  as a known, accepted limitation rather than a TODO.
 
-  **Update, pre-Day-22 fix pass:** batching applied.
-  `get_competitor_predicted_strategy` (via the new
-  `_first_pit_laps_over_threshold_batch`) now calls
-  `pit_model.predict_proba` and `tire_deg_model.predict_life_remaining_batch`
-  once per lap-offset across all still-active drivers (grouped by compound
-  for the tire_deg call, since that pipeline is compound-specific), instead
-  of once per driver per offset. Verified 35% per-call improvement
-  (0.937s → 0.612s, models-warm) via a git-stash A/B against a real
-  20-driver session (`00b4f598-40ec-4792-8687-6eae51257977`). This is a
-  real, verified improvement — but does not reproduce or explain the full
-  16-17s concurrent-load floor above: an isolated single call finishes in
-  under 1s even on the pre-refactor code, so that floor is DB-pool/
-  concurrency-bound (queuing under ~100 concurrent Locust users), not pure
-  per-call model overhead. The WS fan-out fix has since landed (see Notes:
-  "WS telemetry broadcast fan-out redundancy") — the remaining floor is DB
-  connection pool sizing (below), still open.
+- **[out of scope — documented and closed] Single `--pool=solo` Celery
+  worker cannot sustain race-day traffic; race-day scaling procedure
+  (`docs/runbook.md`) assumes Kubernetes pod scaling.** The Day 18
+  500-user load test measured 65-88s/task and a 10+ hour backlog-drain
+  projection at that throughput — a real, measured limitation. The
+  proposed fix (multiple K8s worker pods, `kubectl scale`) is now out of
+  scope: production is Fly.io, not Kubernetes (decided Day 24). If this
+  project ever needed real race-day-scale traffic, the equivalent lever
+  would be `fly scale count worker=N`, itself unbuilt and out of scope for
+  today. `infra/k8s/`, `infra/helm-chart/`, and `docs/runbook.md`'s
+  Kubernetes-specific scaling/rollback procedures remain validated against
+  local Docker Desktop only, as already documented at the top of
+  `docs/runbook.md`.
 
-- **Single `--pool=solo` Celery worker cannot sustain race-day simulate
-  traffic — fix via multiple worker pods on Day 22.** This project's
-  existing `--pool=solo` rationale already anticipated needing "8+ worker
-  pods" on race day, but the Day 18 500-user load test (2026-07-23) gives
-  the first concrete number for how large that gap actually is. Grafana's
-  Celery queue-depth panel showed ~580 queued tasks at peak during the run,
-  which reads like a transient spike — it isn't. Verified directly after
-  the run: `redis-cli llen prediction_queue` still read 559 roughly 30
-  minutes after `--run-time` expired, and `docker logs docker-worker-1`
-  showed each `run_race_simulation` task taking 65-88 seconds end-to-end
-  (not the ~10s Grafana's ML-inference panel shows — that panel measures
-  only the Monte Carlo inference sub-step, not the full task including its
-  per-driver DB round trips, themselves slowed by the connection-pool
-  exhaustion above). At ~75s/task average and 559 tasks still queued, full
-  backlog drain was projected at 10+ hours on the single solo-pool worker
-  process — confirmed while writing the Day 18 E2E test
-  (`tests/e2e/test_api_flows.py`): a fresh `/simulate` call queued behind
-  this backlog did not complete even once in a 30s poll window, and only
-  succeeded (in 68s) after the stale queue was purged
-  (`celery -A backend.workers.celery_app purge -f -Q prediction_queue`,
-  555 messages removed) to unblock testing. 647 simulate requests were
-  submitted in the 10-minute run — far more than one worker pod at
-  ~0.013 tasks/sec (1/75s) can remotely keep up with.
+- **[out of scope — documented and closed] `kubectl apply --dry-run=client`
+  never validated against a real API server** for `infra/k8s/hpa.yaml`,
+  `worker-scaledobject.yaml`, `race-weekend-cronjob.yaml` — only YAML-parser
+  validated. No longer relevant: these manifests target a production
+  Kubernetes cluster that isn't part of this project's deployment plan
+  (Fly.io instead, see Deployment Strategy). Local Docker Desktop
+  validation, if ever wanted, remains possible but isn't planned work.
 
-  Proposed fix: scale to multiple worker pods for race day, as already
-  planned in the `--pool=solo` rationale — this run supplies the real
-  per-task cost (65-88s) needed to size that pool count properly instead of
-  guessing. Fix on Day 22 Kubernetes deployment alongside the DB pool
-  sizing fix above, since both block real race-day-scale traffic.
-
-- **kubectl apply --dry-run=client not yet validated:**
-  infra/k8s/hpa.yaml, worker-scaledobject.yaml, and
-  race-weekend-cronjob.yaml were validated with a YAML parser only —
-  kubectl dry-run requires an API server connection which needs a running
-  cluster. Full validation with kubectl apply --dry-run=client will happen
-  on Day 22 when Docker Desktop Kubernetes is enabled. At that point also
-  confirm Deployment names match what the Helm chart generates and update
-  placeholder names if needed.
-
-- **WS keepalive ping timeouts under heavy CPU load:** 28,603 closures
-  (85.7% of WS traffic) in 500-user run. Likely cause: Uvicorn's single
-  event loop blocked by synchronous CPU-bound ML inference in `/overview`
-  cold path, starving asyncio ping/pong. Investigate after DB pool fix and
-  K8s deployment — may resolve naturally with multiple backend pods (each
-  with its own event loop, less contention per pod).
-
-- **victory-native + @shopify/react-native-skia not installed on mobile —
-  install at the START of Day 32 before building Driver Detail charts.**
-  Deferred during Day 31's mobile build sprint: no screen in Checkpoints
-  1-6's scope (Home/Live/Strategy/Drivers/Alerts/Settings/Driver Detail
-  stub) actually renders a chart. Modern `victory-native` (the Skia-based
-  rewrite, confirmed v41.26.0 via npm registry) hard-requires
-  `@shopify/react-native-skia >=1.2.3 <3.0.0` as a peer dependency — it
-  won't import without it, which wasn't in the original Day 31 dependency
-  list. Install both together via `npx expo install
-  @shopify/react-native-skia && npm install victory-native` before
-  porting `web/src/components/driver/{LapTimesChart,SectorComparison,
-  StyleRadar}.tsx` onto `app/driver/[id].tsx` (currently a minimal
-  identity+snapshot stub, see `mobile/src/README.md`).
-
-### Dependency version drift — prometheus-fastapi-instrumentator
+### Dependency version drift — prometheus-fastapi-instrumentator (✅ fixed Day 16)
 
 pyproject.toml lower-bound-only pins caused a silent compatibility 
 break: prometheus-fastapi-instrumentator 8.0.0 crashed on every HTTP 
@@ -789,6 +787,23 @@ same pool config) → **0** (2026-07-30 100-user verification run, post-pool-fix
 this fix; the 493→16 drop was the WS fan-out fix's side effect (faster
 session turnover meant DB sessions weren't held hostage behind Redis
 backpressure).
+
+**`/strategy/simulate` enqueue latency — `broker_pool_limit` was a red
+herring, real cause fixed (✅ resolved, confirmed 2026-07-28):** Raising
+Celery's `broker_pool_limit` 10→50 (`workers/celery_app.py`) did not fix
+~12s median enqueue latency at 100 concurrent users — a re-run showed no
+improvement. Real cause: `apis/v1/strategy.py`'s `simulate_strategy` passed
+`None` as the executor to `loop.run_in_executor(None, run_race_simulation.delay,
+...)`, using asyncio's default `ThreadPoolExecutor` (capped at
+`min(32, cpu_count+4)` = 20). Fixed with a dedicated
+`_SIMULATE_ENQUEUE_EXECUTOR` (50 workers) — isolated (WS-free) tests showed
+p50 630-2400ms, down from ~12-14s. A combined-load re-run then showed the
+same symptom recur (~12s p50) via a different mechanism — Redis's
+single-threaded command queue backing up under the WS telemetry fan-out's
+Nx-redundant-per-event GETs (see "WS telemetry broadcast fan-out
+redundancy" below). Confirmed resolved once that landed: the 2026-07-28
+100-user combined-load re-run showed enqueue latency back to p50=1900ms,
+matching the isolated fix's range.
 
 **export_training_data.py one-time base corpus export (✅ completed 2026-07-30):**
 Ran once against the local Docker Postgres per the Deferred Wiring action item:
