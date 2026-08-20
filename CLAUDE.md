@@ -420,16 +420,10 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      38
-Status:   Resilience hardening complete. Redis: 
-          cache_get catches RedisError → returns None; 
-          cacheable() writes {key}:last_good shadow key 
-          on success, reads it on failure before re-raising. 
-          DB: db_connection_error_handler for 
-          OperationalError → 503 + Retry-After: 30. ML: all 4 inference calls in _run_inference wrapped in try/except → sentry capture + null prediction fallback. Celery:task_acks_late=True, task_reject_on_worker_lost=True. 4 resilience integration tests added 
-          (test_resilience.py).CLAUDE.md note: "in-memory fallback on Redis down" 
-          claim was inaccurate — now implemented via last_good shadow key pattern.
-Next:     Day 39 portfolio polish final production hardening, Day 36 dry run (Dutch   GP race Aug 24).
+Day:      39
+Status:   Supabase keep-alive GitHub Action created 
+          (cron every 5 days, pings DB via psql, Slack failure notification). GitHub Secrets audit complete — all 22 secrets confirmed set, naming mismatches documented. v1.0.0 desktop release: tauri.conf.json bumped to 1.0.0, release notes written, cd-desktop.yml wired with body_path, .exe (3.07MB) and .msi (4.25MB) published to GitHub Releases. Final hardening: .env.example complete (7 missing vars added), .gitignore updated (.env.*), CLAUDE.md TimescaleDB corrected to PostgreSQL, deferred wiring section cleaned (5 kept, 4 closed as out-of-scope, 1 resolved item noted).
+Next:     Day 40 — Fly.io deployment, Day 36 dry run (Dutch   GP race Aug 24).
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
