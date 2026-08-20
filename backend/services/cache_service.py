@@ -14,6 +14,7 @@ here takes (season, round_number) to match what's actually written.
 from __future__ import annotations
 
 import functools
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -22,9 +23,11 @@ from typing import Any, TypeVar
 import redis.asyncio as aioredis
 from prometheus_client import Counter
 from redis.asyncio.lock import Lock
-from redis.exceptions import LockNotOwnedError
+from redis.exceptions import LockNotOwnedError, RedisError
 
 from backend.core.redis_client import redis_get, redis_set
+
+logger = logging.getLogger(__name__)
 
 _CACHE_HITS = Counter("f1_cache_hits_total", "Cache hits", ["key_pattern"])
 _CACHE_MISSES = Counter("f1_cache_misses_total", "Cache misses", ["key_pattern"])
@@ -47,6 +50,12 @@ _CACHE_MISSES = Counter("f1_cache_misses_total", "Cache misses", ["key_pattern"]
 _LOCK_SUFFIX = ":lock"
 _LOCK_TIMEOUT_SECONDS = 40.0
 _LOCK_BLOCKING_TIMEOUT_SECONDS = 40.0
+
+# Written alongside the normal TTL'd key on every successful compute, with no
+# expiry of its own — the normal key's expiry is exactly what leaves nothing
+# to fall back to once it rolls over, so this needs a separate lifetime. Read
+# only when a fresh compute fails (see _compute_with_fallback below).
+_LAST_GOOD_SUFFIX = ":last_good"
 
 # Matches a UUID (or any long hex/hyphen id) or a plain integer key segment.
 _ID_SEGMENT = re.compile(r"^[0-9a-fA-F-]{8,}$|^\d+$")
@@ -75,9 +84,17 @@ async def cache_get(client: aioredis.Redis, key: str) -> Any | None:  # type: ig
         client: Redis client.
         key: Cache key (see CLAUDE.md's Redis Cache Key Schema).
     Returns:
-        The cached value (JSON-deserialised if possible), or None on a miss.
+        The cached value (JSON-deserialised if possible), or None on a miss
+        OR on a Redis connection failure — callers can't distinguish "key not
+        set" from "Redis unreachable" from this return value alone, but every
+        existing caller already treats a cache miss as "go compute it", which
+        is the correct degraded behavior when Redis is down too.
     """
-    value = await redis_get(client, key)
+    try:
+        value = await redis_get(client, key)
+    except RedisError:
+        logger.warning("Redis error on cache_get(%s) — treating as cache miss", key, exc_info=True)
+        return None
     label = _metric_label(key)
     if value is None:
         _CACHE_MISSES.labels(key_pattern=label).inc()
@@ -210,6 +227,33 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
     """
 
     def decorator(func: F) -> F:
+        async def _compute_with_fallback(client: Any, key: str, *args: Any, **kwargs: Any) -> Any:
+            """Run func(); on any compute failure, serve the last successfully cached result.
+
+            Catches Exception broadly (not a specific type) because the
+            decorated func can fail for any reason — Redis down, DB down, a
+            model exception — and every one of those cases should degrade to
+            "serve what we last knew was good" rather than 500. Re-raises
+            unchanged if there is no last-good value to fall back to, so
+            callers with nothing cached yet still see the real error.
+            """
+            last_good_key = f"{key}{_LAST_GOOD_SUFFIX}"
+            try:
+                result = await func(*args, **kwargs)
+            except Exception:
+                last_good = await cache_get(client, last_good_key)
+                if last_good is not None:
+                    logger.warning(
+                        "cacheable(%s): compute failed, serving last-known-good cached value",
+                        key,
+                        exc_info=True,
+                    )
+                    return last_good
+                raise
+            await cache_set(client, key, result, ttl)
+            await cache_set(client, last_good_key, result, None)
+            return result
+
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             client = args[0]
@@ -227,7 +271,11 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
                 # indefinitely; re-check the cache first in case it was
                 # populated in the interim.
                 cached = await cache_get(client, key)
-                return cached if cached is not None else await func(*args, **kwargs)
+                return (
+                    cached
+                    if cached is not None
+                    else await _compute_with_fallback(client, key, *args, **kwargs)
+                )
 
             try:
                 # Re-check: another caller may have populated the cache
@@ -235,9 +283,7 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
                 cached = await cache_get(client, key)
                 if cached is not None:
                     return cached
-                result = await func(*args, **kwargs)
-                await cache_set(client, key, result, ttl)
-                return result
+                return await _compute_with_fallback(client, key, *args, **kwargs)
             finally:
                 try:
                     await lock.release()

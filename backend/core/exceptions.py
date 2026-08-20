@@ -3,8 +3,13 @@ from typing import Any
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 
 logger = logging.getLogger(__name__)
+
+# Standard client-facing wait hint on a DB outage — long enough to ride out a
+# typical pool/connection blip without hammering the DB the moment it recovers.
+_DB_RETRY_AFTER_SECONDS = "30"
 
 
 class F1StrategyError(Exception):
@@ -68,6 +73,27 @@ async def f1_strategy_error_handler(request: Request, exc: F1StrategyError) -> J
         status_code=exc.status_code,
         content={"error": exc.error_code, "message": exc.message, "detail": exc.detail},
         headers=headers,
+    )
+
+
+async def db_connection_error_handler(request: Request, exc: OperationalError) -> JSONResponse:
+    """Handle SQLAlchemy connection-level failures (DB down, refused, pool exhausted).
+
+    OperationalError wraps the underlying DBAPI connection error (asyncpg's
+    CannotConnectNowError/ConnectionDoesNotExistError etc.) — distinct from
+    query-shape errors (IntegrityError, ProgrammingError), which are real bugs
+    that should still surface as 500s via unhandled_error_handler, not a
+    misleading 503 "retry me" response.
+    """
+    logger.error("Database connection failure on %s: %s", request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={
+            "error": "DATABASE_UNAVAILABLE",
+            "message": "The database is temporarily unavailable. Please retry shortly.",
+            "detail": None,
+        },
+        headers={"Retry-After": _DB_RETRY_AFTER_SECONDS},
     )
 
 

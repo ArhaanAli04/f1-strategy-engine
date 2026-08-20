@@ -1,6 +1,14 @@
 # F1 Strategy & Telemetry Engine
 [![CI](https://github.com/ArhaanAli04/f1-strategy-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/ArhaanAli04/f1-strategy-engine/actions/workflows/ci.yml)
 
+![Python 3.12](https://img.shields.io/badge/Python_3.12-blue?style=flat-square&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-teal?style=flat-square&logo=fastapi&logoColor=white) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-blue?style=flat-square&logo=postgresql&logoColor=white) ![Redis](https://img.shields.io/badge/Redis-red?style=flat-square&logo=redis&logoColor=white) ![Celery](https://img.shields.io/badge/Celery-green?style=flat-square&logo=celery&logoColor=white)
+
+![XGBoost](https://img.shields.io/badge/XGBoost-orange?style=flat-square) ![LightGBM](https://img.shields.io/badge/LightGBM-blue?style=flat-square) ![scikit-learn](https://img.shields.io/badge/scikit--learn-orange?style=flat-square)
+
+![React](https://img.shields.io/badge/React-cyan?style=flat-square&logo=react&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-blue?style=flat-square&logo=typescript&logoColor=white) ![Tauri](https://img.shields.io/badge/Tauri-darkblue?style=flat-square&logo=tauri&logoColor=white) ![Expo](https://img.shields.io/badge/Expo-black?style=flat-square&logo=expo&logoColor=white)
+
+![Docker](https://img.shields.io/badge/Docker-blue?style=flat-square&logo=docker&logoColor=white) ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-black?style=flat-square&logo=githubactions&logoColor=white) ![Vercel](https://img.shields.io/badge/Vercel-black?style=flat-square&logo=vercel&logoColor=white)
+
 A full-stack F1 race strategy platform that ingests lap-by-lap telemetry from
 the FastF1 API, runs XGBoost/LightGBM models and a Monte Carlo race simulator
 to predict pit windows and undercut probabilities, and streams the results to

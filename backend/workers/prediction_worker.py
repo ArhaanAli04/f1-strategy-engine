@@ -14,6 +14,7 @@ import joblib
 import numpy as np
 import redis
 import redis.asyncio as aioredis
+import sentry_sdk
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -384,29 +385,55 @@ def _run_inference(
         ]
     ]
 
+    # Fallback defaults — used both when a model never loaded (deg_model is
+    # None) and when a loaded model raises during inference (corrupt
+    # weights, a shape mismatch, etc.): either way the worker must not crash,
+    # it must degrade to a null prediction and keep processing subsequent
+    # laps/drivers.
+    tire_life_remaining = 0.0
+    predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
     if deg_model is not None:
-        with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
-            tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
-        predicted_life_remaining = float(
-            tire_deg_model.predict_life_remaining_batch(
-                deg_model,
-                np.array([lap_number]),
-                np.array([compound_encoded]),
-                np.array([tyre_age_laps]),
-                np.array([fuel_adjusted_time]),
-                np.array([circuit_code]),
-                np.array([driver_code]),
-            )[0]
-        )
-    else:
-        tire_life_remaining = 0.0
-        predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
+        try:
+            # predict() and predict_life_remaining_batch() are treated as one
+            # unit (same model, and pit_features below needs both to be
+            # mutually consistent) rather than falling back independently.
+            with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
+                tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
+            predicted_life_remaining = float(
+                tire_deg_model.predict_life_remaining_batch(
+                    deg_model,
+                    np.array([lap_number]),
+                    np.array([compound_encoded]),
+                    np.array([tyre_age_laps]),
+                    np.array([fuel_adjusted_time]),
+                    np.array([circuit_code]),
+                    np.array([driver_code]),
+                )[0]
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "tire_deg inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            tire_life_remaining = 0.0
+            predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
 
     safety_car_probability = 0.0
     if sc_model is not None:
-        safety_car_probability = sc_model.probability_within(
-            resolved["circuit_name"], lap_number, compound in _WET_COMPOUNDS, 1
-        )
+        try:
+            safety_car_probability = sc_model.probability_within(
+                resolved["circuit_name"], lap_number, compound in _WET_COMPOUNDS, 1
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "safety_car inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            safety_car_probability = 0.0
 
     fuel_load_est = max(fuel_at_lap, 0.0)
     pit_features = [
@@ -422,11 +449,19 @@ def _run_inference(
         ]
     ]
 
+    pit_probability = 0.0
     if pit_model is not None:
-        with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
-            pit_probability = float(pit_model.predict_proba(pit_features)[0][1])
-    else:
-        pit_probability = 0.0
+        try:
+            with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
+                pit_probability = float(pit_model.predict_proba(pit_features)[0][1])
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "pit_predictor inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            pit_probability = 0.0
 
     return {
         "optimal_pit_lap": lap_number + max(int(tire_life_remaining), 1),

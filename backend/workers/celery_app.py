@@ -53,6 +53,20 @@ app.conf.update(
     # behind only 10 broker connections. Raised to comfortably cover expected
     # concurrent race-day viewers.
     broker_pool_limit=50,
+    # Race-day resilience: a task (e.g. run_race_simulation, 65-88s per the
+    # Day 18 load test) is acked only after it finishes, not the moment a
+    # worker picks it up — so if the worker process dies mid-task (OOM, pod
+    # eviction, node drain), Celery re-delivers the task to another worker
+    # instead of losing it silently. task_reject_on_worker_lost makes that
+    # redelivery explicit even when the connection to the broker itself drops
+    # mid-task (SIGKILL, not a clean disconnect) — without it, an
+    # already-delivered-but-never-acked message can be left in limbo rather
+    # than requeued. Together these trade "a task might run twice" (acceptable
+    # here — a duplicate StrategyPrediction row or a redundant race-simulation
+    # result overwriting the same task_id, not a destructive or irreversible
+    # side effect) for "a task is never silently dropped".
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
     task_default_queue="telemetry_queue",
     task_routes={
         "process_lap": {"queue": "telemetry_queue"},
