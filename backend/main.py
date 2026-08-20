@@ -15,12 +15,14 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from backend.apis.v1 import api_v1_router
 from backend.core.config import get_app_settings
 from backend.core.database import get_engine
 from backend.core.exceptions import (
     F1StrategyError,
+    db_connection_error_handler,
     f1_strategy_error_handler,
     unhandled_error_handler,
 )
@@ -127,9 +129,11 @@ app.add_middleware(RequestIDMiddleware)
 app.add_middleware(TimingMiddleware)
 app.add_middleware(SlowAPIMiddleware)
 
-# --- exception handlers ---
+# --- exception handlers (registered before the Exception catch-all so DB
+# connection failures get their own 503 + Retry-After, not a generic 500) ---
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_exception_handler(F1StrategyError, f1_strategy_error_handler)  # type: ignore[arg-type]
+app.add_exception_handler(OperationalError, db_connection_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(Exception, unhandled_error_handler)
 
 # --- Prometheus metrics exposed at /metrics, gated by HTTP Basic Auth ---
