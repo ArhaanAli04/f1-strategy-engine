@@ -420,14 +420,16 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      37
-Status:   Comprehensive documentation complete. 
-          README.md rewritten (9 sections, ASCII 
-          architecture diagram, tech stack table, 
-          docs navigation table). docs/architecture.md (8 architectural decisions with Decision/Alternatives/Reasoning/Tradeoffs structure).docs/ml-models.md (7 models documented with real metrics, feature columns, retrain commands). docs/runbook.md expanded (race day checklist, 
-          common issues, replay session guide). FastAPI Swagger audit: 31 endpoints with summary/description, 6 with openapi_extra examples. CONTRIBUTING.md written. Makefile extended (dev-down, type-check, multi-client 
-          install). .env.example updated with missing Supabase/Upstash vars.
-Next:     Day 38 — Edge cases, error handling audit & resilience testing (Day 36 dry run scheduled for Dutch GP race weekend, August 24)
+Day:      38
+Status:   Resilience hardening complete. Redis: 
+          cache_get catches RedisError → returns None; 
+          cacheable() writes {key}:last_good shadow key 
+          on success, reads it on failure before re-raising. 
+          DB: db_connection_error_handler for 
+          OperationalError → 503 + Retry-After: 30. ML: all 4 inference calls in _run_inference wrapped in try/except → sentry capture + null prediction fallback. Celery:task_acks_late=True, task_reject_on_worker_lost=True. 4 resilience integration tests added 
+          (test_resilience.py).CLAUDE.md note: "in-memory fallback on Redis down" 
+          claim was inaccurate — now implemented via last_good shadow key pattern.
+Next:     Day 39 portfolio polish final production hardening, Day 36 dry run (Dutch   GP race Aug 24).
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
