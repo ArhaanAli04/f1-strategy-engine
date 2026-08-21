@@ -92,6 +92,12 @@ class LiveTimingSettings(BaseSettings):
     # subscription token is set up; flip this once one is.
     f1tv_authenticated: bool = False
 
+    # Day 39B: Celery Beat auto-detection (race_detection_worker.py) polls
+    # Ergast every 5 minutes and auto-launches ingest_live_session.py when a
+    # Race session starts. Flip to False to disable without touching the
+    # beat schedule itself — see CLAUDE.md's Auto Race Detection section.
+    auto_race_detection_enabled: bool = True
+
 
 class AppSettings(BaseSettings):
     model_config = _ENV
