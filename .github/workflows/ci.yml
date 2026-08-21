@@ -54,6 +54,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test
+        run: npm run test
+
       - name: Build (tsc + vite build)
         run: npm run build
 
@@ -145,6 +148,7 @@ jobs:
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # test_security.py calls get_auth_settings() directly, which requires
       # SECRET_KEY with no default (backend/core/config.py's AuthSettings).
@@ -173,8 +177,16 @@ jobs:
       # dlopen()s at import time (see CLAUDE.md's libgomp1 note). ubuntu-latest
       # runners carry it via build-essential already, but pin the install here
       # too so a runner-image change can't silently reintroduce this failure.
-      - name: Install libgomp1
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      # The sed rewrite matches the e2e-tests job's fix: the azure.archive.ubuntu.com
+      # mirror GitHub-hosted runners default to intermittently hangs on
+      # `apt-get update` for 20+ minutes instead of failing fast — falling back
+      # to the main archive.ubuntu.com mirror avoids that hang.
+      - name: Install system dependencies
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -192,14 +204,17 @@ jobs:
     name: Integration tests
     needs: [unit-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # Not strictly required today: conftest.py's session-scoped autouse
       # fixture already does os.environ.setdefault("SECRET_KEY",
-      # "test-secret-key") before any test runs. Set explicitly anyway so
-      # this job doesn't silently depend on that fixture running first if a
-      # future test reads AuthSettings at collection time (module import),
-      # which fixtures can't intercept. Same non-secret placeholder value.
-      SECRET_KEY: test-secret-key
+      # "test-secret-key-for-ci-integration-00") before any test runs. Set
+      # explicitly anyway so this job doesn't silently depend on that
+      # fixture running first if a future test reads AuthSettings at
+      # collection time (module import), which fixtures can't intercept.
+      # Same non-secret placeholder value. Must be >= 32 chars — see
+      # AuthSettings.secret_key's field_validator (Day 34 security hardening).
+      SECRET_KEY: test-secret-key-for-ci-integration-00
       # This one IS required: backend/workers/celery_app.py reads
       # get_redis_settings().redis_url at module level (line 20), and 4
       # integration test files (test_telemetry_ingestion.py,
@@ -221,8 +236,13 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install libgomp1
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      # Same azure.archive.ubuntu.com hang and fix as unit-tests/e2e-tests above.
+      - name: Install system dependencies
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install dependencies
         run: pip install -e ".[dev]"
@@ -241,6 +261,7 @@ jobs:
     name: E2E tests
     needs: [integration-tests]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: timescale/timescaledb:latest-pg15
@@ -284,8 +305,12 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install libgomp1
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libgomp1
+      - name: Install system dependencies
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgomp1
 
       - name: Install dependencies
         run: pip install -e ".[dev]"

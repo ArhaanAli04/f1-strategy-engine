@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo } from "react"
 import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
+import { padCountdownValue, useCountdown } from "@/hooks/useCountdown"
 import { useDriverCarNumbers, useDriverPositions } from "@/hooks/useDriverPositions"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
@@ -41,38 +42,6 @@ function applyTransform(x: number, y: number, transform: CircuitOutlineTransform
     cx: (rotatedX - transform.center_x) * transform.scale + transform.viewbox_center,
     cy: (rotatedY - transform.center_y) * transform.scale + transform.viewbox_center,
   }
-}
-
-interface Countdown {
-  days: number
-  hours: number
-  minutes: number
-  seconds: number
-}
-
-function useCountdown(targetIso: string | null): Countdown | null {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!targetIso) return
-    const interval = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(interval)
-  }, [targetIso])
-
-  if (!targetIso) return null
-  const diffMs = new Date(targetIso).getTime() - now
-  if (diffMs <= 0) return { days: 0, hours: 0, minutes: 0, seconds: 0 }
-  const totalSeconds = Math.floor(diffMs / 1000)
-  return {
-    days: Math.floor(totalSeconds / 86400),
-    hours: Math.floor((totalSeconds % 86400) / 3600),
-    minutes: Math.floor((totalSeconds % 3600) / 60),
-    seconds: totalSeconds % 60,
-  }
-}
-
-function pad(value: number): string {
-  return value.toString().padStart(2, "0")
 }
 
 interface CircuitMapPanelProps {
@@ -214,8 +183,8 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
 
         {mode === "non-race" && countdown && (
           <div className="self-end font-mono text-sm text-muted-foreground">
-            Starts in: {countdown.days}d {pad(countdown.hours)}h {pad(countdown.minutes)}m{" "}
-            {pad(countdown.seconds)}s
+            Starts in: {countdown.days}d {padCountdownValue(countdown.hours)}h{" "}
+            {padCountdownValue(countdown.minutes)}m {padCountdownValue(countdown.seconds)}s
           </div>
         )}
       </div>

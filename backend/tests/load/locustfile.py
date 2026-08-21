@@ -160,6 +160,17 @@ def _token_still_valid(entry: dict[str, str]) -> bool:
 def _register_and_login(host: str, email: str, password: str) -> dict[str, str]:
     """Register (tolerating an already-registered account) then log in.
 
+    Sleeps _SECONDS_BETWEEN_UNAUTH_CALLS after BOTH calls, not just between them —
+    this function is called once per account in a tight loop with no pacing of its
+    own between accounts (see _provision_test_users), so a single sleep here only
+    paces the two calls within one account. Register(account N) -> login(account N)
+    -> [no sleep] -> register(account N+1) would let each account's login and the
+    next account's register fire back-to-back, doubling the effective unauthenticated
+    call rate to ~20/minute against core/rate_limit.py's actual 10/minute IP bucket
+    (confirmed Day 35: provisioning burned through the whole minute's budget after
+    only 5 accounts — 10 calls in ~34s — then 429'd on every remaining account
+    instantly, since nothing backs off after a 429 either).
+
     Args:
         host: Base URL, e.g. http://localhost:8000.
         email: Test account email.
@@ -180,6 +191,7 @@ def _register_and_login(host: str, email: str, password: str) -> dict[str, str]:
         f"{host}/api/v1/auth/login", json={"email": email, "password": password}, timeout=10
     )
     login_resp.raise_for_status()
+    time.sleep(_SECONDS_BETWEEN_UNAUTH_CALLS)
     body = login_resp.json()
     return {"access_token": body["access_token"], "expires_at": body["expires_at"]}
 

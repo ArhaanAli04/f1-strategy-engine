@@ -36,16 +36,32 @@ from backend.services import user_service
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-@limiter.limit(rate_limit_value)
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new user account",
+    description=(
+        "Creates a new user with the given email/password/full name. Rate-limited to 5/minute."
+    ),
+)
+@limiter.limit("5/minute")
 async def register(
     request: Request, payload: UserCreate, db: Annotated[AsyncSession, Depends(get_db)]
 ) -> UserResponse:
     return await user_service.register_user(db, payload.email, payload.password, payload.full_name)
 
 
-@router.post("/login", response_model=LoginResponse)
-@limiter.limit(rate_limit_value)
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    summary="Log in and receive access/refresh tokens",
+    description=(
+        "Verifies email/password and returns a short-lived access token plus "
+        "a refresh token. Rate-limited to 10/minute."
+    ),
+)
+@limiter.limit("10/minute")
 async def login(
     request: Request,
     payload: UserLogin,
@@ -55,7 +71,15 @@ async def login(
     return await user_service.login_user(db, redis_client, payload.email, payload.password)
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Exchange a refresh token for a new access token",
+    description=(
+        "Issues a new access token from a still-valid refresh token, "
+        "without requiring the user to log in again."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def refresh(
     request: Request,
@@ -66,7 +90,15 @@ async def refresh(
     return await user_service.refresh_token(db, redis_client, payload.refresh_token)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Log out and revoke the current refresh token",
+    description=(
+        "Invalidates the current user's refresh token server-side so it can "
+        "no longer be exchanged for new access tokens."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def logout(
     request: Request,
@@ -76,7 +108,12 @@ async def logout(
     await user_service.logout_user(redis_client, current_user["sub"])
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get the current user's profile",
+    description="Returns the authenticated user's own profile, resolved from the access token.",
+)
 @limiter.limit(rate_limit_value)
 async def me(
     request: Request,
@@ -86,7 +123,15 @@ async def me(
     return await user_service.get_user(db, uuid.UUID(current_user["sub"]))
 
 
-@router.put("/me", response_model=UserResponse)
+@router.put(
+    "/me",
+    response_model=UserResponse,
+    summary="Update the current user's profile",
+    description=(
+        "Updates the authenticated user's full_name and/or email. "
+        "Omitted fields are left unchanged."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def update_me(
     request: Request,
@@ -97,7 +142,12 @@ async def update_me(
     return await user_service.update_user(db, uuid.UUID(current_user["sub"]), payload)
 
 
-@router.put("/password", status_code=status.HTTP_204_NO_CONTENT)
+@router.put(
+    "/password",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Change the current user's password",
+    description="Verifies current_password before setting new_password.",
+)
 @limiter.limit(rate_limit_value)
 async def update_password(
     request: Request,
@@ -110,7 +160,15 @@ async def update_password(
     )
 
 
-@router.put("/fcm-token", response_model=UserResponse)
+@router.put(
+    "/fcm-token",
+    response_model=UserResponse,
+    summary="Update the current user's push notification token",
+    description=(
+        "Stores/replaces the Firebase Cloud Messaging device token used to "
+        "deliver push notifications to this user's mobile device."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def update_fcm_token(
     request: Request,

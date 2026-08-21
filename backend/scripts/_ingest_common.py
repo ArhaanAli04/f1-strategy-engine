@@ -1,9 +1,12 @@
-"""Shared DB upsert helpers used by both ingest_historical.py and ingest_live_session.py."""
+"""Shared DB upsert + Ergast schedule-parsing helpers used by
+ingest_historical.py, ingest_live_session.py, and race_detection_worker.py.
+"""
 
 import logging
 import uuid
 from datetime import UTC, date, datetime
-from typing import cast
+from datetime import time as dt_time
+from typing import Any, cast
 
 import fastf1
 import pandas as pd
@@ -208,3 +211,32 @@ async def get_or_create_drivers(
         code_to_id[code] = driver.id
 
     return code_to_id
+
+
+# --- Ergast schedule parsing (shared by ingest_live_session.py's --poll mode
+# and race_detection_worker.py's auto-detection task — same source columns,
+# different trigger windows) ---
+
+SESSION_TYPE_TO_ERGAST_COLUMNS: dict[str, tuple[str, str]] = {
+    "FP1": ("fp1Date", "fp1Time"),
+    "FP2": ("fp2Date", "fp2Time"),
+    "FP3": ("fp3Date", "fp3Time"),
+    "Q": ("qualifyingDate", "qualifyingTime"),
+    "R": ("raceDate", "raceTime"),
+}
+
+
+def combine_ergast_date_time(date_val: Any, time_val: Any) -> datetime | None:
+    """Combine an Ergast schedule row's date/time columns into a UTC datetime.
+
+    Args:
+        date_val: Ergast date column value (e.g. row["raceDate"]).
+        time_val: Ergast time column value (e.g. row["raceTime"]), possibly NaT.
+    Returns:
+        UTC datetime, or None if date_val itself is missing (NaT).
+    """
+    if pd.isna(date_val):
+        return None
+    if pd.isna(time_val):
+        time_val = dt_time(0, 0)
+    return datetime.combine(date_val, time_val, tzinfo=UTC)

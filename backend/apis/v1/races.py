@@ -27,7 +27,15 @@ from backend.services import race_service
 router = APIRouter(prefix="/races", tags=["races"])
 
 
-@router.get("/current", response_model=RaceResponse)
+@router.get(
+    "/current",
+    response_model=RaceResponse,
+    summary="Get the race currently in progress",
+    description=(
+        "Resolves the current season/round via Ergast and returns that race "
+        "with its circuit and sessions. 404 if no race is currently live."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_current_race(
     request: Request,
@@ -39,7 +47,15 @@ async def get_current_race(
 
 # Registered ahead of /{race_id} (same reason as /current above) so a literal
 # "upcoming" segment never gets swallowed by the UUID path param.
-@router.get("/upcoming", response_model=UpcomingRaceResponse)
+@router.get(
+    "/upcoming",
+    response_model=UpcomingRaceResponse,
+    summary="Get the next scheduled race",
+    description=(
+        "Returns the minimal race/circuit/start-time shape used by the "
+        "Circuit Map Panel's non-race countdown mode."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_upcoming_race(
     request: Request,
@@ -49,7 +65,15 @@ async def get_upcoming_race(
     return await race_service.get_upcoming_race(redis_client, db)
 
 
-@router.get("", response_model=PaginatedResponse[RaceListResponse])
+@router.get(
+    "",
+    response_model=PaginatedResponse[RaceListResponse],
+    summary="List races, optionally filtered by season/round",
+    description=(
+        "Returns a paginated list of races with their circuit info. "
+        "Filter with season and/or round query params."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def list_races(
     request: Request,
@@ -65,7 +89,12 @@ async def list_races(
     )
 
 
-@router.get("/{race_id}", response_model=RaceResponse)
+@router.get(
+    "/{race_id}",
+    response_model=RaceResponse,
+    summary="Get one race by ID",
+    description="Returns a single race with its circuit and all sessions.",
+)
 @limiter.limit(rate_limit_value)
 async def get_race(
     request: Request,
@@ -76,7 +105,14 @@ async def get_race(
     return await race_service.get_race(redis_client, db, race_id)
 
 
-@router.get("/{race_id}/sessions/{session_id}", response_model=SessionResponse)
+@router.get(
+    "/{race_id}/sessions/{session_id}",
+    response_model=SessionResponse,
+    summary="Get one session of a race",
+    description=(
+        "Returns a single session (e.g. FP1, Qualifying, Race) belonging to the given race."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_session(
     request: Request,

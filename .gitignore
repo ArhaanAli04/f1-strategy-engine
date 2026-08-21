@@ -138,6 +138,13 @@ celerybeat.pid
 
 # Environments
 .env
+# Explicit alongside bare .env above so this is checkable at a glance —
+# web/ and desktop/ already have their own .gitignore rules covering this
+# (web/.gitignore's `.env*`, desktop/.gitignore's `*.local`/`.env.production`),
+# this is redundant defense-in-depth for anything at the repo root.
+# .env.example is intentionally exempted — it's committed as setup docs.
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -226,6 +233,20 @@ fastf1_cache/
 # access/refresh tokens for locally-provisioned test users, never commit.
 backend/tests/load/.token_cache.json
 
+# Locust-generated load test report artifacts (--html/--csv output) — generated
+# per run, not source. docs/load_test_results.md (the hand-maintained markdown
+# baseline log) and docs/performance-report.md are unaffected — different names/
+# extensions from these glob patterns — and stay tracked.
+docs/load_test_results_*.csv
+docs/load_test_results_*.html
+
+# Local profiling output (py-spy, cProfile, etc.), never committed.
+docs/profiles/
+
 # Kubernetes local secrets helper (infra/k8s/create-secrets.sh) — reads
 # .env and creates cluster Secrets at runtime; never committed.
 infra/k8s/create-secrets.sh
+
+# Expo local dev/build cache (mobile/) and Vercel CLI project link (web/)
+mobile/.expo/
+web/.vercel/

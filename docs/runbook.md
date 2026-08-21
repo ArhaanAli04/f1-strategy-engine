@@ -25,12 +25,111 @@ aren't a 1:1 mapping of what's documented below.
 
 ## Table of Contents
 
+- [Race day checklist](#race-day-checklist)
+- [Common issues and fixes](#common-issues-and-fixes)
+- [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
 - [App rollback (Helm)](#app-rollback-helm)
 - [Database rollback (Alembic)](#database-rollback-alembic)
 - [Model rollback (S3)](#model-rollback-s3)
 - [Promoting a candidate model to production](#promoting-a-candidate-model-to-production)
 - [Race day scaling procedure](#race-day-scaling-procedure)
 - [Secret rotation procedure](#secret-rotation-procedure)
+
+---
+
+## Race day checklist
+
+Step-by-step, before a live race session. This is the pre-flight list — see
+[Race day scaling procedure](#race-day-scaling-procedure) below for the
+Kubernetes-specific pre-scaling steps once a real cluster target exists (it
+doesn't yet — see that section's own caveat).
+
+1. **Unpause the Supabase project**, if it's been idle. The free tier pauses
+   a project after 7 days of inactivity — check the
+   [Supabase dashboard](https://supabase.com/dashboard) and unpause if
+   needed (takes ~2 minutes to come back up).
+2. **Verify Upstash Redis is active** — check the Upstash console; Upstash's
+   free tier doesn't auto-pause the way Supabase's does, but confirm it's
+   reachable before relying on it (`redis-cli -u "$UPSTASH_REDIS_URL" ping`
+   from a shell that has the URL, or a quick console check).
+3. **Start the full local stack:**
+   ```bash
+   make dev   # docker compose up --build — see Makefile
+   ```
+4. **Verify the backend is healthy:**
+   ```bash
+   curl localhost:8000/health
+   ```
+5. **Start live ingestion** for the session about to run, with the correct
+   season/round (or `--poll` to wait for the next scheduled session):
+   ```bash
+   make ingest-live SEASON=2026 ROUND=<round> SESSION_TYPE=R
+   # = python backend/scripts/ingest_live_session.py --season 2026 --round <round> --session-type R
+   ```
+6. **Open the web app and verify the timing tower populates** —
+   `http://localhost:5173` (`cd web && npm run dev` if not already running),
+   confirm laps are showing up for the drivers as the session progresses.
+7. **Verify Grafana shows traffic** — `http://localhost:3000`, confirm the
+   ingestion/API dashboards show non-zero request/lap-processing rates.
+8. **Keep `replay_publisher.py` available as a fallback.** If live FastF1
+   ingestion stalls or errors out mid-session, `replay_publisher.py` against
+   a known-good historical session (see
+   [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing))
+   is the fastest way to get a populated timing tower back for a demo,
+   even though it isn't the actual live session.
+
+---
+
+## Common issues and fixes
+
+| Issue | Fix |
+|---|---|
+| **Supabase project paused** — DB connections start timing out or refusing. | Supabase free tier pauses after 7 days of inactivity. A GitHub Actions cron (`.github/workflows/keep-supabase-alive.yml`) runs every 5 days to keep it active, so this should be rare — if it happens anyway, go to supabase.com → your project → **Restore project** (takes ~2 minutes to come back online); retry the failing operation after that. |
+| **Celery worker not picking up tasks** — `prediction_queue` depth grows but nothing drains it. | `docker compose restart worker`. Celery workers don't hot-reload code changes either (see `CLAUDE.md`'s "Celery worker — restart required after code changes") — restart after any `backend/workers/` edit too. |
+| **Redis connection refused (production/Upstash only)** — works locally but not against the cloud Redis. | Confirm `REDIS_URL`/`UPSTASH_REDIS_URL` uses the **`rediss://`** (TLS) scheme, not `redis://` — Upstash requires TLS. Celery specifically needs this stated explicitly (`ssl_cert_reqs`) or it crashes at worker boot; see `CLAUDE.md`'s "Celery + Upstash's `rediss://`" note — already fixed in `workers/celery_app.py`, but a hand-edited `.env` that drops the `s` in `rediss://` will reproduce this. |
+| **ML models not loading** — worker/backend errors on first prediction request. | Two independent causes to check: (1) AWS credentials — `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` must be set in the container's environment (boto3's default credential chain does not read pydantic-settings `.env` values — see `CLAUDE.md`'s AWS Credentials note); (2) `libgomp1` — LightGBM `dlopen()`s it at import time, and `python:3.11-slim` strips it by default. Both `Dockerfile.backend`/`Dockerfile.worker` install it in their final stage; if you're running outside those images (e.g. a bare venv on a minimal Linux box), install it manually. |
+| **FastF1 403 error fetching a session.** | For **current-season (2026) data specifically, this is a known, not-yet-fully-fixed gap** — see `CLAUDE.md`'s "retrain_incremental.py FastF1 403→mirror fallback for 2026 data" entry. FastF1 automatically falls back to `livetiming-mirror.fastf1.dev` on a 403 from `livetiming.formula1.com`, but that mirror has no 2026 data (it only patches a couple of corrupted 2021-2022 sessions), so the fallback itself fails with `SessionNotAvailableError`. Rounds are currently skipped gracefully rather than crashing the run. On race day, if this hits live ingestion: try `fastf1.Cache.clear_cache()` and retry once — a stale/corrupted cache entry is the most common transient cause — and fall back to `replay_publisher.py` (see the race day checklist above) if it doesn't clear. For **historical (2018-2025) data**, a 403 here is unexpected — retry, and if it persists, check whether FastF1's upstream source has changed. |
+| **Supabase connection string changed** (e.g. after a password rotation or a Supabase-side pooler change). | Get the new session-mode pooler URL from the Supabase dashboard (Project Settings → Database → Connection string, "Session mode") and update the `SUPABASE_DIRECT_URL` GitHub Secret with it — this is what `cd.yml`'s migration job uses (see `.env.example`'s comment on why session mode specifically: the transaction-mode pooler used for app runtime doesn't support the advisory locks/prepared statements a migration needs). Update `SUPABASE_DATABASE_URL` too if the transaction-mode pooler URL also changed, and re-run `infra/k8s/create-secrets.sh` if a local Kubernetes Secret needs to pick up the change (see [Secret rotation procedure](#secret-rotation-procedure)). |
+
+---
+
+## How to replay a historical session for testing
+
+`backend/tests/load/replay_publisher.py` republishes a previously-ingested
+session's lap-completion events onto the same Redis pub/sub channel live
+ingestion would use, at a configurable rate — useful for testing the
+WebSocket/frontend pipeline (or as a race-day fallback, see the checklist
+above) without a live session actually running.
+
+```bash
+python backend/tests/load/replay_publisher.py --session-id <uuid> --rate 5
+```
+
+`--rate` is laps/second-equivalent publish speed (see the script's own
+`--help` for the exact semantics); the session must already be ingested
+into Postgres (either historically via `make ingest`, or live via
+`make ingest-live` in an earlier session).
+
+Known-good session IDs (verified directly against the local Postgres —
+`sessions` joined to `races`/`circuits`, `season = 2025`, `session_type =
+'R'`):
+
+| Race | Session ID |
+|---|---|
+| 2025 Abu Dhabi (Yas Marina Circuit) | `b5fafd04-5397-4b51-b732-875ba99d66fd` |
+| 2025 Brazil (Autódromo José Carlos Pace) | `a4410511-cdcb-49e4-ae0c-ab9896bfff3c` |
+| 2025 Singapore (Marina Bay Street Circuit) | `1c70522f-010a-466b-8dee-f440ad8e88ba` |
+
+These are specific to whatever's currently in the local database — if it's
+been reseeded/reingested, re-derive them with a query like:
+```sql
+SELECT s.id, r.season, c.name, s.session_type
+FROM sessions s
+JOIN races r ON s.race_id = r.id
+JOIN circuits c ON r.circuit_id = c.id
+WHERE r.season = 2025 AND s.session_type = 'R'
+ORDER BY c.name;
+```
 
 ---
 

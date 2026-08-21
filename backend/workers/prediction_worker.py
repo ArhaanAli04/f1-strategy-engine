@@ -14,6 +14,7 @@ import joblib
 import numpy as np
 import redis
 import redis.asyncio as aioredis
+import sentry_sdk
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -384,29 +385,55 @@ def _run_inference(
         ]
     ]
 
+    # Fallback defaults — used both when a model never loaded (deg_model is
+    # None) and when a loaded model raises during inference (corrupt
+    # weights, a shape mismatch, etc.): either way the worker must not crash,
+    # it must degrade to a null prediction and keep processing subsequent
+    # laps/drivers.
+    tire_life_remaining = 0.0
+    predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
     if deg_model is not None:
-        with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
-            tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
-        predicted_life_remaining = float(
-            tire_deg_model.predict_life_remaining_batch(
-                deg_model,
-                np.array([lap_number]),
-                np.array([compound_encoded]),
-                np.array([tyre_age_laps]),
-                np.array([fuel_adjusted_time]),
-                np.array([circuit_code]),
-                np.array([driver_code]),
-            )[0]
-        )
-    else:
-        tire_life_remaining = 0.0
-        predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
+        try:
+            # predict() and predict_life_remaining_batch() are treated as one
+            # unit (same model, and pit_features below needs both to be
+            # mutually consistent) rather than falling back independently.
+            with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
+                tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
+            predicted_life_remaining = float(
+                tire_deg_model.predict_life_remaining_batch(
+                    deg_model,
+                    np.array([lap_number]),
+                    np.array([compound_encoded]),
+                    np.array([tyre_age_laps]),
+                    np.array([fuel_adjusted_time]),
+                    np.array([circuit_code]),
+                    np.array([driver_code]),
+                )[0]
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "tire_deg inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            tire_life_remaining = 0.0
+            predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
 
     safety_car_probability = 0.0
     if sc_model is not None:
-        safety_car_probability = sc_model.probability_within(
-            resolved["circuit_name"], lap_number, compound in _WET_COMPOUNDS, 1
-        )
+        try:
+            safety_car_probability = sc_model.probability_within(
+                resolved["circuit_name"], lap_number, compound in _WET_COMPOUNDS, 1
+            )
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "safety_car inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            safety_car_probability = 0.0
 
     fuel_load_est = max(fuel_at_lap, 0.0)
     pit_features = [
@@ -422,11 +449,19 @@ def _run_inference(
         ]
     ]
 
+    pit_probability = 0.0
     if pit_model is not None:
-        with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
-            pit_probability = float(pit_model.predict_proba(pit_features)[0][1])
-    else:
-        pit_probability = 0.0
+        try:
+            with f1_ml_inference_duration_seconds.labels(model="pit_predictor").time():
+                pit_probability = float(pit_model.predict_proba(pit_features)[0][1])
+        except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
+            sentry_sdk.capture_exception(exc)
+            logger.warning(
+                "pit_predictor inference failed for driver %s, falling back to null prediction",
+                driver_id,
+                exc_info=True,
+            )
+            pit_probability = 0.0
 
     return {
         "optimal_pit_lap": lap_number + max(int(tire_life_remaining), 1),
@@ -689,6 +724,29 @@ async def _build_race_state(
     position_rows = (await db.execute(position_query)).all()
     position_by_driver: dict[uuid.UUID, int | None] = {row[0]: row[1] for row in position_rows}
 
+    # Batched replacement for what was previously one _cumulative_race_time()
+    # call per driver inside the loop below (an N+1: ~20 separate DB round
+    # trips for a 20-driver field, the confirmed dominant cost behind this
+    # task's 65-88s end-to-end runtime — see CLAUDE.md's Deferred Wiring
+    # "Single --pool=solo Celery worker" entry). Same filter shape as
+    # _cumulative_race_time (session_id, lap_number <= current_lap,
+    # lap_time_seconds IS NOT NULL), just grouped by driver_id instead of
+    # scoped to one — every driver in this loop shares the same up_to_lap
+    # (current_lap), so one GROUP BY query covers all of them.
+    cumulative_time_query = (
+        select(LapData.driver_id, func.sum(LapData.lap_time_seconds))
+        .where(
+            LapData.session_id == session_id,
+            LapData.lap_number <= current_lap,
+            LapData.lap_time_seconds.is_not(None),
+        )
+        .group_by(LapData.driver_id)
+    )
+    cumulative_time_rows = (await db.execute(cumulative_time_query)).all()
+    cumulative_time_by_driver: dict[uuid.UUID, float] = {
+        row[0]: float(row[1] or 0.0) for row in cumulative_time_rows
+    }
+
     drivers: list[DriverRaceState] = []
     requesting_driver_found = False
     for lap in latest_laps:
@@ -705,7 +763,7 @@ async def _build_race_state(
         # bakes a fake multi-lap time gap into cumulative_race_time_seconds
         # that swamps real on-track gaps of a few seconds, since simulate_race
         # advances every driver in lockstep from current_lap + 1 onward.
-        cumulative_time = await _cumulative_race_time(db, session_id, lap.driver_id, current_lap)
+        cumulative_time = cumulative_time_by_driver.get(lap.driver_id, 0.0)
         starting_position = (
             position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
         )

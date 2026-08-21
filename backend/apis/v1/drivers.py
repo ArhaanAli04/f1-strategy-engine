@@ -23,7 +23,15 @@ from backend.services import driver_service
 router = APIRouter(prefix="/drivers", tags=["drivers"])
 
 
-@router.get("", response_model=list[DriverResponse])
+@router.get(
+    "",
+    response_model=list[DriverResponse],
+    summary="List all drivers on the current grid",
+    description=(
+        "Returns every driver in the roster, including their team "
+        "contract(s) for the current season."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def list_drivers(
     request: Request,
@@ -33,7 +41,39 @@ async def list_drivers(
     return await driver_service.get_drivers(redis_client, db)
 
 
-@router.get("/{driver_id}/analysis", response_model=DriverAnalysisResponse)
+@router.get(
+    "/{driver_id}/analysis",
+    response_model=DriverAnalysisResponse,
+    summary="Get a driver's style fingerprint for a season",
+    description=(
+        "Returns the driver's season-level driving-style archetype and cluster "
+        "(from a population-level PCA→KMeans→UMAP fit), plus season-relative "
+        "performance vs. their team average."
+    ),
+    openapi_extra={
+        "responses": {
+            "200": {
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                            "season": 2025,
+                            "archetype": "aggressive",
+                            "cluster": 2,
+                            "sector_time_variance": -0.42,
+                            "tyre_management_index": 1.18,
+                            "lap_time_consistency": -0.05,
+                            "stint_length_tendency": 0.63,
+                            "umap_x": 3.271,
+                            "umap_y": -1.845,
+                            "performance_vs_team_avg_seconds": -0.184,
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
 @limiter.limit(rate_limit_value)
 async def get_driver_analysis(
     request: Request,
@@ -45,7 +85,15 @@ async def get_driver_analysis(
     return await driver_service.get_driver_analysis(db, redis_client, driver_id, session_id)
 
 
-@router.get("/{driver_id}/laps", response_model=PaginatedResponse[LapDataResponse])
+@router.get(
+    "/{driver_id}/laps",
+    response_model=PaginatedResponse[LapDataResponse],
+    summary="Get a driver's lap-by-lap history for a session",
+    description=(
+        "Returns paginated lap data (times, sectors, compound, tyre age) "
+        "for one driver in one session, oldest lap first."
+    ),
+)
 @limiter.limit(rate_limit_value)
 async def get_driver_laps(
     request: Request,

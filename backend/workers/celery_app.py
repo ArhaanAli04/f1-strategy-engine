@@ -2,6 +2,7 @@ import logging
 import ssl
 import threading
 import time
+from datetime import timedelta
 from typing import Any
 
 import redis
@@ -34,6 +35,7 @@ app = Celery(
         "backend.workers.telemetry_worker",
         "backend.workers.prediction_worker",
         "backend.workers.alert_worker",
+        "backend.workers.race_detection_worker",
     ],
 )
 
@@ -53,12 +55,41 @@ app.conf.update(
     # behind only 10 broker connections. Raised to comfortably cover expected
     # concurrent race-day viewers.
     broker_pool_limit=50,
+    # Race-day resilience: a task (e.g. run_race_simulation, 65-88s per the
+    # Day 18 load test) is acked only after it finishes, not the moment a
+    # worker picks it up — so if the worker process dies mid-task (OOM, pod
+    # eviction, node drain), Celery re-delivers the task to another worker
+    # instead of losing it silently. task_reject_on_worker_lost makes that
+    # redelivery explicit even when the connection to the broker itself drops
+    # mid-task (SIGKILL, not a clean disconnect) — without it, an
+    # already-delivered-but-never-acked message can be left in limbo rather
+    # than requeued. Together these trade "a task might run twice" (acceptable
+    # here — a duplicate StrategyPrediction row or a redundant race-simulation
+    # result overwriting the same task_id, not a destructive or irreversible
+    # side effect) for "a task is never silently dropped".
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
     task_default_queue="telemetry_queue",
     task_routes={
         "process_lap": {"queue": "telemetry_queue"},
         "run_strategy_prediction": {"queue": "prediction_queue"},
         "run_race_simulation": {"queue": "prediction_queue"},
         "dispatch_alert": {"queue": "alert_queue"},
+        # No explicit route: falls to task_default_queue (telemetry_queue).
+        # check_for_live_session is fast (one Ergast GET + a detached
+        # subprocess launch, never blocks on the ingestor itself — see
+        # race_detection_worker.py's module docstring), so it doesn't need
+        # isolation from telemetry_queue's other traffic.
+    },
+    # Day 39B: auto race detection — see CLAUDE.md's Auto Race Detection
+    # section. Requires a separate `celery beat` process (infra/docker/
+    # docker-compose.yml's `beat` service) in addition to the worker itself;
+    # beat only schedules, the worker executes.
+    beat_schedule={
+        "check-for-live-session": {
+            "task": "check_for_live_session",
+            "schedule": timedelta(minutes=5),
+        },
     },
 )
 

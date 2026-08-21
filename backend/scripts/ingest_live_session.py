@@ -22,12 +22,10 @@ import threading
 import time as time_module
 import zlib
 from datetime import UTC, datetime, timedelta
-from datetime import time as dt_time
 from typing import Any
 
 import fastf1
 import httpx
-import pandas as pd
 import redis
 from apscheduler.schedulers.blocking import BlockingScheduler
 from fastf1.internals.f1auth import get_auth_token
@@ -37,6 +35,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from backend.core.config import get_live_timing_settings, get_ml_settings, get_redis_settings
 from backend.core.database import get_engine
 from backend.scripts._ingest_common import (
+    SESSION_TYPE_TO_ERGAST_COLUMNS,
+    combine_ergast_date_time,
     get_or_create_circuit,
     get_or_create_drivers,
     get_or_create_race,
@@ -395,22 +395,7 @@ def run_live_ingestor(
         redis_client.close()
 
 
-_SESSION_TYPE_TO_ERGAST_COLUMNS = {
-    "FP1": ("fp1Date", "fp1Time"),
-    "FP2": ("fp2Date", "fp2Time"),
-    "FP3": ("fp3Date", "fp3Time"),
-    "Q": ("qualifyingDate", "qualifyingTime"),
-    "R": ("raceDate", "raceTime"),
-}
 _AUTO_LAUNCH_WINDOW = timedelta(minutes=10)
-
-
-def _combine_date_time(date_val: Any, time_val: Any) -> datetime | None:
-    if pd.isna(date_val):
-        return None
-    if pd.isna(time_val):
-        time_val = dt_time(0, 0)
-    return datetime.combine(date_val, time_val, tzinfo=UTC)
 
 
 def _find_upcoming_session(season: int) -> tuple[int, str, datetime] | None:
@@ -428,10 +413,10 @@ def _find_upcoming_session(season: int) -> tuple[int, str, datetime] | None:
     now = datetime.now(UTC)
 
     for _, race in schedule.iterrows():
-        for session_type, (date_col, time_col) in _SESSION_TYPE_TO_ERGAST_COLUMNS.items():
+        for session_type, (date_col, time_col) in SESSION_TYPE_TO_ERGAST_COLUMNS.items():
             if date_col not in race or time_col not in race:
                 continue
-            start = _combine_date_time(race[date_col], race[time_col])
+            start = combine_ergast_date_time(race[date_col], race[time_col])
             if start is not None and now <= start <= now + _AUTO_LAUNCH_WINDOW:
                 return int(race["round"]), session_type, start
 

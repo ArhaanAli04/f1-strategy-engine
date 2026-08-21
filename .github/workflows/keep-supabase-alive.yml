@@ -1,0 +1,55 @@
+name: Keep Supabase Alive
+
+# Supabase's free tier auto-pauses a project after 7 days with no database
+# activity. This project's backend isn't deployed yet (Fly.io lands Day 40),
+# so there's no real traffic hitting Supabase between local dev sessions to
+# keep it "active" on its own — without this workflow, the project would
+# pause the first time a week goes by without anyone running the app
+# locally, and the next `make dev`/CI migration would fail against a paused
+# DB. This pings Supabase directly every 5 days, safely inside the 7-day
+# pause window, so the project never auto-pauses.
+#
+# Required GitHub Secret: SUPABASE_DIRECT_URL (same secret cd.yml's migrate
+# job uses — Supabase's session-mode pooler, port 5432, reachable from
+# GitHub's IPv4-only runners; see cd.yml's own comment for why session mode
+# specifically, and CLAUDE.md's GitHub Secrets Checklist for the full list).
+#
+# If the project does end up paused anyway (e.g. this workflow itself was
+# disabled or failing silently for over a week): supabase.com -> the
+# project -> "Restore project" (~2 minutes) — see docs/runbook.md.
+
+on:
+  schedule:
+    - cron: "0 0 */5 * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    name: Ping Supabase to prevent auto-pause
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install postgresql client
+        run: |
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Ping database
+        env:
+          SUPABASE_DIRECT_URL: ${{ secrets.SUPABASE_DIRECT_URL }}
+        run: psql "$SUPABASE_DIRECT_URL" -c "SELECT 1;"
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_WEBHOOK_DEPLOY: ${{ secrets.SLACK_WEBHOOK_DEPLOY }}
+        run: |
+          PAYLOAD=$(jq -n \
+            '{text: ":x: *Supabase keep-alive ping failed* — the project may be paused or the connection string may be stale. Check the Supabase dashboard and docs/runbook.md '\''Common issues and fixes'\''."}')
+          # Informational only — see cd.yml's Notify Slack steps for why this
+          # must not fail the job on a Slack delivery failure.
+          curl -s -X POST "$SLACK_WEBHOOK_DEPLOY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            || echo "::warning::Slack notification failed — check SLACK_WEBHOOK_DEPLOY"

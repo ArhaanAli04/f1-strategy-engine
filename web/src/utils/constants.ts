@@ -47,6 +47,7 @@ export const COMPOUND_COLORS: Record<string, string> = {
 }
 
 export const ROUTES = {
+  HOME: "/",
   LOGIN: "/login",
   REGISTER: "/register",
   DASHBOARD: "/dashboard",
