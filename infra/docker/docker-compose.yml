@@ -84,6 +84,44 @@ services:
       redis:
         condition: service_healthy
 
+  # Day 39B: schedules check_for_live_session every 5 minutes (celery_app.py's
+  # beat_schedule) — beat only enqueues the task, the worker service above
+  # executes it. Same image as worker, different process. See CLAUDE.md's
+  # Auto Race Detection section.
+  beat:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      TIMESCALE_URL: postgresql+asyncpg://f1user:f1pass@postgres:5432/f1db
+      REDIS_URL: redis://redis:6379
+      SECRET_KEY: dev-secret-key-not-for-production
+      FASTF1_CACHE_DIR: /tmp/fastf1_cache
+      ENVIRONMENT: development
+    volumes:
+      - ../../backend:/app/backend
+    # --schedule points PersistentScheduler's dbm file at /tmp: Dockerfile.worker's
+    # WORKDIR /app is created (and owned) by root before USER f1 switches to
+    # the non-root runtime user, so the default schedule path
+    # (./celerybeat-schedule, relative to /app) fails with a dbm
+    # "Permission denied" — confirmed via `docker logs docker-beat-1` during
+    # Day 39B verification. /tmp is world-writable in python:3.11-slim.
+    command:
+      [
+        "celery",
+        "-A",
+        "backend.workers.celery_app",
+        "beat",
+        "--loglevel=info",
+        "--schedule=/tmp/celerybeat-schedule",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # --- Day 12 monitoring stack ---
 
   postgres-exporter:

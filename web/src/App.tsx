@@ -1,10 +1,11 @@
-import { Navigate, Route, Routes, useLocation, type Location } from "react-router-dom"
+import { Route, Routes, useLocation, type Location } from "react-router-dom"
 import { AuthGuard } from "@/components/auth/AuthGuard"
 import { SettingsModal } from "@/components/settings/SettingsModal"
 import { NotFoundPage } from "@/components/shared/NotFoundPage"
 import { AlertsPage } from "@/pages/AlertsPage"
 import { DashboardPage } from "@/pages/DashboardPage"
 import { DriverPage } from "@/pages/DriverPage"
+import { LandingPage } from "@/pages/LandingPage"
 import { LoginPage } from "@/pages/LoginPage"
 import { RaceLivePage } from "@/pages/RaceLivePage"
 import { RacePage } from "@/pages/RacePage"
@@ -28,7 +29,10 @@ function App() {
   return (
     <>
       <Routes location={backgroundLocation ?? location}>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        {/* Public — no AuthGuard. Renders for both signed-out and
+            signed-in visitors; LandingPage swaps its own CTAs based on
+            useIsAuthenticated rather than redirecting away. */}
+        <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
 

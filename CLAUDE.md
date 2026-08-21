@@ -374,9 +374,70 @@ f1:driver:{driver_id}:session:{session_id}:laps:{page}:{page_size} TTL: 86400s (
 f1:circuit:{circuit_id}:detail                               TTL: infinity (static data)
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
+f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
+
+---
+
+## Auto Race Detection (Day 39B)
+
+`backend/workers/race_detection_worker.py`'s `check_for_live_session` Celery
+Beat task polls Ergast's race schedule every 5 minutes
+(`celery_app.py`'s `beat_schedule`) and auto-launches
+`ingest_live_session.py` as a detached subprocess when a Race (`R`) session's
+scheduled start is within a 30-minute grace window
+(`race_detection_worker._GRACE_WINDOW`) of "now".
+
+**Why a subprocess, not an inline Celery task call:** the worker runs
+`--pool=solo` (single process, single thread) across all three queues.
+`run_live_ingestor()` blocks for up to 3 hours and itself dispatches
+`process_lap.delay()`/`run_strategy_prediction.delay()` back onto that same
+worker — calling it inline from a Celery task would deadlock the whole race
+(the worker stuck inside the detection task, never picking up the lap/
+prediction tasks that same task depends on). `check_for_live_session`
+instead launches `python -m backend.scripts.ingest_live_session --season
+... --round ... --session-type R` as a detached OS process
+(`subprocess.Popen(..., start_new_session=True)`) and returns immediately —
+same mechanism `make ingest-live` already uses manually, just auto-triggered.
+
+**Dedup:** a Redis `SET key NX EX 14400` (`f1:{season}:{round}:R:
+auto_ingestion_triggered`, see Redis Cache Key Schema above) claims the
+race atomically on first trigger; later polls within the same race see the
+key already set and no-op. TTL (4h) covers the ingestor's 3h default
+`max_duration` plus buffer. Deliberately Redis-only, not a DB column — no
+migration needed, and `get_or_create_session`/`get_or_create_race` (called
+inside the subprocess's own `_resolve_context`) are already idempotent, so
+a duplicate launch after a Redis flush is harmless (a second SignalR
+connection for the same session), not corrupting.
+
+**Enable/disable:** `LiveTimingSettings.auto_race_detection_enabled`
+(`AUTO_RACE_DETECTION_ENABLED` env var, default `true`). Set to `false` to
+disable without touching the beat schedule itself — the task checks this
+flag first and no-ops. Toggling requires a worker restart (pydantic-settings
+reads env once at process start), same as every other setting in this
+project.
+
+**Requires a running `celery beat` process** (`infra/docker/docker-
+compose.yml`'s `beat` service, same image as `worker`, `celery -A
+backend.workers.celery_app beat --loglevel=info`) in addition to the
+worker — beat only schedules `check_for_live_session`, the worker
+service actually executes it. Not yet wired into a Fly.io production
+process (Day 40, out of scope today).
+
+**Edge cases:** Ergast unreachable → caught, logged, task returns cleanly
+(no beat-schedule disruption); no Race session in the grace window → no-op;
+already-triggered → no-op (see dedup above). Covered by
+`tests/unit/test_race_detection_worker.py`.
+
+**Scope note:** detection is Race (`R`) sessions only, not FP1/FP2/FP3/Q —
+`ingest_live_session.py --poll`'s existing APScheduler-based
+`_run_scheduler`/`_find_upcoming_session` (hourly, all 5 session types, 10
+min *before*-start window) is unchanged and still available as a separate,
+manually-run all-sessions alternative; the two now share their Ergast
+date/time parsing via `_ingest_common.py`'s `SESSION_TYPE_TO_ERGAST_COLUMNS`/
+`combine_ergast_date_time` rather than duplicating it.
 
 ---
 
