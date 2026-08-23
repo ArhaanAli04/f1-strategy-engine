@@ -481,15 +481,13 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      39B
-Status:   Auto race detection: Celery Beat periodic 
-          task (check_for_live_session, every 5 min) polls Ergast/Jolpica for upcoming R sessions within 30-min grace window, Redis SETNX dedup 
-          (4h TTL), launches ingest_live_session.py as detached subprocess. Beat service added to docker-compose.yml. Fixed permission bug 
-          (--schedule=/tmp/celerybeat-schedule). 6 unit tests added. AUTO_RACE_DETECTION_ENABLED toggle in config. Verified against live Ergast: 
-          Dutch GP round 12, August 23 13:00 UTC. Landing page: public / route (no AuthGuard), Strategy Wall grid layout, live circuit map + 
-          countdown hero (useUpcomingRace, no auth needed), 5 feature tiles with real driver codes/team colors (sample data labeled), wordmark-only 
-          header, closing CTA band. Authenticated users see "Go to Dashboard" CTA.
-Next:     Day 40 — Fly.io deployment, Day 36 dry run (Dutch   GP race Aug 23).
+Day:      36 + 40 (partial)
+Status:   Dutch GP dry run complete (Aug 23 13:00 UTC).
+          Auto detection fired at 13:04 UTC ✅
+          12 bugs found and fixed during live race: signalrcore auth crash, FastF1 REST gap,boolean sentinels, DriverList snapshot,tyre compound UNKNOWN, S1/S2 sector loss, gap calculation (cumulative sum → F1 feed),
+          Position snapshot, cache poisoning (24h TTL),gap publishing reliability, final standings persistence, upcoming race showing finished GP.
+          Day 40 A1-A3: fly.toml (hybrid ~$7/mo),WS stale banner (30s timeout), simulator timeout (60s), scale-race-weekend.sh, Makefile fly-race-up/down targets.docs/day36-fixes.md created.
+Next:     Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
