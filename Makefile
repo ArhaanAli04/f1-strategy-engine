@@ -1,4 +1,4 @@
-.PHONY: install dev dev-down test test-unit test-int test-integration test-e2e lint type-check migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data ingest-live warm-cache
+.PHONY: install dev dev-down test test-unit test-int test-integration test-e2e lint type-check migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data ingest-live warm-cache fly-race-up fly-race-down
 
 # Installs the backend (editable, with dev extras — there is no
 # backend/requirements.txt, dependencies are declared in pyproject.toml)
@@ -81,3 +81,9 @@ ingest-live:
 
 warm-cache:
 	python backend/scripts/warm_strategy_cache.py --session-id $(SESSION_ID)
+
+fly-race-up:
+	./infra/fly/scale-race-weekend.sh up
+
+fly-race-down:
+	./infra/fly/scale-race-weekend.sh down

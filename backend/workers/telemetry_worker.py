@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_redis_settings
 from backend.core.database import get_engine
-from backend.models.telemetry import LapData
-from backend.schemas.telemetry_schema import LapDataCreate
+from backend.models.telemetry import LapData, TireStint
+from backend.schemas.telemetry_schema import LapDataCreate, TireStintCreate
 from backend.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
@@ -97,3 +97,37 @@ def process_lap(raw_lap: dict[str, object]) -> None:
     """
     lap = LapDataCreate.model_validate(raw_lap)
     asyncio.run(_persist_lap(lap))
+
+
+async def _persist_tire_stint(stint: TireStintCreate) -> None:
+    """Insert a new tire stint row, ignoring duplicates.
+
+    Args:
+        stint: Validated stint payload from the live ingestor's TimingAppData handler.
+    Returns:
+        None.
+    """
+    session_factory = _get_session_factory()
+    async with session_factory() as db:
+        stmt = (
+            pg_insert(TireStint)
+            .values(id=uuid.uuid4(), **stint.model_dump())
+            .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "stint_number"])
+        )
+        await db.execute(stmt)
+        await db.commit()
+
+    await get_engine().dispose()
+
+
+@app.task(name="record_tire_stint")  # type: ignore[untyped-decorator]
+def record_tire_stint(raw_stint: dict[str, object]) -> None:
+    """Validate and persist a new tire stint dispatched by the live ingestor.
+
+    Args:
+        raw_stint: Raw stint fields matching TireStintCreate's schema.
+    Returns:
+        None.
+    """
+    stint = TireStintCreate.model_validate(raw_stint)
+    asyncio.run(_persist_tire_stint(stint))

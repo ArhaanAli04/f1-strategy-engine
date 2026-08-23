@@ -46,6 +46,16 @@ class LapDataCreate(BaseModel):
     sector3_seconds: float | None = None
 
 
+class TireStintCreate(BaseModel):
+    session_id: uuid.UUID
+    driver_id: uuid.UUID
+    stint_number: int
+    compound: str
+    start_lap: int
+    end_lap: int | None = None
+    avg_deg_per_lap: float | None = None
+
+
 class TireStintResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -133,8 +143,20 @@ class DriverGap(BaseModel):
     driver_id: uuid.UUID
     lap_number: int
     position: int
-    gap_to_ahead_seconds: float
-    gap_to_behind_seconds: float
+    # None when the adjacent driver (ahead/behind respectively) is on a
+    # different lap_number — subtracting cumulative_seconds across a lap
+    # boundary compares a different amount of race distance and produces a
+    # meaningless (often negative) value. laps_behind carries the lap deficit
+    # to the car immediately ahead instead (0 when on the same lap).
+    gap_to_ahead_seconds: float | None
+    gap_to_behind_seconds: float | None
+    laps_behind: int = 0
+    # Only populated by the live-ingestion path (ingest_live_session.py's
+    # _publish_live_gaps, parsed directly from TimingData's own GapToLeader
+    # field) — None for the DB-reconstruction fallback path, which has no
+    # equivalent authoritative source and would have the same lap-1-missing
+    # unreliability documented on gap_to_ahead_seconds above.
+    gap_to_leader_seconds: float | None = None
 
 
 class SessionGapsResponse(BaseModel):

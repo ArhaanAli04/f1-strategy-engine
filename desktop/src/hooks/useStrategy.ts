@@ -1,6 +1,15 @@
+import { useEffect, useRef, useState } from "react"
 import { useMutation, useQuery, type Query } from "@tanstack/react-query"
 import * as strategyApi from "@/api/strategy"
 import type { SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
+
+// Worker is scaled to 0 outside race weekends (Day 40 hybrid deployment,
+// see fly.toml) — nothing ever consumes prediction_queue, so a task
+// enqueued then would poll PENDING/STARTED forever with no signal. After
+// this long in that state, useSimulationResult flags timedOut so the UI
+// can swap the spinner for an explanation instead of hanging silently.
+// Mirrors web/src/hooks/useStrategy.ts per the Desktop Sync Protocol.
+const PENDING_TIMEOUT_MS = 60_000
 
 export function usePitWindow(sessionId: string | null, driverId: string | null) {
   return useQuery({
@@ -44,7 +53,7 @@ export function useSimulateStrategy(sessionId: string) {
 
 // Polls GET /strategy/simulate/{task_id} until the Celery task resolves.
 export function useSimulationResult(taskId: string | null) {
-  return useQuery({
+  const query = useQuery({
     queryKey: ["strategy", "simulate-result", taskId],
     queryFn: () => strategyApi.getSimulationResult(taskId as string),
     enabled: Boolean(taskId),
@@ -53,4 +62,26 @@ export function useSimulationResult(taskId: string | null) {
       return status === "SUCCESS" || status === "FAILURE" ? false : 2000
     },
   })
+
+  const [timedOut, setTimedOut] = useState(false)
+  const pendingSinceRef = useRef<number | null>(null)
+  const status = query.data?.status
+
+  useEffect(() => {
+    if (!taskId || status === "SUCCESS" || status === "FAILURE") {
+      pendingSinceRef.current = null
+      setTimedOut(false)
+      return
+    }
+    pendingSinceRef.current ??= Date.now()
+    const elapsed = Date.now() - pendingSinceRef.current
+    if (elapsed >= PENDING_TIMEOUT_MS) {
+      setTimedOut(true)
+      return
+    }
+    const timer = window.setTimeout(() => setTimedOut(true), PENDING_TIMEOUT_MS - elapsed)
+    return () => window.clearTimeout(timer)
+  }, [taskId, status])
+
+  return { ...query, timedOut }
 }

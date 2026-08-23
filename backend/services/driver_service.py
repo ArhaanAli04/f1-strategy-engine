@@ -55,8 +55,16 @@ DEFAULT_PAGE_SIZE = 20
 # changes (new driver contract, etc).
 DRIVERS_LIST_TTL_SECONDS = None
 # Historical lap data — immutable once a session's laps are ingested, matching
-# race_service.py's RACE_DETAIL_TTL_SECONDS bucket.
+# race_service.py's RACE_DETAIL_TTL_SECONDS bucket. Only correct once the
+# session has actually finished, though — see get_driver_laps's docstring.
 DRIVER_LAPS_TTL_SECONDS = 86400
+# Live session laps change every ~1-2 minutes (one new lap per driver per
+# lap). Confirmed live (2026 Dutch GP dry run): the 86400s TTL above cached
+# an EMPTY result (queried before any laps existed yet) and then served that
+# stale {"items": [], "total": 0} for the rest of the race, silently masking
+# every real lap ingested afterward — 24h is only safe for a session that
+# will never change again.
+DRIVER_LAPS_LIVE_TTL_SECONDS = 30
 
 
 def _fingerprint_key(driver_id: uuid.UUID | str) -> str:
@@ -334,20 +342,50 @@ async def get_driver_analysis(
     )
 
 
-def _key_driver_laps(
-    client: aioredis.Redis,  # type: ignore[type-arg]
-    db: AsyncSession,
-    driver_id: uuid.UUID,
-    session_id: uuid.UUID,
-    page: int,
-    page_size: int,
-) -> str:
+def _key_driver_laps(driver_id: uuid.UUID, session_id: uuid.UUID, page: int, page_size: int) -> str:
     return f"f1:driver:{driver_id}:session:{session_id}:laps:{page}:{page_size}"
 
 
-@cacheable(ttl=DRIVER_LAPS_TTL_SECONDS, key_fn=_key_driver_laps)
+async def _resolve_season_round(db: AsyncSession, session_id: uuid.UUID) -> tuple[int, int] | None:
+    """Resolve a session's (season, round_number) via its parent race, or None if unknown.
+
+    Local copy rather than importing telemetry_service's equivalent — per
+    CLAUDE.md, services must not import other services. None (not raised)
+    on an unresolvable session_id, since the only caller here treats "can't
+    tell if it's live" the same as "assume not live" (the safe/conservative
+    direction — worst case is a slightly-too-long TTL, not a poisoned one).
+
+    Args:
+        db: Async DB session.
+        session_id: Session to resolve.
+    Returns:
+        (season, round_number), or None if no session with this ID exists.
+    """
+    query = (
+        select(Race.season, Race.round_number)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    row = (await db.execute(query)).one_or_none()
+    return (row.season, row.round_number) if row is not None else None
+
+
+async def _is_session_live(client: aioredis.Redis, db: AsyncSession, session_id: uuid.UUID) -> bool:  # type: ignore[type-arg]
+    """Whether ingest_live_session.py is actively publishing gaps for this session.
+
+    f1:{season}:{round}:gaps is written by the live ingestor's
+    _publish_live_gaps (30s TTL, refreshed on every relevant TimingData
+    update — see ingest_live_session.py) — its mere presence is a reliable
+    live-vs-historical signal, cheaper than checking session status.
+    """
+    resolved = await _resolve_season_round(db, session_id)
+    if resolved is None:
+        return False
+    season, round_number = resolved
+    return await cache_get(client, f"f1:{season}:{round_number}:gaps") is not None
+
+
 async def _fetch_driver_laps(
-    client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
     driver_id: uuid.UUID,
     session_id: uuid.UUID,
@@ -388,8 +426,18 @@ async def get_driver_laps(
 ) -> PaginatedResponse[LapDataResponse]:
     """Paginated lap history for one driver in one session.
 
+    Hand-rolled cache-aside rather than @cacheable (same reasoning as
+    race_service.get_current_race): the correct TTL here depends on a
+    runtime condition — whether the session is still live — not just the
+    function's arguments, which @cacheable's static ttl= can't express. A
+    live session's laps change every ~1-2 minutes; caching for 86400s
+    poisoned the cache with whatever was true (often nothing) the first time
+    this was ever called for that session. No single-flight lock here (unlike
+    get_current_race) — this is a cheap indexed DB query, not an external
+    API round-trip, so a cache-stampede on a miss is not a real concern.
+
     Args:
-        client: Redis client (cache-aside, forwarded to _fetch_driver_laps).
+        client: Redis client (cache-aside).
         db: Async DB session.
         driver_id: Driver whose laps to fetch.
         session_id: Session to scope laps to.
@@ -399,5 +447,16 @@ async def get_driver_laps(
         Laps ordered by lap number, each including its tire compound (for
         client-side tire-compound coloring) and sector times.
     """
-    data = await _fetch_driver_laps(client, db, driver_id, session_id, page, page_size)
+    key = _key_driver_laps(driver_id, session_id, page, page_size)
+    cached = await cache_get(client, key)
+    if cached is not None:
+        return PaginatedResponse[LapDataResponse].model_validate(cached)
+
+    data = await _fetch_driver_laps(db, driver_id, session_id, page, page_size)
+    ttl = (
+        DRIVER_LAPS_LIVE_TTL_SECONDS
+        if await _is_session_live(client, db, session_id)
+        else DRIVER_LAPS_TTL_SECONDS
+    )
+    await cache_set(client, key, data, ttl)
     return PaginatedResponse[LapDataResponse].model_validate(data)

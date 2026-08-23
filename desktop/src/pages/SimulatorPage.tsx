@@ -455,13 +455,27 @@ export function SimulatorPage() {
       {step === 3 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12">
-            <div className="h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-primary" />
-            <p className="text-sm text-muted-foreground">
-              {simulationResult.data?.status === "FAILURE"
-                ? "Simulation failed."
-                : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
-            </p>
-            {simulationResult.data?.status === "FAILURE" && (
+            {/* worker offline outside race weekends (Day 40 hybrid
+                deployment, see fly.toml) — a task enqueued then never
+                resolves, so useSimulationResult's timedOut swaps this in
+                after 60s instead of spinning forever. Mirrors
+                web/src/pages/SimulatorPage.tsx. */}
+            {simulationResult.data?.status !== "FAILURE" && simulationResult.timedOut ? (
+              <p className="max-w-sm text-center text-sm text-muted-foreground">
+                Strategy simulation requires an active race weekend. The worker is currently
+                offline — scale up before the next race to enable this feature.
+              </p>
+            ) : (
+              <>
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-primary" />
+                <p className="text-sm text-muted-foreground">
+                  {simulationResult.data?.status === "FAILURE"
+                    ? "Simulation failed."
+                    : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
+                </p>
+              </>
+            )}
+            {(simulationResult.data?.status === "FAILURE" || simulationResult.timedOut) && (
               <Button variant="outline" onClick={handleReset}>
                 Try Again
               </Button>
