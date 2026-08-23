@@ -46,6 +46,12 @@ def _scalar_one_or_none_result(value: Any) -> MagicMock:
     return result
 
 
+def _one_or_none_result(value: Any) -> MagicMock:
+    result = MagicMock()
+    result.one_or_none.return_value = value
+    return result
+
+
 def _scalars_all_result(items: list[Any]) -> MagicMock:
     result = MagicMock()
     result.scalars.return_value.all.return_value = items
@@ -181,6 +187,12 @@ async def test_get_driver_laps_paginates_correctly(
     mock_db_session.execute.side_effect = [
         _scalar_one_result(7),
         _scalars_all_result(laps),
+        # get_driver_laps's cache miss now also calls _is_session_live ->
+        # _resolve_season_round (Bug 9's fix) before caching the result — a
+        # session_id _resolve_season_round can't resolve makes
+        # _is_session_live return False (historical TTL), same as this test
+        # already implicitly assumed before that call existed.
+        _one_or_none_result(None),
     ]
 
     result = await driver_service.get_driver_laps(

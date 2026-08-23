@@ -460,17 +460,46 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
     gaps: list[dict[str, Any]] = []
     for i, row in enumerate(ordered):
         cumulative = row["cumulative_seconds"]
-        gap_ahead = cumulative - ordered[i - 1]["cumulative_seconds"] if i > 0 else 0.0
-        gap_behind = (
-            ordered[i + 1]["cumulative_seconds"] - cumulative if i < len(ordered) - 1 else 0.0
-        )
+        lap_number = row["lap_number"]
+
+        # A raw cumulative_seconds subtraction is only meaningful between
+        # drivers on the SAME lap — comparing across a lap boundary compares
+        # different amounts of race distance and produces a nonsensical
+        # (often negative) value. Confirmed live (2026 Dutch GP dry run):
+        # position 7 (lap 30) showed gap_to_ahead_seconds = -54.17s relative
+        # to position 6 (lap 31). laps_behind carries the lap deficit to the
+        # car immediately ahead instead, for the frontend to render "+N LAP".
+        gap_ahead: float | None
+        laps_behind = 0
+        if i == 0:
+            gap_ahead = 0.0
+        else:
+            prev_row = ordered[i - 1]
+            if prev_row["lap_number"] != lap_number:
+                gap_ahead = None
+                laps_behind = prev_row["lap_number"] - lap_number
+            else:
+                gap_ahead = cumulative - prev_row["cumulative_seconds"]
+
+        gap_behind: float | None
+        if i == len(ordered) - 1:
+            gap_behind = 0.0
+        else:
+            next_row = ordered[i + 1]
+            gap_behind = (
+                None
+                if next_row["lap_number"] != lap_number
+                else next_row["cumulative_seconds"] - cumulative
+            )
+
         gaps.append(
             {
                 "driver_id": str(row["driver_id"]),
-                "lap_number": row["lap_number"],
+                "lap_number": lap_number,
                 "position": i + 1,
-                "gap_to_ahead_seconds": float(gap_ahead),
-                "gap_to_behind_seconds": float(gap_behind),
+                "gap_to_ahead_seconds": float(gap_ahead) if gap_ahead is not None else None,
+                "gap_to_behind_seconds": float(gap_behind) if gap_behind is not None else None,
+                "laps_behind": laps_behind,
             }
         )
     return {"session_id": str(session_id), "gaps": gaps}
@@ -497,9 +526,19 @@ async def get_session_gaps(
     """Current lap, track position, and gap to car ahead/behind for every driver.
 
     Backs the f1:{season}:{round}:gaps cache key already documented in
-    CLAUDE.md's Redis Cache Key Schema (TTL 8s). Position is derived from
-    cumulative elapsed race time (lower = further ahead), not LapData.position,
-    since the latter can lag a lap behind live standings.
+    CLAUDE.md's Redis Cache Key Schema (TTL 8s). @cacheable's own cache_get
+    on that key is check #1 (live ingestion, refreshed by ingest_live_session.
+    py's _publish_live_gaps) — a hit there returns before this function body
+    ever runs. This body is only reached on a miss, so it is check #2:
+    f1:{season}:{round}:gaps:final (30-day TTL) — the last known-good live
+    standings, written once a live session ends (currently a manual snapshot;
+    see CLAUDE.md's Deferred Wiring for the automatic version). Only when
+    neither exists does this fall back to _compute_session_gaps's DB
+    SUM(lap_time_seconds) reconstruction (check #3) — confirmed unreliable
+    for a session with any gap in its recorded lap history (2026 Dutch GP:
+    laps 1-8 were never live-ingested, corrupting even the final podium
+    order), so it should only ever be reached for a session that was never
+    live-ingested in the first place (a historical replay).
 
     Args:
         client: Redis client (cache-aside).
@@ -510,6 +549,9 @@ async def get_session_gaps(
         Dict with session_id and a gaps list ordered by track position: driver_id,
         lap_number, position, gap_to_ahead_seconds, gap_to_behind_seconds.
     """
+    final = await cache_get(client, f"f1:{season}:{round_number}:gaps:final")
+    if final is not None:
+        return final  # type: ignore[no-any-return]
     return await _compute_session_gaps(db, session_id)
 
 

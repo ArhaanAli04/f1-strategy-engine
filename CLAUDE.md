@@ -698,6 +698,25 @@ each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
 
+- **[out of scope — documented and closed] `CarData.z`/`Position.z` (live
+  telemetry gauges + circuit map dots) require F1TV authentication —
+  unavailable in `no_auth` mode.** Confirmed live during the Day 40 Dutch GP
+  dry run: `ingest_live_session.py` subscribes to both topics correctly and
+  `_handle_car_data`/`_handle_position_data` write to exactly the Redis keys
+  `telemetry_service.py` reads (`f1:{season}:{round}:car:{car_number}:latest`
+  / `:position`, verified matching on both sides) — but with `no_auth=True`
+  (the default; see F1TV Auth notes above, no subscription configured),
+  zero feed messages for these two topics ever arrive, while `TimingData`/
+  `TimingAppData`/`WeatherData`/`DriverList`/`TrackStatus` all stream
+  normally on the same connection with zero errors logged. FastF1's own
+  `get_auth_token()` docstring states the token requires "an active F1TV
+  Access/Pro/Premium subscription," matching this being an entitlement gate
+  on F1's side rather than a parsing/subscription bug. `GET /telemetry/
+  {session_id}/{driver_id}/live` correctly 503s with "No live telemetry
+  cached for car X" in this state — that response is the intended, working
+  behavior for an unauthenticated connection, not a defect. Revisit only if
+  F1TV Auth (see checklist above) is ever set up.
+
 - **[deferred] extract_circuit_outlines.py must still be run manually
   against Supabase.** `backend/scripts/extract_circuit_outlines.py`'s and
   `seed_circuit_outlines.py`'s own docstrings still read "run locally

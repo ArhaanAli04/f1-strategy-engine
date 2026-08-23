@@ -135,6 +135,7 @@ def test_redis_cache_populated_after_ingestion(redis_container: RedisContainer) 
             round_number=1,
             session_id=uuid.uuid4(),
             car_number_to_driver_id={},
+            driver_code_to_id={},
             redis_client=client,
             no_auth=True,
         )

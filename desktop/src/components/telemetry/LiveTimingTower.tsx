@@ -87,16 +87,32 @@ function formatGapToLeader(seconds: number): string {
   return `+${formatLapTime(seconds)}`
 }
 
-// Position 1 shows "Leader" rather than a gap. A null gap_to_ahead_seconds
-// means the driver hasn't set a time yet — once a null link appears in the
-// ahead-chain, every cumulative gap behind it is unknowable, so the chain is
-// marked broken rather than silently summing past the gap. A lapped driver
-// naturally shows a large cumulative gap (e.g. "+1:23.456") — no separate
-// "LAP" label needed.
+function formatLapsBehind(laps: number): string {
+  return `+${laps} LAP${laps > 1 ? "S" : ""}`
+}
+
+// Position 1 shows "Leader" rather than a gap. Once a driver is a lap down
+// (gap_to_ahead_seconds is null AND laps_behind > 0 — a real lap-number
+// boundary, not just a missing time), the seconds-gap chain no longer means
+// anything: a lapped car's cumulative race time isn't comparable to the
+// lead lap's, so we switch to counting laps instead and never revert to a
+// time gap for anyone further back (lap deficits only grow going down the
+// order, never shrink). A driver on the SAME lap as the car ahead of them
+// (laps_behind === 0) but already in lapped mode carries the same lap
+// count forward rather than resuming the time-based cumulative sum — e.g.
+// P4 is "+1 LAP" behind the leader, and P5 (same lap as P4) is also
+// "+1 LAP", not "+1 LAP" plus a few extra tenths.
+//
+// Separately, gap_to_ahead_seconds can still be null with laps_behind === 0
+// for a driver who genuinely has no time set yet — that's the original
+// "chain broken" case and keeps showing "—" for the rest of the field,
+// since every gap behind an unknown gap is itself unknowable.
 function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
   const sorted = [...gaps].sort((a, b) => a.position - b.position)
   const labels: Record<string, string> = {}
-  let cumulative = 0
+  let cumulativeSeconds = 0
+  let cumulativeLaps = 0
+  let lappedMode = false
   let chainBroken = false
 
   for (const gap of sorted) {
@@ -104,13 +120,22 @@ function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
       labels[gap.driver_id] = "Leader"
       continue
     }
+
+    if (lappedMode || gap.laps_behind > 0) {
+      lappedMode = true
+      cumulativeLaps += gap.laps_behind
+      labels[gap.driver_id] = formatLapsBehind(cumulativeLaps)
+      continue
+    }
+
     if (gap.gap_to_ahead_seconds === null || chainBroken) {
       chainBroken = true
       labels[gap.driver_id] = "—"
       continue
     }
-    cumulative += gap.gap_to_ahead_seconds
-    labels[gap.driver_id] = formatGapToLeader(cumulative)
+
+    cumulativeSeconds += gap.gap_to_ahead_seconds
+    labels[gap.driver_id] = formatGapToLeader(cumulativeSeconds)
   }
 
   return labels
