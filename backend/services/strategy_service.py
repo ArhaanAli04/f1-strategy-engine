@@ -355,42 +355,25 @@ def _project_stint_delta(
     return result
 
 
-def _sampled_stint_delta(
-    rng: np.random.Generator,
-    pipeline: Any,
-    compound_encoded: int,
-    driver_code: int,
-    circuit_code: int,
-    start_lap: int,
-    n_laps: int,
-    start_tyre_age: int,
-    total_laps: int,
-) -> float:
-    """One Monte Carlo draw of a stint's total time delta.
+def _sampled_noise(rng: np.random.Generator, n_laps: int, n_samples: int) -> np.ndarray:
+    """n_samples independent Monte Carlo noise draws for one stint segment.
 
-    Deterministic tire_deg prediction plus Gaussian noise whose variance scales
-    with n_laps (the sum of n_laps iid per-lap noise terms), reusing
-    race_simulator.LAP_TIME_NOISE_STD_SECONDS for consistency with the Day 8
-    simulator's noise assumption.
+    Variance scales with n_laps (the sum of n_laps iid per-lap noise terms),
+    reusing race_simulator.LAP_TIME_NOISE_STD_SECONDS for consistency with the
+    Day 8 simulator's noise assumption — same distribution _sampled_stint_delta
+    used to draw one value at a time.
 
-    Args: see _project_stint_delta; rng is the caller's shared Generator.
+    Args:
+        rng: Shared numpy Generator.
+        n_laps: Stint length in laps.
+        n_samples: Number of Monte Carlo draws (UNDERCUT_MONTE_CARLO_SIMS).
     Returns:
-        Sampled total delta in seconds; 0.0 if n_laps <= 0.
+        Array of n_samples noise values; all zero if n_laps <= 0 (matches the
+        old per-draw helper's "empty stint, no noise" behavior).
     """
     if n_laps <= 0:
-        return 0.0
-    deterministic = _project_stint_delta(
-        pipeline,
-        compound_encoded,
-        driver_code,
-        circuit_code,
-        start_lap,
-        n_laps,
-        start_tyre_age,
-        total_laps,
-    )
-    noise = float(rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps)))
-    return deterministic + noise
+        return np.zeros(n_samples)
+    return rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps), size=n_samples)
 
 
 # --- get_optimal_pit_window ---
@@ -649,48 +632,66 @@ async def _undercut_overcut_probability(
     next_compound_encoded = _COMPOUND_ENCODING.get(next_state["compound"], default_compound_code)
 
     rng = np.random.default_rng()
-    wins = 0
-    gap_samples = np.empty(UNDERCUT_MONTE_CARLO_SIMS)
-    for i in range(UNDERCUT_MONTE_CARLO_SIMS):
-        now_delta = PIT_STOP_SECONDS + _sampled_stint_delta(
-            rng,
-            now_pipeline,
-            now_compound_encoded,
-            now_code,
-            now_circuit_code,
-            now_state["lap_number"] + 1,
-            UNDERCUT_PROJECTION_LAPS,
-            0,
-            now_state["total_laps"],
-        )
-        stay_out_delta = _sampled_stint_delta(
-            rng,
-            next_pipeline,
-            next_compound_encoded,
-            next_code,
-            next_circuit_code,
-            next_state["lap_number"] + 1,
-            1,
-            next_state["tyre_age_laps"],
-            next_state["total_laps"],
-        )
-        fresh_delta = PIT_STOP_SECONDS + _sampled_stint_delta(
-            rng,
-            next_pipeline,
-            next_compound_encoded,
-            next_code,
-            next_circuit_code,
-            next_state["lap_number"] + 2,
-            UNDERCUT_PROJECTION_LAPS - 1,
-            0,
-            next_state["total_laps"],
-        )
-        next_delta = stay_out_delta + fresh_delta
 
-        new_deficit = deficit + now_delta - next_delta
-        gap_samples[i] = -new_deficit
-        if new_deficit < 0:
-            wins += 1
+    # The deterministic tire_deg projection for each of the three stint
+    # segments (now/stay_out/fresh) is the SAME on every one of the
+    # UNDERCUT_MONTE_CARLO_SIMS draws — none of _project_stint_delta's inputs
+    # vary with the simulation index, only the noise term does (see
+    # _sampled_noise). The original implementation called pipeline.predict()
+    # inside the loop (3 calls/iteration x 200 iterations = 600 calls/
+    # invocation, ~36s measured) recomputing an identical single-row
+    # prediction every time. Projecting each segment once (3 total predict()
+    # calls) and vectorizing only the noise draws across all 200 simulations
+    # is mathematically equivalent — same deterministic term, same noise
+    # distribution per sample, just not needlessly recomputed — and measured
+    # at <1s. See CLAUDE.md's Deferred Wiring entry for before/after timing.
+    now_deterministic = _project_stint_delta(
+        now_pipeline,
+        now_compound_encoded,
+        now_code,
+        now_circuit_code,
+        now_state["lap_number"] + 1,
+        UNDERCUT_PROJECTION_LAPS,
+        0,
+        now_state["total_laps"],
+    )
+    stay_out_deterministic = _project_stint_delta(
+        next_pipeline,
+        next_compound_encoded,
+        next_code,
+        next_circuit_code,
+        next_state["lap_number"] + 1,
+        1,
+        next_state["tyre_age_laps"],
+        next_state["total_laps"],
+    )
+    fresh_deterministic = _project_stint_delta(
+        next_pipeline,
+        next_compound_encoded,
+        next_code,
+        next_circuit_code,
+        next_state["lap_number"] + 2,
+        UNDERCUT_PROJECTION_LAPS - 1,
+        0,
+        next_state["total_laps"],
+    )
+
+    now_delta = (
+        PIT_STOP_SECONDS
+        + now_deterministic
+        + _sampled_noise(rng, UNDERCUT_PROJECTION_LAPS, UNDERCUT_MONTE_CARLO_SIMS)
+    )
+    stay_out_delta = stay_out_deterministic + _sampled_noise(rng, 1, UNDERCUT_MONTE_CARLO_SIMS)
+    fresh_delta = (
+        PIT_STOP_SECONDS
+        + fresh_deterministic
+        + _sampled_noise(rng, UNDERCUT_PROJECTION_LAPS - 1, UNDERCUT_MONTE_CARLO_SIMS)
+    )
+    next_delta = stay_out_delta + fresh_delta
+
+    new_deficit = deficit + now_delta - next_delta
+    gap_samples = -new_deficit
+    wins = int(np.sum(new_deficit < 0))
 
     return {
         "probability_pit_now_gains_position": wins / UNDERCUT_MONTE_CARLO_SIMS,
