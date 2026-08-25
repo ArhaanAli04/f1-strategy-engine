@@ -481,12 +481,14 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      36 + 40 (partial)
-Status:   Dutch GP dry run complete (Aug 23 13:00 UTC).
-          Auto detection fired at 13:04 UTC ✅
-          12 bugs found and fixed during live race: signalrcore auth crash, FastF1 REST gap,boolean sentinels, DriverList snapshot,tyre compound UNKNOWN, S1/S2 sector loss, gap calculation (cumulative sum → F1 feed),
-          Position snapshot, cache poisoning (24h TTL),gap publishing reliability, final standings persistence, upcoming race showing finished GP.
-          Day 40 A1-A3: fly.toml (hybrid ~$7/mo),WS stale banner (30s timeout), simulator timeout (60s), scale-race-weekend.sh, Makefile fly-race-up/down targets.docs/day36-fixes.md created.
+Day:      41
+Status:   British GP 2026 (Round 9) ingested and 
+          validated end-to-end. Strategy overview, pit window, undercut, Monte Carlo simulator all tested against real 2026 data.Major fix: _undercut_overcut_probability vectorized — 600 unbatched XGBoost calls 
+          → 3 batched calls per pipeline. 36.5s → 0.87s (42x speedup), full task 
+          38s → 2.1s (18x). Fixes documented Day 18 "65-88s/task" load test finding root cause. replay_pipeline.py created — full pipeline 
+          replay (process_lap + run_strategy_prediction + alerts) with --rate and --limit flags.Bounded replay validated: 110 events, 0 queue backlog, 2 real alerts fired correctly.ingest-historical.yml workflow created — 
+          manual trigger to keep Supabase current with 2026 races post-race-weekend.
+          Findings logged to Deferred Wiring: tire_deg_hard.pkl mispredicts fresh HARD tyre (tyre_age_laps=1) — needs retraining. StrategyPrediction history endpoint gap (no lap-by-lap prediction history view)
 Next:     Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
