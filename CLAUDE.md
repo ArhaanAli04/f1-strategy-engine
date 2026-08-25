@@ -696,6 +696,48 @@ each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
 
+- **[deferred] `tire_deg_hard.pkl` mispredicts a fresh HARD tyre's first lap
+  (`tyre_age_laps=1`), inflating `pit_probability` immediately after a real
+  pit stop.** Discovered Day 41 via `replay_pipeline.py` against British GP
+  2026 Round 9: two predictions (ALB lap 2, PIA lap 3 — both drivers' first
+  lap on HARD right after pitting) came back with `pit_probability` 0.72 and
+  0.999. Root-cause investigation (not a code bug): reconstructed the exact
+  `pit_predictor` feature vector and found `predicted_life_remaining=0.0` for
+  both — `tire_deg_model.predict_life_remaining_batch`'s threshold-crossing
+  logic is working correctly, it's faithfully reporting that
+  `tire_deg_hard.pkl` itself predicts an implausible **+1.71s** degradation
+  delta at `tyre_age_laps=1` (a fresh tyre should show near-zero/negative
+  delta, not already above `DEGRADATION_THRESHOLD_SECONDS=1.5`), then drops
+  to sensible negative deltas (-1.5 to -1.7s) from `tyre_age_laps=2` onward.
+  Characterized via a raw-prediction sweep: **HARD-compound-specific** (the
+  same `(lap_number=2, tyre_age_laps=1)` input on MEDIUM/SOFT gives normal,
+  small, mostly-negative deltas); **not early-race-specific** (HARD at
+  `lap_number=20, tyre_age_laps=1` — a normal-timing pit — shows an even
+  larger +5.29s spike, so this fires for ANY fresh HARD tyre, any time in
+  the race). Most likely cause: a training-data gap specific to
+  `tyre_age_laps=1` on HARD — real out-laps are commonly excluded from
+  training data via lap-accuracy/`is_valid` filtering, so the model may have
+  seen little or no genuine `tyre_age_laps=1` HARD coverage and is
+  extrapolating badly into that unseen region (plausibly MEDIUM/SOFT have
+  denser coverage there from being used more often). Real race-day risk:
+  every HARD pit stop's very next lap would trigger this same false
+  "pit again immediately" signal and could fire a spurious alert one lap
+  after the driver just stopped. Fix requires retraining `tire_deg_hard.pkl`
+  with better `tyre_age_laps=1` coverage (or auditing whether HARD out-laps
+  are being systematically filtered from the training corpus) — real ML
+  work, not attempted today; genuinely deferred to a future day.
+
+- **[deferred] No endpoint exists to view historical `StrategyPrediction`
+  rows (what was predicted at a specific past lap).** Current `/overview`
+  always computes live from `lap_data`'s latest state per driver (see
+  `strategy_service._current_state`) — it has no notion of "as of lap N."
+  `replay_pipeline.py` (Day 41) proved the write path persists real,
+  varying per-lap `StrategyPrediction` rows correctly, but nothing reads
+  them back as a lap-by-lap history. Would need a new endpoint like
+  `GET /strategy/{session_id}/{driver_id}/history` to expose this. Not a
+  bug — deferred, not needed for the live race use case `/overview` and
+  `/pit-window` already serve.
+
 - **[out of scope — documented and closed] `CarData.z`/`Position.z` (live
   telemetry gauges + circuit map dots) require F1TV authentication —
   unavailable in `no_auth` mode.** Confirmed live during the Day 40 Dutch GP
@@ -836,6 +878,46 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**`_undercut_overcut_probability` vectorized (✅ fixed 2026-08-25):**
+Discovered during Day 41 full-pipeline replay testing (`replay_pipeline.py`
+against British GP 2026 Round 9): `run_strategy_prediction` Celery tasks were
+taking 28-87s each — 10-100x slower than expected. Profiled directly inside
+the worker container: `_resolve_undercut_overcut` (calls both
+`get_undercut_score` and `get_overcut_score` per task) accounted for 36.563s
+of a 38.162s task total — model loading (in-memory cache hit), DB context
+resolution, and ML inference combined were ~1.5s. Root cause:
+`strategy_service._undercut_overcut_probability`'s `UNDERCUT_MONTE_CARLO_
+SIMS=200`-iteration Python loop called `pipeline.predict()` 3 times per
+iteration — 600 unbatched calls per invocation, ~17.5ms fixed overhead each
+(confirmed via micro-benchmark: 600 individual tiny `predict()` calls took
+10.5s versus 0.067s for the identical total workload batched into one call —
+157x, same hardware, same load — ruling out S3/model-loading cost,
+`@cacheable` lock contention (impossible here regardless: `--pool=solo`
+never runs tasks concurrently, so there is no real lock contention to begin
+with), and Docker/WSL2 resource pressure as causes; `docker stats` showed
+0.10% CPU at idle with no container CPU/memory limits set).
+
+The deterministic `_project_stint_delta` term for each of the three stint
+segments (now/stay_out/fresh) does not vary across the 200 simulations at
+all — only the Gaussian noise term does — so the fix projects each segment
+**once** (3 total `predict()` calls, not 200) and vectorizes only the noise
+draws with plain numpy (`_sampled_noise`, replacing the old per-draw
+`_sampled_stint_delta`, removed as dead code — no other callers).
+Mathematically equivalent to the original: same noise distribution (mean 0,
+`LAP_TIME_NOISE_STD_SECONDS * sqrt(n_laps)`), verified by running both
+implementations 30 times each at a near-50/50 borderline scenario (the
+original `rng = np.random.default_rng()` was never seeded/reproducible
+call-to-call to begin with, so exact bit-for-bit equality was never a
+property to preserve) — old mean=0.5023 vs new mean=0.5165 probability, old
+mean=0.0039s vs new mean=0.0251s projected gap, both differences well within
+expected Monte Carlo sampling noise between two independently-drawn
+200-sample runs.
+
+Measured end-to-end on the same real driver/lap/session profiled before the
+fix: `_resolve_undercut_overcut` **36.563s → 0.871s** (42x), task total
+**38.162s → 2.101s**. `make test-unit`: all 133 tests pass, including
+`test_undercut_returns_positive_when_gap_favourable`.
 
 **DB connection pool exhaustion (✅ fixed 2026-07-30):**
 `core/database.py`'s hardcoded `pool_size=10, max_overflow=20` (30 total

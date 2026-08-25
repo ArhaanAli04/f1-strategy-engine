@@ -25,6 +25,7 @@ below, not a 1:1 mapping of the Kubernetes commands.
 ## Table of Contents
 
 - [Race day checklist](#race-day-checklist)
+- [Post-race weekend: keeping Supabase current](#post-race-weekend-keeping-supabase-current)
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
 - [Fly.io deployment](#flyio-deployment)
@@ -77,6 +78,25 @@ doesn't yet — see that section's own caveat).
    [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing))
    is the fastest way to get a populated timing tower back for a demo,
    even though it isn't the actual live session.
+
+---
+
+## Post-race weekend: keeping Supabase current
+
+After each race weekend, run the `ingest-historical` workflow (Actions tab →
+`ingest-historical.yml` → Run workflow) for that round to keep the Supabase
+production DB current for the deployed web app.
+
+`.github/workflows/ingest-historical.yml` runs
+`backend/scripts/ingest_historical.py` directly against Supabase
+(`SUPABASE_DIRECT_URL`) — same script `make ingest` runs locally, see that
+script's own docstring: it writes `lap_data`/`tire_stints` only, no Celery
+or live-pipeline involvement. Set `season`/`round`/`session_type` (default
+`R`) to the weekend just completed.
+
+Once ingested, consider manually triggering `train-models.yml` afterward so
+the weekly retrain picks up the new round sooner than its Monday 02:00 UTC
+schedule — see that workflow's own docstring.
 
 ---
 
