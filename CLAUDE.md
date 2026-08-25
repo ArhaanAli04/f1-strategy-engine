@@ -779,16 +779,73 @@ happen), or was found already fixed and moved into ### Notes below instead.
   timestamps. The circuit map feature itself (Days 25-28) is complete, so
   this is no longer gated on anything — genuinely still open, not started.
 
-- **[deferred] retrain_incremental.py FastF1 403→mirror fallback for 2026
-  data:** FastF1 gets a 403 from `livetiming.formula1.com` and falls back
-  to `livetiming-mirror.fastf1.dev`, which has no 2026 data (only patches a
-  couple of corrupted 2021-2022 sessions), so 2026 rounds raise
-  `SessionNotAvailableError`. Current behavior: rounds are skipped
-  gracefully — non-blocking, the pipeline trains correctly on the
-  2018-2025 base corpus. Real fix (retry loop + cache clear +
-  `FASTF1_CACHE_DIR` setup in `train-models.yml`) needed before 2026 data
-  becomes important for MAE improvement — i.e. before next season, not
-  urgent today.
+- **[deferred, escalated — superseded the old "403→mirror fallback" framing
+  below, real cause is different and this is now urgent, not "before next
+  season"] `retrain_incremental.py` fetches ZERO 2026 laps when run from
+  GitHub Actions — confirmed via the actual 2026-08-24 `train-models.yml`
+  run log (run id `32685243197`), Day 41.** The run's own final line reads
+  `Fetched 0 lap row(s) for season 2026` — every model trained by that run
+  used only the static 2018-2025 base corpus (`Train laps: 119984, holdout
+  laps: 23043`), despite the workflow completing green. The original theory
+  (a clean 403 from `livetiming.formula1.com` → mirror fallback →
+  `SessionNotAvailableError`, "not urgent today") was wrong on both counts —
+  the real failure and its urgency are both worse:
+  - **Almost every round (3, 4, 5, 11, 13–23) fails with `fastf1.exceptions.
+    DataNotLoadedError`** ("The data you are trying to access has not been
+    loaded yet") raised on `retrain_incremental.py`'s own `laps =
+    session.laps` line. Root cause: the underlying driver/session-info fetch
+    itself comes back **completely empty** (`"Finished loading data for 0
+    drivers: []"`) — not a 403, not a mirror-fallback `SessionNotAvailable
+    Error`. Round 24 is correctly rejected as out-of-range
+    (`Invalid round: 24` — 2026 has 23 rounds) and is not part of this bug.
+  - **Round 6 (Monaco) is a subtler variant of the same root cause, not a
+    separate bug.** Its `session.load()` call reports `"Finished loading
+    data for 22 drivers"` — an apparent success — and along the way
+    `fastf1/core.py`'s `_add_first_lap_time_from_ergast()` raises
+    `AttributeError: 'Session' object has no attribute '_laps'` for 21 of 22
+    drivers. That `AttributeError` is a **red herring**: it's already caught
+    inside FastF1's own per-driver `try/except` (logged at `DEBUG`, doesn't
+    propagate), and disabling Ergast enrichment (not possible via any public
+    `session.load()` parameter anyway — confirmed by reading the installed
+    fastf1 3.8.3 source, `load()`'s only args are `laps`/`telemetry`/
+    `weather`/`messages`/`livedata`) would **not** have fixed anything. The
+    real problem: `self._laps` genuinely never gets populated during this
+    `load()` call despite the misleading "22 drivers" success message (which
+    reflects driver/session metadata loading fine, not the laps data
+    specifically) — so `retrain_incremental.py`'s own subsequent `session
+    .laps` access fails with the identical `DataNotLoadedError` one line
+    later (`"Skipping round 6"`), for the same underlying reason as every
+    other skipped round.
+  - **Not a FastF1 library bug, not fixed by a version pin.** FastF1 3.8.3
+    (the current latest on PyPI, released 2026-04-29 — `pyproject.toml`'s
+    unbounded `fastf1>=3.3.0` resolves to this both locally and in CI) was
+    specifically checked: its own changelog already fixed a related
+    first-lap/Ergast bug for the 2026 Chinese Grand Prix (round 2). A
+    genuinely fresh-cache (not reusing this session's pre-warmed local
+    cache) fetch of rounds 1 and 2 from this machine, same fastf1 3.8.3,
+    succeeded with zero errors. Same version, same code, works cleanly from
+    a residential IP and fails from GitHub's runner — strong evidence this
+    is F1's backend serving degraded/incomplete responses specifically to
+    GitHub Actions' (datacenter) IP range, not a code or version defect.
+    Severity varies by round (total emptiness for most rounds, a partial/
+    mild failure for Monaco specifically) rather than a uniform hard block,
+    which reads more like throttling/rate-limiting than a permanent ban.
+  - **Directly threatens `.github/workflows/ingest-historical.yml`
+    (built Day 41, not yet triggered).** It calls the identical
+    `load_session()`/`fastf1.get_session().load()` path from the same
+    GitHub-hosted runner infrastructure and is very likely to hit this same
+    failure — silently ingesting zero rows while still reporting success.
+    **Do not trigger it until this is resolved or at least tested
+    cautiously against a single round.**
+  - **Next steps, in priority order (none attempted yet):** (1) add a delay/
+    backoff between each round's fetch in both `retrain_incremental.py`'s
+    and `ingest_historical.py`'s loops — cheapest to try, and the
+    varying-severity pattern above is more consistent with rate-limiting
+    than a hard IP ban; (2) a self-hosted GitHub Actions runner (non-
+    datacenter IP) as a more robust fix if pacing doesn't help; (3) until
+    resolved, manual local ingestion (`make ingest`, as done Day 41 for
+    British GP 2026 Round 9) remains the only reliable path for getting real
+    2026 data into Supabase or the training corpus.
 
 - **[deferred, reworded] WS keepalive ping timeouts under heavy CPU load:**
   28,603 closures (85.7% of WS traffic) in the Day 18 500-user run. Likely
