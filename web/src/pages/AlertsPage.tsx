@@ -84,30 +84,39 @@ export function AlertsPage() {
     },
   })
 
+  // AuthGuard's route shell (h-screen flex-col + a flex-1 overflow-hidden
+  // wrapper around <Outlet />) clips any routed page to a fixed height —
+  // every page must opt into its own h-full + overflow-y-auto to scroll at
+  // all, same pattern as DriverPage.tsx/RacePage.tsx. Without it, an alert
+  // list longer than the viewport was simply clipped, not scrollable.
   if (isLoading) {
     return (
-      <div className="mx-auto max-w-2xl space-y-2 p-6">
-        {Array.from({ length: 8 }).map((_, index) => (
-          <LoadingSkeleton key={index} className="h-16 w-full" />
-        ))}
+      <div className="h-full overflow-y-auto p-6">
+        <div className="mx-auto max-w-2xl space-y-2">
+          {Array.from({ length: 8 }).map((_, index) => (
+            <LoadingSkeleton key={index} className="h-16 w-full" />
+          ))}
+        </div>
       </div>
     )
   }
 
   if (alerts.length === 0) {
     return (
-      <div className="mx-auto max-w-2xl p-6 text-sm text-muted-foreground">
-        No alerts yet.
+      <div className="h-full overflow-y-auto p-6">
+        <div className="mx-auto max-w-2xl text-sm text-muted-foreground">No alerts yet.</div>
       </div>
     )
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-2 p-6">
-      <h1 className="mb-2 text-xl font-semibold">Alerts</h1>
-      {alerts.map((alert) => (
-        <AlertRow key={alert.id} alert={alert} onMarkRead={markReadMutation.mutate} />
-      ))}
+    <div className="h-full overflow-y-auto p-6">
+      <div className="mx-auto max-w-2xl space-y-2">
+        <h1 className="mb-2 text-xl font-semibold">Alerts</h1>
+        {alerts.map((alert) => (
+          <AlertRow key={alert.id} alert={alert} onMarkRead={markReadMutation.mutate} />
+        ))}
+      </div>
     </div>
   )
 }

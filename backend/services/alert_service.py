@@ -13,20 +13,35 @@ and is independent of schemas/strategy_schema.py's UndercutThreatResponse
 (driver_id considering the undercut + target_driver_id being undercut), which
 strategy_service.get_undercut_score/get_undercut_for_session use instead.
 
-Known limitation: prediction_worker.py currently hardcodes undercut_score to
-0.0 (see its _run_inference docstring — a Day 6/7 placeholder pending the
-opponent-relative simulation logic strategy_service.py now provides). So
-evaluate_threats will not fire real undercut alerts until a future day wires
-prediction_worker to call strategy_service.get_undercut_score and persist a
-real value. Not fixed here — prediction_worker.py wasn't part of today's spec.
+evaluate_threats is called from workers/prediction_worker.py's
+_persist_and_publish, once per driver's StrategyPrediction commit (real
+undercut_score/overcut_score values — prediction_worker._resolve_undercut_overcut
+wires strategy_service.get_undercut_score/get_overcut_score for real as of the
+Day 13 fix pass; the earlier "hardcoded to 0.0" limitation this docstring used
+to describe no longer applies). Because evaluate_threats re-evaluates every
+track-position-adjacent pair in the whole session on every call — not just the
+driver whose prediction just committed — and prediction_worker dispatches one
+Celery task per driver per lap, the same threat would otherwise be
+re-evaluated (and re-dispatched) roughly once per OTHER driver's lap commit
+too, not once per lap. _dedup_key + UNDERCUT_ALERT_DEDUP_TTL_SECONDS below
+guard dispatch_alert with a Redis SETNX/TTL claim per (session_id,
+trailing_driver_id, ahead_driver_id, alert_type) — same pattern as CLAUDE.md's
+Auto Race Detection dedup lock. The TTL is deliberately short (well under a
+real F1 lap time) so a threat that genuinely resolves and later re-crosses the
+threshold fires a fresh alert rather than being suppressed indefinitely by one
+early claim.
 
 dispatch_alert writes the Alert DB record and publishes to a new
 f1:alerts:{session_id} pub/sub channel for WebSocket delivery — it does not
 send FCM. FCM delivery already lives in workers/alert_worker.py (Day 6) and
-must not be duplicated here. f1:alerts:{session_id} has no consumer yet (no
-WS alerts endpoint exists in CLAUDE.md's API list until a later day) — same
-"wired for later, not yet connected" pattern as the fcm_token gap documented
-in CLAUDE.md's Deferred Schema Changes.
+must not be duplicated here — the two alert paths are deliberately kept fully
+independent (different signal: pit_probability vs. undercut_score; different
+trigger: Redis pub/sub listener vs. a direct call from prediction_worker;
+different delivery: FCM push vs. DB row + WS publish) rather than having one
+call the other. f1:alerts:{session_id} has no consumer yet (no WS alerts
+endpoint exists in CLAUDE.md's API list until a later day) — same "wired for
+later, not yet connected" pattern as the fcm_token gap documented in
+CLAUDE.md's Deferred Schema Changes.
 """
 
 from __future__ import annotations
@@ -42,6 +57,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import NotFoundError
+from backend.models.driver import Driver
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.models.user import Alert, Subscription
@@ -51,6 +67,14 @@ from backend.schemas.user_schema import SubscriptionCreate, SubscriptionResponse
 logger = logging.getLogger(__name__)
 
 UNDERCUT_ALERT_THRESHOLD = 0.5
+
+# Shorter than a real F1 lap (~80-100s) so a threat that persists across
+# several lap-round evaluation bursts for the SAME pair isn't re-dispatched
+# every time (evaluate_threats runs once per driver's prediction commit, so a
+# ~20-driver field re-evaluates every pair ~20x per lap round) — but long
+# enough to absorb that burst without a real, fresh next-lap re-crossing
+# getting silently swallowed by a stale claim. See module docstring.
+UNDERCUT_ALERT_DEDUP_TTL_SECONDS = 60
 
 
 async def _latest_positions(db: AsyncSession, session_id: uuid.UUID) -> list[LapData]:
@@ -108,6 +132,44 @@ async def _latest_undercut_scores(
     return {row.driver_id: row.undercut_score for row in rows}
 
 
+async def _driver_codes(db: AsyncSession, driver_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """Resolve driver_id -> short code (e.g. "HUL") for a set of drivers.
+
+    Used so alert message text reads like a real timing screen ("Undercut
+    threat: HUL on RUS") instead of raw UUIDs. Missing ids (shouldn't happen
+    for a driver_id sourced from LapData, but defensive per this module's
+    degrade-gracefully convention) are simply absent from the returned dict —
+    callers fall back to str(driver_id).
+
+    Args:
+        db: Async DB session.
+        driver_ids: Drivers to resolve.
+    Returns:
+        Mapping of driver_id to Driver.code.
+    """
+    if not driver_ids:
+        return {}
+    query = select(Driver.id, Driver.code).where(Driver.id.in_(driver_ids))
+    rows = (await db.execute(query)).all()
+    return {row.id: row.code for row in rows}
+
+
+def _dedup_key(
+    session_id: uuid.UUID,
+    trailing_driver_id: uuid.UUID,
+    ahead_driver_id: uuid.UUID,
+    alert_type: AlertType,
+) -> str:
+    """Redis key claiming one (session, trailing driver, ahead driver, alert type) threat.
+
+    Scoped to the specific pairing, not just the trailing driver — if track
+    position changes and a different car becomes the relevant rival, that's a
+    distinct threat worth its own alert, not something the old pairing's claim
+    should suppress.
+    """
+    return f"f1:alerts:dedup:{session_id}:{trailing_driver_id}:{ahead_driver_id}:{alert_type.value}"
+
+
 async def _subscribed_user_ids(
     db: AsyncSession, driver_id: uuid.UUID, alert_type: AlertType
 ) -> list[uuid.UUID]:
@@ -125,19 +187,24 @@ async def evaluate_threats(
 ) -> list[dict[str, Any]]:
     """Check undercut threat scores for every track-position-adjacent driver pair.
 
-    Intended to run after each lap is processed. For each trailing/ahead pair in
-    current running order, dispatches an UNDERCUT_THREAT alert to subscribers of
-    the trailing driver if their undercut_score exceeds UNDERCUT_ALERT_THRESHOLD.
+    Intended to run after each driver's StrategyPrediction commits. For each
+    trailing/ahead pair in current running order, dispatches an UNDERCUT_THREAT
+    alert to subscribers of the trailing driver if their undercut_score exceeds
+    UNDERCUT_ALERT_THRESHOLD — unless a dedup claim for that exact pairing is
+    already held (see _dedup_key / UNDERCUT_ALERT_DEDUP_TTL_SECONDS).
 
     Args:
         db: Async DB session.
-        redis_client: Redis client, forwarded to dispatch_alert.
+        redis_client: Redis client, forwarded to dispatch_alert and used for
+            the dedup claim.
         session_id: Session to evaluate.
     Returns:
-        The alert payloads that were dispatched (empty if none crossed threshold).
+        The alert payloads that were dispatched (empty if none crossed
+        threshold, or all crossings were already claimed by a recent dedup key).
     """
     positions = await _latest_positions(db, session_id)
     scores = await _latest_undercut_scores(db, session_id)
+    driver_codes = await _driver_codes(db, [position.driver_id for position in positions])
 
     alert_type = AlertType.UNDERCUT_THREAT
     dispatched: list[dict[str, Any]] = []
@@ -150,13 +217,21 @@ async def evaluate_threats(
         if not user_ids:
             continue
 
+        claimed = await redis_client.set(
+            _dedup_key(session_id, trailing.driver_id, ahead.driver_id, alert_type),
+            "1",
+            nx=True,
+            ex=UNDERCUT_ALERT_DEDUP_TTL_SECONDS,
+        )
+        if not claimed:
+            continue
+
+        trailing_code = driver_codes.get(trailing.driver_id, str(trailing.driver_id))
+        ahead_code = driver_codes.get(ahead.driver_id, str(ahead.driver_id))
         payload = {
             "session_id": str(session_id),
             "driver_id": str(trailing.driver_id),
-            "message": (
-                f"Undercut threat: driver {trailing.driver_id} on driver {ahead.driver_id} "
-                f"({score:.0%})"
-            ),
+            "message": f"Undercut threat: {trailing_code} on {ahead_code} ({score:.0%})",
         }
         alerts = await dispatch_alert(db, redis_client, user_ids, alert_type, payload)
         dispatched.extend(alerts)

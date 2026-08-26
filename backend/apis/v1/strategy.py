@@ -41,6 +41,7 @@ from backend.schemas.simulate_schema import (
 from backend.schemas.strategy_schema import (
     PitWindowResponse,
     StrategyOverviewResponse,
+    StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
 from backend.services import strategy_service
@@ -270,6 +271,29 @@ async def get_undercut(
 ) -> UndercutThreatResponse:
     return await strategy_service.get_undercut_for_session(
         redis_client, db, session_id, driver_id, target
+    )
+
+
+@router.get(
+    "/{session_id}/{driver_id}/history",
+    response_model=StrategyPredictionHistoryResponse,
+    summary="Get a driver's full StrategyPrediction history for a session",
+    description=(
+        "Returns every persisted prediction for one driver in this session, "
+        "ordered by lap ascending — the progression over time, as opposed to "
+        "/overview which is always the live/current state for the whole field."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_strategy_prediction_history(
+    request: Request,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> StrategyPredictionHistoryResponse:
+    return await strategy_service.get_strategy_prediction_history_for_session(
+        db, session_id, driver_id
     )
 
 

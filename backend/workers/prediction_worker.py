@@ -29,7 +29,7 @@ from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
-from backend.services import strategy_service
+from backend.services import alert_service, strategy_service
 from backend.services.ml import pit_predictor, race_simulator, tire_deg_model
 from backend.services.ml.race_simulator import DriverRaceState, RaceSimulationInput
 from backend.workers.celery_app import app
@@ -586,11 +586,28 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
                 session_id=session_id,
                 driver_id=driver_id,
                 predicted_at=datetime.now(UTC),
+                lap_number=int(context.get("lap_number", 0)),
                 **prediction,
             )
             db.add(row)
             await db.commit()
             f1_strategy_predictions_total.inc()
+
+            # Real DB alerts (evaluate_threats writes Alert rows + publishes to
+            # f1:alerts:{session_id}) — deliberately separate from
+            # alert_worker.py's FCM-only pubsub path, see alert_service.py's
+            # module docstring. A failure here must not roll back or fail the
+            # StrategyPrediction persist above, which already succeeded.
+            try:
+                await alert_service.evaluate_threats(db, async_redis_client, session_id)
+            except Exception as exc:  # noqa: BLE001 — degrade gracefully, never crash the worker
+                sentry_sdk.capture_exception(exc)
+                logger.warning(
+                    "evaluate_threats failed for session %s after driver %s's prediction",
+                    session_id,
+                    driver_id,
+                    exc_info=True,
+                )
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]
 

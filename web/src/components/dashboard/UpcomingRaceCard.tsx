@@ -30,8 +30,8 @@ export function UpcomingRaceCard() {
 
   if (isError || !upcomingRace) {
     return (
-      <Card>
-        <CardContent className="flex h-64 items-center justify-center text-sm text-muted-foreground">
+      <Card className="h-64">
+        <CardContent className="flex h-full items-center justify-center text-sm text-muted-foreground">
           No upcoming race scheduled.
         </CardContent>
       </Card>
@@ -39,8 +39,8 @@ export function UpcomingRaceCard() {
   }
 
   return (
-    <Card className="overflow-hidden">
-      <div className="relative flex h-64 items-center justify-center bg-muted/30">
+    <Card className="h-64 overflow-hidden">
+      <div className="relative flex h-full items-center justify-center bg-muted/30">
         <CircuitOutlineSvg outline={outline} className="h-full w-full" />
         <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
           <div>

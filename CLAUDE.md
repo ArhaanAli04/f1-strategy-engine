@@ -465,6 +465,7 @@ Current endpoints overview:
 - GET    /api/v1/strategy/simulate/{task_id}
 - GET    /api/v1/strategy/{session_id}/{driver_id}/pit-window
 - GET    /api/v1/strategy/{session_id}/{driver_id}/undercut
+- GET    /api/v1/strategy/{session_id}/{driver_id}/history
 - GET    /api/v1/strategy/{session_id}/overview
 - POST   /api/v1/strategy/{session_id}/simulate
 - GET    /api/v1/alerts
@@ -698,6 +699,86 @@ each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
 
+- **[deferred] Cumulative-sum gap/race-time reconstruction (`SUM(lap_time_
+  seconds) ... WHERE lap_time_seconds IS NOT NULL`) silently produces
+  non-comparable totals across drivers, corrupting the timing tower's gaps
+  for any session ingested via `ingest_historical.py`.** Discovered Day 42
+  investigating a user report on British GP 2026 Round 9: `GET /telemetry/
+  {session_id}/gaps` showed P1→P2 = +2:55, P4→P5 = +5:43 — multi-minute
+  gaps between adjacent cars, not realistic for a real race at that
+  spacing.
+  - **Root cause:** a lap with a NULL `lap_time_seconds` (out-lap, in-lap
+    around a pit stop, a Safety Car lap, or any lap FastF1 didn't record a
+    valid time for) is excluded entirely by the `WHERE lap_time_seconds IS
+    NOT NULL` filter, so it silently drops out of that driver's cumulative
+    `SUM()`. Different drivers naturally have different NULL-lap counts
+    (different pit strategies, different SC timing relative to their pit
+    windows), so their cumulative sums stop being directly comparable —
+    the "gap" between two drivers ends up being (real gap) ± (however much
+    time their differing NULL-lap counts hid), not the real gap.
+  - **Confirmed with real numbers**, not just theory: for this session, the
+    P1 leader had **3** NULL-time laps vs. P2/P3's **2** — one extra
+    "missing" lap's worth of time (~175s) landed exactly on the phantom
+    P1→P2 gap (`175.24099999999817` in the raw API response). Lap-number
+    *row* coverage itself was confirmed contiguous per driver (checked via
+    `MIN`/`MAX`/`COUNT(*)` — no missing rows, unlike Day 36's Dutch GP
+    finding where laps 1-8 were never live-ingested at all) — this is a
+    related but distinct manifestation of the same underlying class of bug
+    (differential per-driver lap-time-data coverage breaking a raw
+    cumulative-sum comparison), not the identical Day 36 mechanism.
+  - **Affects 4 call sites**, all sharing the same `SUM(lap_time_seconds)
+    ... IS NOT NULL` pattern: `telemetry_service._compute_session_gaps`'s
+    `_GAPS_QUERY` (the timing tower gaps this was discovered through),
+    `strategy_service._cumulative_race_time`, `prediction_worker
+    ._cumulative_race_time`, and `prediction_worker._build_race_state`'s
+    batched cumulative-time query. The latter three back undercut/overcut
+    probability and Monte Carlo race-simulation starting state — both are
+    almost certainly also silently wrong for this same session, not just
+    the gaps display. This is a **second, independent** way undercut math
+    can be wrong for a historically-ingested session, distinct from the
+    already-logged stale-`undercut_score` alert-dedup issue above (that
+    one is about reading a prediction that's simply old; this one is about
+    the underlying cumulative-time inputs themselves being non-comparable
+    across drivers even when fresh).
+  - **Scope:** any session ingested via `ingest_historical.py` (not just
+    British GP, not just replay-tested sessions) is affected — this is a
+    property of the ingestion path (no live TimingData ever ran to capture
+    F1's own authoritative gaps), not something specific to one race.
+    `telemetry_service.get_session_gaps`'s own docstring already
+    anticipated this exact scenario before today ("confirmed unreliable
+    for a session with any gap in its recorded lap history... should only
+    ever be reached for a session that was never live-ingested") — this
+    investigation found the precise mechanism, not a new class of gap.
+  - **No easy fix exists.** `LapData` has no absolute/cumulative
+    session-elapsed-time column — only the per-lap `lap_time_seconds`
+    delta, which is exactly what breaks when NULL. A real fix needs either
+    an ingestion-time change (FastF1 exposes an absolute `Lap.Time`
+    timestamp per lap, distinct from the per-lap delta `LapTime`, that
+    `ingest_historical.py` doesn't currently capture) or NULL-lap
+    interpolation at query time (an approximation, not a real fix). Either
+    is real ingestion/schema work, not a query-level patch.
+  - **`f1:{season}:{round}:gaps:last_good`** (the `@cacheable` resilience
+    fallback, no expiry — see Redis Cache Key Schema) is now poisoned with
+    these same wrong values for this session, since the broken computation
+    "succeeded" (didn't raise) and got written there like any other
+    successful compute. It will NOT self-correct — it only gets
+    overwritten on a future successful compute, so fixing the underlying
+    query alone won't clear an already-poisoned `last_good` key; that
+    would need an explicit cache invalidation too.
+  - Not fixed today — deferred pending a decision on the ingestion-time vs.
+    interpolation approach.
+
+- **[deferred] `evaluate_threats`/`_latest_undercut_scores` reads each
+  driver's most-recent `StrategyPrediction.undercut_score` with no
+  recency check, so a stale row from a prior session/day can trigger a
+  real alert before that driver has a fresh prediction today.** Observed
+  Day 42 during `replay_pipeline.py` verification of the new alert
+  wiring: the first alert of a fresh replay run fired off a driver's
+  leftover Day 41 score before their own prediction had been recomputed.
+  Not fixed today — a real fix would bound the lookup to predictions from
+  the current session/recent window, not just "most recent regardless of
+  age."
+
 - **[deferred] `tire_deg_hard.pkl` mispredicts a fresh HARD tyre's first lap
   (`tyre_age_laps=1`), inflating `pit_probability` immediately after a real
   pit stop.** Discovered Day 41 via `replay_pipeline.py` against British GP
@@ -728,17 +809,6 @@ happen), or was found already fixed and moved into ### Notes below instead.
   with better `tyre_age_laps=1` coverage (or auditing whether HARD out-laps
   are being systematically filtered from the training corpus) — real ML
   work, not attempted today; genuinely deferred to a future day.
-
-- **[deferred] No endpoint exists to view historical `StrategyPrediction`
-  rows (what was predicted at a specific past lap).** Current `/overview`
-  always computes live from `lap_data`'s latest state per driver (see
-  `strategy_service._current_state`) — it has no notion of "as of lap N."
-  `replay_pipeline.py` (Day 41) proved the write path persists real,
-  varying per-lap `StrategyPrediction` rows correctly, but nothing reads
-  them back as a lap-by-lap history. Would need a new endpoint like
-  `GET /strategy/{session_id}/{driver_id}/history` to expose this. Not a
-  bug — deferred, not needed for the live race use case `/overview` and
-  `/pit-window` already serve.
 
 - **[out of scope — documented and closed] `CarData.z`/`Position.z` (live
   telemetry gauges + circuit map dots) require F1TV authentication —
@@ -937,6 +1007,60 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Real DB alerts wired + StrategyPrediction history endpoint (✅ fixed
+2026-08-26, Day 42):** Two Day 41 findings closed together.
+
+- **Alert system disconnect.** Two independent alert pipelines existed:
+  `workers/alert_worker.py` (pubsub-triggered off `f1:predictions:*`,
+  `pit_probability >= 0.5`, FCM push only — running, but untestable in this
+  env since Firebase was never configured) and `services/alert_service.py`'s
+  `evaluate_threats`/`dispatch_alert` (writes real `Alert` DB rows +
+  `f1:alerts:{session_id}` publish, exactly what `GET /alerts` and the web
+  `RecentAlertsFeed`/`AlertsPage` read) — but nothing called `evaluate_threats`
+  anywhere outside its own unit test. Fixed by calling
+  `alert_service.evaluate_threats(db, async_redis_client, session_id)` from
+  `workers/prediction_worker.py`'s `_persist_and_publish`, right after each
+  `StrategyPrediction` commits — fires identically for a real live session and
+  a `replay_pipeline.py` run, no replay-specific code. `alert_worker.py` was
+  deliberately left untouched and the two paths were NOT merged — different
+  signal (`pit_probability` vs. `undercut_score`), different delivery (FCM vs.
+  DB+WS), forcing a shared code path would have meant touching the
+  still-unconfigured FCM path just to reuse a one-line threshold check.
+  Because `evaluate_threats` re-evaluates every track-position-adjacent pair
+  in the whole session on every call (not just the driver whose prediction
+  just committed), and one Celery task fires per driver per lap, the naive
+  wiring would re-dispatch the same alert ~20x per lap round. Added a Redis
+  `SETNX`/`EX` dedup guard (`UNDERCUT_ALERT_DEDUP_TTL_SECONDS = 60`, keyed per
+  `session_id:trailing_driver:ahead_driver:alert_type` — same pattern as Auto
+  Race Detection's dedup lock) directly in `evaluate_threats`, short enough
+  (well under a real F1 lap) that a genuinely-persisting threat still re-fires
+  on the next lap rather than being suppressed forever. Verified live via
+  `replay_pipeline.py` against British GP 2026 Round 9 (110 events, real
+  `Alert` rows written, `GET /alerts` returns them, dedup confirmed holding
+  ~11 redundant re-checks per 60s window while still re-firing once the TTL
+  expired on a persisting threat). See the stale-score dedup entry above
+  (still open) for a related gap this did NOT fix.
+- **StrategyPrediction history gap.** `StrategyPrediction` had no
+  `lap_number` column, so there was no way to serve "predictions over time"
+  for a driver — `/overview` only ever computed live/current state. Added
+  migration `20260826_add_lap_number_to_strategy_predictions` (nullable
+  `lap_number` + composite index `(session_id, driver_id, lap_number)`;
+  existing pre-migration rows stay permanently NULL — no way to backfill
+  which lap they were predicted for), populated going forward by
+  `prediction_worker._persist_and_publish` from the same lap-completion
+  context already driving the rest of the prediction. New
+  `GET /strategy/{session_id}/{driver_id}/history` (see API Versioning list)
+  returns every persisted prediction for one driver, ordered `lap_number ASC
+  NULLS LAST, predicted_at ASC` (so pre-migration rows sort after all
+  lap_number-having rows, oldest-first within each group) — supplementary to
+  `/overview`, not a replacement; deliberately uncached (a cache-aside TTL
+  would show a stale, non-growing list during exactly the live-progression
+  use case this endpoint exists for). Response field `predicted_pit_lap` is
+  renamed from the model's `optimal_pit_lap` at the API boundary only — no
+  model/column rename. Verified live: fresh replayed laps (`lap_number` 1, 2)
+  sort first; all of Checkpoint 1's earlier NULL-`lap_number` rows correctly
+  sort after via `NULLS LAST`.
 
 **`_undercut_overcut_probability` vectorized (✅ fixed 2026-08-25):**
 Discovered during Day 41 full-pipeline replay testing (`replay_pipeline.py`
