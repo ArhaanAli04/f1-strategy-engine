@@ -482,15 +482,15 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      41
-Status:   British GP 2026 (Round 9) ingested and 
-          validated end-to-end. Strategy overview, pit window, undercut, Monte Carlo simulator all tested against real 2026 data.Major fix: _undercut_overcut_probability vectorized — 600 unbatched XGBoost calls 
-          → 3 batched calls per pipeline. 36.5s → 0.87s (42x speedup), full task 
-          38s → 2.1s (18x). Fixes documented Day 18 "65-88s/task" load test finding root cause. replay_pipeline.py created — full pipeline 
-          replay (process_lap + run_strategy_prediction + alerts) with --rate and --limit flags.Bounded replay validated: 110 events, 0 queue backlog, 2 real alerts fired correctly.ingest-historical.yml workflow created — 
-          manual trigger to keep Supabase current with 2026 races post-race-weekend.
-          Findings logged to Deferred Wiring: tire_deg_hard.pkl mispredicts fresh HARD tyre (tyre_age_laps=1) — needs retraining. StrategyPrediction history endpoint gap (no lap-by-lap prediction history view)
-Next:     Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
+Day:      42
+Status:   Real undercut alerts now fire: 
+          evaluate_threats() wired into prediction_worker._persist_and_publish, 
+          Redis SETNX dedup guard (60s TTL) prevents duplicate alerts. 
+          StrategyPrediction history endpoint added: GET /strategy/{session}/{driver}/history — new lap_number column + migration, ordered by lap ascending. LapTimeChart and SectorHeatmap now show live progression 
+          (filtered to current lap via useLiveTelemetry) with historical fallback 
+          preserved (shows full dataset when no WS data ever arrives).
+          New findings logged to Deferred Wiring: stale-score alert dedup issue, timing tower gap calculation NULL-lap bug (4 call sites affected, ingest_historical.py sessions only), FastF1 historical position data confirmed available WITHOUT F1TV auth (unlike live).
+Next:     Day 43 — Demo replay UI (session picker,position data ingestion for circuit map dots), Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
