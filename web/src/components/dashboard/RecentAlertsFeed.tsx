@@ -39,14 +39,14 @@ export function RecentAlertsFeed() {
   const recentAlerts = (data ?? []).slice(0, RECENT_ALERTS_COUNT)
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
+    <Card className="flex h-64 flex-col">
+      <CardHeader className="flex-shrink-0 flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">Recent Alerts</CardTitle>
         <Link to={ROUTES.ALERTS} className="text-xs text-primary underline underline-offset-4">
           View all
         </Link>
       </CardHeader>
-      <CardContent className="space-y-2">
+      <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto">
         {isLoading &&
           Array.from({ length: RECENT_ALERTS_COUNT }).map((_, index) => (
             <LoadingSkeleton key={index} className="h-14 w-full" />

@@ -28,6 +28,17 @@ class StrategyPrediction(Base):
             "driver_id",
             text("predicted_at DESC"),
         ),
+        # Backs strategy_service.get_strategy_prediction_history: filters by
+        # session_id + driver_id, orders by lap_number ASC — a distinct access
+        # pattern from the DESC-by-predicted_at index above (progression-over-
+        # time view vs. "most recent" lookup), so it needs its own index rather
+        # than reusing that one.
+        Index(
+            "ix_strategy_predictions_session_driver_lap_number",
+            "session_id",
+            "driver_id",
+            "lap_number",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -43,6 +54,14 @@ class StrategyPrediction(Base):
         UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False, index=True
     )
     predicted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Nullable: added 2026-08-26 (Day 42), after this table already had rows
+    # from earlier days — those existing rows have no way to backfill the lap
+    # they were predicted for, so they stay NULL permanently. Populated going
+    # forward by prediction_worker._persist_and_publish from the same
+    # lap-completion context that drives the rest of the prediction. See
+    # strategy_service.get_strategy_prediction_history for the NULLS LAST
+    # ordering this requires.
+    lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     optimal_pit_lap: Mapped[int] = mapped_column(Integer, nullable=False)
     pit_probability: Mapped[float] = mapped_column(Float, nullable=False)
     undercut_score: Mapped[float] = mapped_column(Float, nullable=False)

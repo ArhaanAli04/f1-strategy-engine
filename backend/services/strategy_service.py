@@ -61,12 +61,15 @@ from backend.core.config import get_aws_settings, get_ml_settings
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError
 from backend.models.race import Race
 from backend.models.race import Session as SessionModel
+from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.schemas.strategy_schema import (
     CompetitorStrategyEntry,
     FeatureContributionResponse,
     PitWindowResponse,
     StrategyOverviewResponse,
+    StrategyPredictionHistoryEntry,
+    StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
 from backend.services.cache_service import cacheable
@@ -982,6 +985,59 @@ async def get_competitor_predicted_strategy(
     ]
 
 
+# --- get_strategy_prediction_history ---
+
+
+async def get_strategy_prediction_history(
+    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+) -> list[dict[str, Any]]:
+    """Full StrategyPrediction history for one driver in a session, oldest first.
+
+    Supplementary to get_strategy_overview_for_session (which stays live/
+    current, one row per driver, cached) — this is every persisted prediction
+    for a single driver, for viewing progression over time. Not cached: a
+    cache-aside TTL would show a stale (non-growing) list during exactly the
+    live-progression use case this endpoint exists for, and it's a plain
+    indexed read (ix_strategy_predictions_session_driver_lap_number), not an
+    ML computation like the endpoints that do use @cacheable.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver whose prediction history to return.
+    Returns:
+        One dict per StrategyPrediction row (lap_number, predicted_pit_lap,
+        pit_probability, undercut_score, overcut_score, created_at), ordered
+        by lap_number ascending with NULLS LAST (rows predicted before the
+        2026-08-26 lap_number migration have no lap_number and sort after
+        every row that does), predicted_at ascending as the tiebreak. Empty
+        list if this driver has no predictions yet in this session.
+    """
+    query = (
+        select(StrategyPrediction)
+        .where(
+            StrategyPrediction.session_id == session_id,
+            StrategyPrediction.driver_id == driver_id,
+        )
+        .order_by(
+            StrategyPrediction.lap_number.asc().nulls_last(),
+            StrategyPrediction.predicted_at.asc(),
+        )
+    )
+    rows = (await db.execute(query)).scalars().all()
+    return [
+        {
+            "lap_number": row.lap_number,
+            "predicted_pit_lap": row.optimal_pit_lap,
+            "pit_probability": row.pit_probability,
+            "undercut_score": row.undercut_score,
+            "overcut_score": row.overcut_score,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
 # --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---
 
 
@@ -1052,4 +1108,31 @@ async def get_strategy_overview_for_session(
     return StrategyOverviewResponse(
         session_id=session_id,
         drivers=[CompetitorStrategyEntry.model_validate(d) for d in drivers],
+    )
+
+
+async def get_strategy_prediction_history_for_session(
+    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+) -> StrategyPredictionHistoryResponse:
+    """Shape get_strategy_prediction_history's rows into the route's response schema.
+
+    No season/round resolution needed here (unlike the other session-scoped
+    wrappers above) — get_strategy_prediction_history queries by session_id/
+    driver_id directly, it isn't cache-aside keyed by season/round.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver whose prediction history to return.
+    Returns:
+        StrategyPredictionHistoryResponse — empty predictions list if this
+        driver has no persisted predictions yet in this session (not a 404;
+        an empty history is a valid, expected state for a driver with no
+        laps processed yet).
+    """
+    history = await get_strategy_prediction_history(db, session_id, driver_id)
+    return StrategyPredictionHistoryResponse(
+        session_id=session_id,
+        driver_id=driver_id,
+        predictions=[StrategyPredictionHistoryEntry.model_validate(entry) for entry in history],
     )

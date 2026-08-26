@@ -10,6 +10,7 @@ import {
   YAxis,
 } from "recharts"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
+import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { SegmentedLineTooltip } from "@/components/shared/ChartTooltip"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { formatLapTime, getCompoundColor } from "@/utils/formatters"
@@ -66,7 +67,25 @@ function findCompoundChangeLaps(laps: LapDataResponse[]): number[] {
 
 export function LapTimeChart({ sessionId, driverId }: LapTimeChartProps) {
   const { data, isLoading } = useDriverLaps(sessionId, driverId)
-  const laps = useMemo(() => data?.items ?? [], [data])
+  // useDriverLaps fetches the WHOLE session's laps (already ingested ahead of
+  // "now" for a replay/historical session — see CLAUDE.md's Day 42 notes on
+  // this fix). During an active live session or replay_pipeline.py run,
+  // lapsByDriver's WS-delivered current lap per driver tells us how far the
+  // progression has gotten, so we filter the fetched laps down to it instead
+  // of rendering everything the backend already has. But a driver with no
+  // entry in lapsByDriver at all means no WS lap-completion event has EVER
+  // arrived for them this page session — there's no live/replay session
+  // active, this is plain historical viewing of a completed race, and the
+  // full dataset is exactly what should render (not empty). Only an entry
+  // that DOES exist triggers the progressive filter.
+  const { lapsByDriver } = useLiveTelemetry(sessionId)
+  const liveEvent = driverId ? lapsByDriver[driverId] : undefined
+
+  const laps = useMemo(() => {
+    const allLaps = data?.items ?? []
+    if (liveEvent === undefined) return allLaps
+    return allLaps.filter((lap) => lap.lap_number <= liveEvent.lap_number)
+  }, [data, liveEvent])
 
   const segments = useMemo(() => buildCompoundSegments(laps), [laps])
   const changeLaps = useMemo(() => findCompoundChangeLaps(laps), [laps])

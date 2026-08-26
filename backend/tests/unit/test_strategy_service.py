@@ -12,6 +12,7 @@ tests against real Redis, not this tier.
 """
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -408,3 +409,91 @@ async def test_session_wrappers_resolve_season_round_then_delegate(
     )
     assert overview.session_id == session_id
     assert len(overview.drivers) == 1
+
+
+@pytest.mark.unit
+async def test_prediction_history_maps_optimal_pit_lap_and_orders_query(
+    mock_db_session: AsyncMock,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    created_at = SimpleNamespace()  # placeholder, only identity matters below
+    row = SimpleNamespace(
+        lap_number=12,
+        optimal_pit_lap=24,
+        pit_probability=0.6,
+        undercut_score=0.3,
+        overcut_score=0.1,
+        created_at=created_at,
+    )
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [row]
+    mock_db_session.execute.return_value = result
+
+    history = await strategy_service.get_strategy_prediction_history(
+        mock_db_session, session_id, driver_id
+    )
+
+    assert history == [
+        {
+            "lap_number": 12,
+            "predicted_pit_lap": 24,  # renamed from the model's optimal_pit_lap
+            "pit_probability": 0.6,
+            "undercut_score": 0.3,
+            "overcut_score": 0.1,
+            "created_at": created_at,
+        }
+    ]
+    query = mock_db_session.execute.call_args.args[0]
+    compiled = str(query.compile(compile_kwargs={"literal_binds": True}))
+    assert "lap_number" in compiled
+    assert "NULLS LAST" in compiled.upper()
+
+
+@pytest.mark.unit
+async def test_prediction_history_empty_when_no_predictions(
+    mock_db_session: AsyncMock,
+) -> None:
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = result
+
+    history = await strategy_service.get_strategy_prediction_history(
+        mock_db_session, uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert history == []
+
+
+@pytest.mark.unit
+async def test_strategy_prediction_history_for_session_shapes_response(
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    created_at = datetime.now(UTC)
+    history_mock = AsyncMock(
+        return_value=[
+            {
+                "lap_number": 5,
+                "predicted_pit_lap": 22,
+                "pit_probability": 0.4,
+                "undercut_score": 0.2,
+                "overcut_score": 0.1,
+                "created_at": created_at,
+            }
+        ]
+    )
+    monkeypatch.setattr(strategy_service, "get_strategy_prediction_history", history_mock)
+
+    response = await strategy_service.get_strategy_prediction_history_for_session(
+        mock_db_session, session_id, driver_id
+    )
+
+    history_mock.assert_awaited_once_with(mock_db_session, session_id, driver_id)
+    assert response.session_id == session_id
+    assert response.driver_id == driver_id
+    assert len(response.predictions) == 1
+    assert response.predictions[0].lap_number == 5
+    assert response.predictions[0].predicted_pit_lap == 22
