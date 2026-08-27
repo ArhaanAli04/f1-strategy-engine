@@ -4,7 +4,12 @@ import { PitWindowCard } from "@/components/strategy/PitWindowCard"
 import { usePitWindow } from "@/hooks/useStrategy"
 import type { PitWindowResponse } from "@/types"
 
-vi.mock("@/hooks/useStrategy", () => ({ usePitWindow: vi.fn() }))
+vi.mock("@/hooks/useStrategy", () => ({
+  usePitWindow: vi.fn(),
+  // Not replaying/live by default — these tests exercise the live-recompute
+  // rendering path (Day 43's lap-gated history path is covered separately).
+  useCurrentLapHistoryEntry: vi.fn(() => ({ entry: null, isReplayActive: false, isLoading: false })),
+}))
 
 function buildWindow(overrides: Partial<PitWindowResponse> = {}): PitWindowResponse {
   return {

@@ -10,7 +10,7 @@ from backend.core.database import Base
 
 if TYPE_CHECKING:
     from backend.models.strategy import PitEvent, StrategyPrediction
-    from backend.models.telemetry import LapData, TireStint
+    from backend.models.telemetry import DriverPosition, LapData, TireStint
     from backend.models.user import Alert
 
 
@@ -89,5 +89,8 @@ class Session(Base):
         back_populates="session", cascade="all, delete-orphan"
     )
     alerts: Mapped[list["Alert"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan"
+    )
+    driver_positions: Mapped[list["DriverPosition"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )

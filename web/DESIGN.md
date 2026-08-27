@@ -58,7 +58,7 @@ components:
 
 This is instrumentation, not a marketing surface — a pit-wall engineer's live display, not a consumer dashboard. The canvas is near-black by default (shadcn's Zinc dark `--background`, oklch(0.141 0.005 285.823) ≈ #09090b) and stays out of the way; color is not decoration, it is data — a driver's team hex, a tyre compound's FIA color, a gain/loss sign. Density is a feature: the timing tower holds 22 drivers × 5 fields, the sector heatmap holds 22 × 4 cells, and nothing here is allowed to ask for more room than a real broadcast timing screen would give it.
 
-The system today is genuinely flat: shadcn's default `Card` uses only `shadow-sm`, and most visual separation comes from 10%-opacity hairline borders and background-tone steps (near-black → card-surface → pill-surface), not elevation. Motion is scarce and earns its place — a FLIP reorder when timing-tower positions change, a 1.8s linear glide when a circuit-map dot moves, `isAnimationActive={false}` on every Recharts chart. Nothing animates just to look alive.
+The system today is genuinely flat: shadcn's default `Card` uses only `shadow-sm`, and most visual separation comes from 10%-opacity hairline borders and background-tone steps (near-black → card-surface → pill-surface), not elevation. Motion is scarce and earns its place — a FLIP reorder when timing-tower positions change, a `requestAnimationFrame`-interpolated glide when a circuit-map dot moves, `isAnimationActive={false}` on every Recharts chart. Nothing animates just to look alive.
 
 **Key Characteristics:**
 - Near-black canvas, data supplies the color, not the chrome
@@ -150,10 +150,12 @@ No persistent top navbar exists yet — `NavBar.tsx` is a minimal header (title 
 Shared tokens (`index.css`, not theme-dependent) — introduced during the animation audit pass to replace hand-typed one-off values with named, reusable ones:
 
 - `--ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1)` — entrances/repositioning (timing-tower row reorder).
-- `--ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1)` — on-screen movement (circuit-map dot glide, telemetry-gauge arc sweep).
-- `--duration-row-reorder: 400ms`, `--duration-dot-glide: 1.8s` (just under the 2s position-poll interval), `--duration-gauge-sweep: 600ms` (well under the 8s telemetry-poll interval).
+- `--ease-in-out-strong: cubic-bezier(0.77, 0, 0.175, 1)` — one-off on-screen repositioning (telemetry-gauge arc sweep). Decelerates fully to a stop at the end of every transition — right for a single settle-into-place move, wrong for anything repeating at a fixed cadence.
+- `--duration-row-reorder: 400ms`, `--duration-gauge-sweep: 600ms` (well under the 8s telemetry-poll interval).
 
-All three animated surfaces (timing-tower reorder, circuit-map dots, telemetry-gauge arcs) respect `prefers-reduced-motion`: the underlying value/position update still happens, only the animated glide is skipped.
+Circuit-map dots are the one animated surface that isn't a CSS transition at all — `AnimatedDriverDots.tsx` drives them with a `requestAnimationFrame` loop, linearly interpolating against `performance.now()` timestamps captured in the browser, writing straight to each `<circle>`'s DOM node via a ref (not React state/props, since a 60fps loop shouldn't trigger a React re-render). Went through two CSS-transition attempts first, both confirmed insufficient during Day 43 manual verification: (1) `--ease-in-out-strong` decelerates to a full stop every cycle at this surface's ~1s repeating cadence, producing a visible stop-start pulse regardless of duration; (2) switching to `linear` fixed that pulse but a transition still has to GUESS a fixed duration relative to an assumed update interval — tuning it below, at, or above the nominal 1s poll interval each still left a visible pause once the real-world interval (poll interval + REST round-trip + render timing) didn't match the guess exactly. JS interpolation against real captured timestamps has no fixed duration to guess — it adapts to whatever interval actually occurred between the last two updates, so motion doesn't pause between them.
+
+All animated surfaces (timing-tower reorder, circuit-map dots, telemetry-gauge arcs) respect `prefers-reduced-motion`: the underlying value/position update still happens, only the animated glide is skipped.
 
 ## Do's and Don'ts
 

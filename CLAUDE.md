@@ -367,6 +367,7 @@ f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driv
 f1:driver_style:fit:{season}                                  TTL: 3600s    (cached population-level PCA(4)->KMeans(5)->UMAP(2D) fit for driver_service.py's driver-style analysis endpoint — avoids refitting for every driver requested in the same season, see services/driver_service.py)
 f1:race:{race_id}:detail                                          TTL: 86400s   (race + circuit + sessions, now wired Day 13)
 f1:race:{race_id}:session:{session_id}:detail                     TTL: 86400s   (single session lookup)
+f1:race:by_session:{session_id}:detail                            TTL: 86400s   (Day 43: resolves a session_id to its own race+circuit, for Circuit Map Panel — see race_service.get_race_by_session)
 f1:races:list:{season}:{round_number}:{page}:{page_size}          TTL: 86400s   (paginated race listing)
 f1:current_race:{season}                                          TTL: 300s     (Ergast-resolved current race, insulates external API)
 f1:drivers:all                                                    TTL: infinity (driver roster, manual invalidation only)
@@ -455,6 +456,8 @@ Current endpoints overview:
 - GET    /api/v1/races
 - GET    /api/v1/races/{id}
 - GET    /api/v1/races/current
+- GET    /api/v1/races/upcoming
+- GET    /api/v1/races/session/{session_id}
 - GET    /api/v1/drivers
 - GET    /api/v1/drivers/{id}/analysis
 - GET    /api/v1/drivers/{id}/laps
@@ -809,6 +812,36 @@ happen), or was found already fixed and moved into ### Notes below instead.
   with better `tyre_age_laps=1` coverage (or auditing whether HARD out-laps
   are being systematically filtered from the training corpus) — real ML
   work, not attempted today; genuinely deferred to a future day.
+
+- **[deferred] `StrategyPrediction.tire_life_remaining` stores the wrong
+  value — the tire_deg model's raw `lap_time_delta` prediction instead of
+  the intended laps-remaining estimate — and can be negative.** Found Day 43
+  investigating a Demo Replay manual-verification report of near-zero
+  `pit_probability` across most drivers at British GP 2026 Round 9 laps
+  43-45 (that report turned out to be correct/expected behavior, not a bug —
+  see this file's own commit history for the full investigation — but this
+  distinct issue surfaced along the way while cross-checking DB rows).
+  `prediction_worker._run_inference` sets `tire_life_remaining =
+  float(deg_model.predict(tire_deg_features)[0])` — that's the SAME raw
+  degradation-delta prediction `_project_stint_delta`/training use
+  elsewhere (seconds of predicted lap-time delta from tyre wear, legitimately
+  negative for a fresh tyre), not the laps-until-threshold-crossing value
+  the field name implies. The correct value is computed two lines later as
+  `predicted_life_remaining` (via `tire_deg_model.predict_life_remaining_
+  batch`) and IS used correctly for the `pit_predictor` feature vector
+  (`pit_features`) — it's just never the thing persisted to this column.
+  Confirmed via direct DB query against real rows: e.g. ALB lap 43
+  `tire_life_remaining=-1.749...`, ALO lap 43 `-0.990...` — negative values
+  throughout, consistent with a raw (possibly-negative) delta rather than a
+  remaining-laps count. **Does not affect `pit_probability` or anything Day
+  43's Demo Replay work exposes** — `StrategyPredictionHistoryEntry` (the
+  history endpoint's schema) never includes `tire_life_remaining` at all,
+  and `pit_features` reads the correctly-computed `predicted_life_remaining`
+  variable, not this column. The only consumer is `StrategyPredictionResponse`
+  (a schema no current frontend hook renders), so this is currently a silent,
+  harmless-in-production mislabeling — genuinely worth fixing (swap in
+  `predicted_life_remaining`) but not attempted today since nothing depends
+  on the wrong value yet.
 
 - **[out of scope — documented and closed] `CarData.z`/`Position.z` (live
   telemetry gauges + circuit map dots) require F1TV authentication —
