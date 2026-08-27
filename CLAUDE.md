@@ -485,15 +485,16 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      42
-Status:   Real undercut alerts now fire: 
-          evaluate_threats() wired into prediction_worker._persist_and_publish, 
-          Redis SETNX dedup guard (60s TTL) prevents duplicate alerts. 
-          StrategyPrediction history endpoint added: GET /strategy/{session}/{driver}/history — new lap_number column + migration, ordered by lap ascending. LapTimeChart and SectorHeatmap now show live progression 
-          (filtered to current lap via useLiveTelemetry) with historical fallback 
-          preserved (shows full dataset when no WS data ever arrives).
-          New findings logged to Deferred Wiring: stale-score alert dedup issue, timing tower gap calculation NULL-lap bug (4 call sites affected, ingest_historical.py sessions only), FastF1 historical position data confirmed available WITHOUT F1TV auth (unlike live).
-Next:     Day 43 — Demo replay UI (session picker,position data ingestion for circuit map dots), Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
+Day:      43 (Checkpoints A-F of 2)
+Status:   Curated sessions ingested: British GP R9 , Belgian GP R10 , Canadian GP R5. 
+          DriverPosition table + migration, ~62K rows of 1Hz position data ingested for all 3 curated windows. replay_pipeline.py rebuilt: 
+          absolute-time-synchronized background thread for position playback (fixed lap-relative timing collapse bug), targeted gap fix bypassing NULL-lap-sum bug, gaps/position desync fix (drift up to -249s eliminated), 
+          --start-lap/--end-lap scoping fixed. Strategy Wall + Undercut Panel now sync to replay via new useCurrentLapHistoryEntry hook (reduced-detail mode). Circuit Map Panel: new GET /races/session/{session_id} endpoint 
+          for session-scoped circuit resolution (was showing wrong track during replay).Dot glide smoothness tuned (1Hz-matched: 1000ms poll, 900ms glide). 
+          docs/day43-handoff.md written for Part 2 continuation.
+Next:     Day 43 Part 2 — CLI live-race safety guard, 
+          backend replay-control API 
+          (start/stop/available/sessions), Celery Beat kill-switch, frontend replay selector UI, safety testing., Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
 ```
