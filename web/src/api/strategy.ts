@@ -5,6 +5,7 @@ import type {
   SimulateTaskAccepted,
   SimulateTaskStatusResponse,
   StrategyOverviewResponse,
+  StrategyPredictionHistoryResponse,
   UndercutThreatResponse,
 } from "@/types"
 
@@ -34,6 +35,16 @@ export async function getUndercut(
 
 export async function getStrategyOverview(sessionId: string): Promise<StrategyOverviewResponse> {
   const { data } = await apiClient.get<StrategyOverviewResponse>(`/strategy/${sessionId}/overview`)
+  return data
+}
+
+export async function getStrategyHistory(
+  sessionId: string,
+  driverId: string,
+): Promise<StrategyPredictionHistoryResponse> {
+  const { data } = await apiClient.get<StrategyPredictionHistoryResponse>(
+    `/strategy/${sessionId}/${driverId}/history`,
+  )
   return data
 }
 

@@ -67,14 +67,30 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def load_session(season: int, round_number: int, session_type: str) -> fastf1.core.Session:
+def load_session(
+    season: int, round_number: int, session_type: str, telemetry: bool = False
+) -> fastf1.core.Session:
+    """Load a FastF1 session, caching to disk.
+
+    Args:
+        season: Season year.
+        round_number: Round number within the season.
+        session_type: FastF1 session type code (R, Q, FP1, FP2, FP3).
+        telemetry: Also load position/car telemetry — off by default (this
+            project's lap/stint ingestion never needs it); ingest_position_data.py
+            passes True for its X/Y position backfill.
+    Returns:
+        The loaded FastF1 session.
+    Raises:
+        RoundSkippedError: The session could not be loaded for any reason.
+    """
     settings = get_ml_settings()
     os.makedirs(settings.fastf1_cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(settings.fastf1_cache_dir)
 
     try:
         session = fastf1.get_session(season, round_number, session_type)
-        session.load(laps=True, telemetry=False, weather=False, messages=False)
+        session.load(laps=True, telemetry=telemetry, weather=False, messages=False)
     except Exception as exc:
         raise RoundSkippedError(
             f"Season {season} round {round_number} ({session_type}) could not be loaded: {exc}"

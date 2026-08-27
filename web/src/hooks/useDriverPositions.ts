@@ -1,10 +1,15 @@
 import { useQuery } from "@tanstack/react-query"
 import * as telemetryApi from "@/api/telemetry"
 
-// Fast enough to read as smooth dot movement (with a CSS transition between
-// polls) without hammering the backend — matches the Circuit Map Panel
-// plan's REST-polling decision over a WebSocket push.
-const POSITIONS_POLL_INTERVAL_MS = 2_000
+// Matches the backend's real ~1Hz position publish cadence (both the live
+// Position.z-authenticated path and Demo Replay's position timeline — see
+// CLAUDE.md's Day 43 notes) — polling any slower than the data actually
+// changes means each glide step covers more than one publish interval's
+// worth of movement. AnimatedDriverDots.tsx interpolates against this same
+// interval (its own INTERPOLATION_WINDOW_MS constant, not imported from
+// here — see that file and DESIGN.md's Motion section for why a CSS
+// transition duration couldn't be tuned to fully hide the real interval).
+const POSITIONS_POLL_INTERVAL_MS = 1_000
 
 // Car-number->driver mapping changes far less often than position itself
 // (only on a reserve-driver substitution) — a slower interval is enough.

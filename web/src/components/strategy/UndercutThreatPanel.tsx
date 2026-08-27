@@ -1,6 +1,6 @@
 import { useMemo } from "react"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
-import { useUndercut } from "@/hooks/useStrategy"
+import { useCurrentLapHistoryEntry, useUndercut } from "@/hooks/useStrategy"
 import { DriverChip } from "@/components/shared/DriverChip"
 import { ProgressBar } from "@/components/shared/ProgressBar"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
@@ -95,6 +95,48 @@ function ThreatRow({ label, otherDriverId, data, isLoading }: ThreatRowProps) {
   )
 }
 
+interface ReplayThreatRowProps {
+  label: string
+  otherDriverId: string | null
+  probability: number | null
+  asOfLap: number | null
+}
+
+// Replay/live-progression counterpart to ThreatRow above — StrategyPrediction
+// history carries no projected_gap_seconds/recommended_action (see
+// CLAUDE.md's Day 43 notes), so this renders a probability bar only, one
+// lap-context caption instead of the exact-seconds/action lines live mode
+// has room for.
+function ReplayThreatRow({ label, otherDriverId, probability, asOfLap }: ReplayThreatRowProps) {
+  if (!otherDriverId) {
+    return (
+      <div className="rounded-md border p-2 text-xs text-muted-foreground">
+        {label}: no car in range.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5 rounded-md border p-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <DriverChip driverId={otherDriverId} />
+      </div>
+      {probability === null ? (
+        <p className="text-xs text-muted-foreground">No prediction yet</p>
+      ) : (
+        <>
+          <ProgressBar value={probability} />
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>{Math.round(probability * 100)}% gain probability</span>
+            <span>as of lap {asOfLap}</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 export function UndercutThreatPanel({ sessionId, driverId }: UndercutThreatPanelProps) {
   const { data: gapsResponse } = useSessionGaps(sessionId)
   const gaps = useMemo(() => gapsResponse?.gaps ?? [], [gapsResponse])
@@ -103,11 +145,18 @@ export function UndercutThreatPanel({ sessionId, driverId }: UndercutThreatPanel
     [gaps, driverId],
   )
 
-  // Opportunity: can the selected driver undercut the car ahead by pitting now?
-  const opportunity = useUndercut(sessionId, driverId, aheadDriverId)
-  // Threat: can the car behind undercut the selected driver by pitting now?
-  // Reversed driver_id/target vs. the opportunity call — see resolveNeighbors.
-  const threat = useUndercut(sessionId, behindDriverId, driverId)
+  // Replay/live progression: undercut_score on the SELECTED driver's own
+  // history row is already "opportunity vs. car ahead" (see
+  // prediction_worker._resolve_undercut_overcut) — no need to fetch the
+  // neighbor's own history. overcut_score is "probability of RETAINING
+  // position while the car behind pits now", so the behind car's own
+  // pit-now-gains-position probability (the "Threat" row) is its complement.
+  const { entry: historyEntry, isReplayActive } = useCurrentLapHistoryEntry(sessionId, driverId)
+
+  // Skip the live ML-inference recompute while replay/live is progressing —
+  // historyEntry above is what actually renders in that case.
+  const opportunity = useUndercut(sessionId, driverId, aheadDriverId, !isReplayActive)
+  const threat = useUndercut(sessionId, behindDriverId, driverId, !isReplayActive)
 
   if (!driverId) {
     return (
@@ -125,18 +174,37 @@ export function UndercutThreatPanel({ sessionId, driverId }: UndercutThreatPanel
         <CardTitle className="text-base">Undercut Threats</CardTitle>
       </CardHeader>
       <CardContent className="space-y-2">
-        <ThreatRow
-          label="Opportunity — car ahead"
-          otherDriverId={aheadDriverId}
-          data={opportunity.data}
-          isLoading={opportunity.isLoading}
-        />
-        <ThreatRow
-          label="Threat — car behind"
-          otherDriverId={behindDriverId}
-          data={threat.data}
-          isLoading={threat.isLoading}
-        />
+        {isReplayActive ? (
+          <>
+            <ReplayThreatRow
+              label="Opportunity — car ahead"
+              otherDriverId={aheadDriverId}
+              probability={historyEntry?.undercut_score ?? null}
+              asOfLap={historyEntry?.lap_number ?? null}
+            />
+            <ReplayThreatRow
+              label="Threat — car behind"
+              otherDriverId={behindDriverId}
+              probability={historyEntry ? 1 - historyEntry.overcut_score : null}
+              asOfLap={historyEntry?.lap_number ?? null}
+            />
+          </>
+        ) : (
+          <>
+            <ThreatRow
+              label="Opportunity — car ahead"
+              otherDriverId={aheadDriverId}
+              data={opportunity.data}
+              isLoading={opportunity.isLoading}
+            />
+            <ThreatRow
+              label="Threat — car behind"
+              otherDriverId={behindDriverId}
+              data={threat.data}
+              isLoading={threat.isLoading}
+            />
+          </>
+        )}
       </CardContent>
     </Card>
   )

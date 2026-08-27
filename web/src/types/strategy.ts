@@ -61,3 +61,22 @@ export interface StrategyComparisonResponse {
   driver_id: string
   strategies: StrategyComparisonEntry[]
 }
+
+// One StrategyPrediction row in a driver's lap-by-lap progression history —
+// supplementary to StrategyOverviewResponse/UndercutThreatResponse (always
+// live/current), used to reconstruct "the prediction valid at lap N" during
+// replay. lap_number is null for pre-Day-42 rows (see backend docstring).
+export interface StrategyPredictionHistoryEntry {
+  lap_number: number | null
+  predicted_pit_lap: number
+  pit_probability: number
+  undercut_score: number
+  overcut_score: number
+  created_at: string
+}
+
+export interface StrategyPredictionHistoryResponse {
+  session_id: string
+  driver_id: string
+  predictions: StrategyPredictionHistoryEntry[]
+}

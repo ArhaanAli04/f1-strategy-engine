@@ -65,6 +65,30 @@ async def get_upcoming_race(
     return await race_service.get_upcoming_race(redis_client, db)
 
 
+# Registered ahead of /{race_id} (same reason as /upcoming above) so the
+# literal "session" segment never gets swallowed by the UUID path param.
+@router.get(
+    "/session/{session_id}",
+    response_model=RaceResponse,
+    summary="Get the race that owns a given session",
+    description=(
+        "Resolves a session_id to its parent race (with circuit + all "
+        "sessions) — used by the Circuit Map Panel to show the correct "
+        "track for whichever session is actually being viewed, instead of "
+        "GET /races/upcoming's next-scheduled-race (see CLAUDE.md's Day 43 "
+        "Circuit Map Panel fix)."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_race_by_session(
+    request: Request,
+    session_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+) -> RaceResponse:
+    return await race_service.get_race_by_session(redis_client, db, session_id)
+
+
 @router.get(
     "",
     response_model=PaginatedResponse[RaceListResponse],

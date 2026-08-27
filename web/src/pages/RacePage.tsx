@@ -51,7 +51,7 @@ export function RacePage() {
         </aside>
 
         <main className="flex flex-1 flex-col overflow-y-auto">
-          <CircuitMapPanel sessionId={sessionId} />
+          <CircuitMapPanel sessionId={sessionId} isExplicitSession={Boolean(paramSessionId)} />
 
           <div className="flex flex-1 flex-col gap-4 p-4">
             <Card>

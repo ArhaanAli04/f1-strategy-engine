@@ -197,6 +197,62 @@ async def get_race(
     return RaceResponse.model_validate(data)
 
 
+def _key_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> str:
+    return f"f1:race:by_session:{session_id}:detail"
+
+
+@cacheable(ttl=RACE_DETAIL_TTL_SECONDS, key_fn=_key_race_by_session)
+async def _fetch_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> dict[str, Any]:
+    query = (
+        select(Race)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .options(selectinload(Race.circuit), selectinload(Race.sessions))
+        .where(SessionModel.id == session_id)
+    )
+    race = (await db.execute(query)).scalar_one_or_none()
+    if race is None:
+        raise NotFoundError(f"No race found for session {session_id}")
+    return RaceResponse.model_validate(race).model_dump(mode="json")
+
+
+async def get_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> RaceResponse:
+    """Fetch the race (+ circuit + sessions) that owns a given session_id.
+
+    Day 43's Circuit Map Panel fix: CircuitMapPanel previously resolved its
+    circuit outline/transform via GET /races/upcoming, which has nothing to
+    do with whichever session is actually being viewed — correct for the
+    "no session selected yet" landing state, wrong the moment a Demo Replay
+    or historical session is open (confirmed live: viewing British GP while
+    the real upcoming race was Monza rendered Monza's track shape and
+    transform against Silverstone's real coordinates). This is the
+    session-scoped lookup CircuitMapPanel's own code comment already
+    flagged as missing ("there's no session_id -> circuit_id endpoint").
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_race_by_session).
+        db: Async DB session.
+        session_id: Session whose owning race to fetch.
+    Returns:
+        The race (same shape as GET /races/{race_id}).
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    data = await _fetch_race_by_session(client, db, session_id)
+    return RaceResponse.model_validate(data)
+
+
 def _key_session(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,

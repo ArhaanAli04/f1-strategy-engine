@@ -213,6 +213,40 @@ async def get_or_create_drivers(
     return code_to_id
 
 
+def resolve_car_numbers(
+    fastf1_session: fastf1.core.Session, code_to_driver_id: dict[str, uuid.UUID]
+) -> dict[str, uuid.UUID]:
+    """Map FastF1 car numbers to driver_id via each driver's Abbreviation code.
+
+    Same per-driver lookup ingest_live_session.py's run_live_ingestor already
+    does inline (fastf1_session.drivers -> get_driver(number) -> Abbreviation)
+    — factored out here so replay_pipeline.py (Day 43) can reuse it without
+    duplicating the per-driver try/except.
+
+    Args:
+        fastf1_session: A loaded FastF1 session (driver info doesn't require
+            laps=True — session.load(laps=False, ...) is enough).
+        code_to_driver_id: Driver.code -> Driver.id, for whatever set of
+            drivers the caller already knows about (e.g. from its own DB
+            query) — a car number with no matching code is silently skipped,
+            same as an unresolvable driver number.
+    Returns:
+        {car_number: driver_id} for every driver FastF1 could resolve AND
+        that matched a known code.
+    """
+    car_number_to_driver_id: dict[str, uuid.UUID] = {}
+    for driver_number in fastf1_session.drivers:
+        try:
+            info = fastf1_session.get_driver(driver_number)
+        except Exception as exc:  # noqa: BLE001 — per-driver skip, unresolvable car number
+            logger.warning("Skipping unresolvable driver number %s: %s", driver_number, exc)
+            continue
+        driver_id = code_to_driver_id.get(info.get("Abbreviation"))
+        if driver_id is not None:
+            car_number_to_driver_id[str(driver_number)] = driver_id
+    return car_number_to_driver_id
+
+
 # --- Ergast schedule parsing (shared by ingest_live_session.py's --poll mode
 # and race_detection_worker.py's auto-detection task — same source columns,
 # different trigger windows) ---

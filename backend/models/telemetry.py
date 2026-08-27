@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -99,3 +109,50 @@ class SectorTime(Base):
     mini_sector_speeds: Mapped[Any] = mapped_column(JSONB, nullable=True)
 
     lap_data: Mapped["LapData"] = relationship(back_populates="sector_times")
+
+
+class DriverPosition(Base):
+    """1Hz-downsampled X/Y track position for Demo Replay's Circuit Map dots.
+
+    Populated once, offline, by scripts/ingest_position_data.py for the 3
+    curated Demo Replay sessions' fixed lap ranges only (see CLAUDE.md's
+    Planned Feature: Live Circuit Map / Day 43) — unlike lap_data, this is
+    NOT populated for every historical session, since raw position telemetry
+    at scale is exactly the volume TimescaleDB was deferred over (see
+    CLAUDE.md's Deferred Telemetry Features). replay_pipeline.py reads these
+    rows back out at replay time and republishes them to the same
+    f1:{season}:{round}:car:{car_number}:position Redis keys the live
+    Position.z-authenticated path writes, so CircuitMapPanel needs no
+    replay-specific frontend code.
+    """
+
+    __tablename__ = "driver_positions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    driver_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False, index=True
+    )
+    lap_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Seconds elapsed since this lap's start, at 1Hz resolution — orders
+    # samples within a lap for replay_pipeline.py's within-lap pacing.
+    timestamp_in_lap: Mapped[float] = mapped_column(Float, nullable=False)
+    x: Mapped[float] = mapped_column(Float, nullable=False)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_driver_positions_session_lap",
+            "session_id",
+            "lap_number",
+            "timestamp_in_lap",
+        ),
+    )
+
+    session: Mapped["Session"] = relationship(back_populates="driver_positions")
+    driver: Mapped["Driver"] = relationship(back_populates="driver_positions")
