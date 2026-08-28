@@ -505,18 +505,15 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      43 (Checkpoints A-F of 2)
-Status:   Curated sessions ingested: British GP R9 , Belgian GP R10 , Canadian GP R5. 
-          DriverPosition table + migration, ~62K rows of 1Hz position data ingested for all 3 curated windows. replay_pipeline.py rebuilt: 
-          absolute-time-synchronized background thread for position playback (fixed lap-relative timing collapse bug), targeted gap fix bypassing NULL-lap-sum bug, gaps/position desync fix (drift up to -249s eliminated), 
-          --start-lap/--end-lap scoping fixed. Strategy Wall + Undercut Panel now sync to replay via new useCurrentLapHistoryEntry hook (reduced-detail mode). Circuit Map Panel: new GET /races/session/{session_id} endpoint 
-          for session-scoped circuit resolution (was showing wrong track during replay).Dot glide smoothness tuned (1Hz-matched: 1000ms poll, 900ms glide). 
-          docs/day43-handoff.md written for Part 2 continuation.
-Next:     Day 43 Part 2 — CLI live-race safety guard, 
-          backend replay-control API 
-          (start/stop/available/sessions), Celery Beat kill-switch, frontend replay selector UI, safety testing., Day 40 A4 — Fly.io deployment (fly auth login → fly deploy → verify)
+Day:      43 (COMPLETE — Checkpoints A-F + Part 2 Checkpoints 1-5)
+Status:   Full demo replay feature shipped end-to-end.
+          Backend: live-race detection guard (source-based marker, not TTL heuristic), replay control API (start/stop/status/available/sessions), Celery Beat kill-switch, zombie-aware process tracking. Frontend: replay selector UI with 3 curated session cards, stop button.Fixed 4 real bugs found during manual verification: (1) source:live vs source: replay Redis marker to prevent false-positive live detection, (2) zombie process self-
+          healing in status endpoint, (3) FastF1 cache directory missing + volume ownership (root vs non-root user) causing subprocess crash — also fixes latent bug affecting real live race ingestion, (4) SIGTERM 
+          handling during position_thread.join() tail phase. New Deferred Wiring item: undercut/overcut scores freeze during replay of fully-ingested sessions (_resolve_position_context missing lap_number <= current_lap bound — 
+          same pattern as documented, already-fixed _build_race_state Monte Carlo path).
+Next:     Day 40 A4 — Fly.io deployment
 Blockers: No physical device for testing — Android emulator 
-          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment
+          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
 
 ---
