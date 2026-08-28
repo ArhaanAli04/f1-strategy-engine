@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { useParams } from "react-router-dom"
 import { CircuitMapPanel } from "@/components/circuit/CircuitMapPanel"
+import { ReplaySelectorPanel } from "@/components/demo/ReplaySelectorPanel"
 import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
 import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
 import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
@@ -51,6 +52,7 @@ export function RacePage() {
         </aside>
 
         <main className="flex flex-1 flex-col overflow-y-auto">
+          <ReplaySelectorPanel sessionId={sessionId} isLive={isLive} />
           <CircuitMapPanel sessionId={sessionId} isExplicitSession={Boolean(paramSessionId)} />
 
           <div className="flex flex-1 flex-col gap-4 p-4">
