@@ -583,7 +583,12 @@ class F1SignalRIngestor:
         entries[0]["gap_to_ahead_seconds"] = 0.0
         entries[0]["laps_behind"] = 0
 
-        payload = {"session_id": str(self._session_id), "gaps": entries}
+        # "source": "live" is the ONLY thing live_race_detection.detect_live_race
+        # treats as a live race. The same f1:{season}:{round}:gaps key is also
+        # written by replay_pipeline.py ("source": "replay") and, for any
+        # historical session someone views, by telemetry_service.get_session_gaps'
+        # @cacheable cache-aside (no "source") — neither must read as a live race.
+        payload = {"session_id": str(self._session_id), "gaps": entries, "source": "live"}
         self._redis.setex(
             f"f1:{self._season}:{self._round_number}:gaps",
             _GAPS_KEY_TTL_SECONDS,

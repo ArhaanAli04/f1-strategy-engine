@@ -75,11 +75,14 @@ import argparse
 import asyncio
 import json
 import logging
+import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from types import FrameType
 from typing import Any
 
 import fastf1
@@ -94,6 +97,7 @@ from backend.models.race import Race
 from backend.models.race import Session as SessionModel
 from backend.models.telemetry import DriverPosition, LapData
 from backend.scripts._ingest_common import resolve_car_numbers
+from backend.services.live_race_detection import detect_live_race_sync
 from backend.workers.prediction_worker import run_strategy_prediction
 from backend.workers.telemetry_worker import process_lap
 
@@ -277,8 +281,22 @@ def _load_fastf1_session(season: int, round_number: int, session_type: str) -> f
         The loaded FastF1 session.
     """
     settings = get_ml_settings()
+    # FastF1's enable_cache requires the directory to already exist — it does
+    # NOT create it. ingest_historical.py / ingest_live_session.py both
+    # makedirs here; without it a fresh container (no prior FastF1 run —
+    # e.g. the backend container launching this as a subprocess) crashes with
+    # NotADirectoryError before the replay publishes anything.
+    os.makedirs(settings.fastf1_cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(settings.fastf1_cache_dir)
     fastf1_session = fastf1.get_session(season, round_number, session_type)
+    logger.info(
+        "Loading FastF1 data for %d round %d %s — the first replay of a given "
+        "session downloads it from FastF1 (~30-60s); every run after that is "
+        "served from the local cache",
+        season,
+        round_number,
+        session_type,
+    )
     fastf1_session.load(laps=True, telemetry=False, weather=False, messages=False)
     return fastf1_session
 
@@ -365,7 +383,13 @@ def _compute_lap_gaps(
                 "laps_behind": 0,
             }
         )
-    return {"session_id": str(session_id), "gaps": gaps}
+    # "source": "replay" — live_race_detection.detect_live_race treats a gaps
+    # key as a live race ONLY when its payload says "source": "live"
+    # (ingest_live_session.py). Marking this explicitly keeps a replay's own
+    # gaps key (which lingers up to its 600s TTL after the replay ends) from
+    # ever being mistaken for one. Ignored by SessionGapsResponse (extra
+    # fields), so no consumer needs to change.
+    return {"session_id": str(session_id), "gaps": gaps, "source": "replay"}
 
 
 def _publish_gaps(
@@ -627,6 +651,17 @@ def _run_position_timeline(
             time.sleep(max(0.0, _POSITION_SAMPLE_INTERVAL_SECONDS - elapsed))
 
 
+def _reraise_sigterm_as_interrupt(signum: int, frame: FrameType | None) -> None:
+    """Route SIGTERM into replay()'s existing graceful KeyboardInterrupt path.
+
+    /demo/replay/stop and race_detection_worker.py's kill-switch both stop
+    this process with SIGTERM. Without this handler SIGTERM's default action
+    kills the process outright, skipping the finally block that stops the
+    position thread and terminates the alert_worker subprocess.
+    """
+    raise KeyboardInterrupt
+
+
 def _start_alert_worker() -> subprocess.Popen[bytes]:
     """Spawn alert_worker.py's listen_for_predictions() as a standalone subprocess.
 
@@ -674,6 +709,8 @@ def replay(
         None. Ctrl+C stops early (the alert_worker subprocess, if started, is
         always terminated on exit).
     """
+    signal.signal(signal.SIGTERM, _reraise_sigterm_as_interrupt)
+
     all_laps = asyncio.run(_fetch_laps(session_id))
     if not all_laps:
         logger.warning("No lap data for session %s — nothing to replay", session_id)
@@ -800,14 +837,20 @@ def replay(
 
             if i < total_events - 1:
                 time.sleep(rate_seconds)
-    except KeyboardInterrupt:
-        logger.info("Stopped early after dispatching %d/%d lap events", dispatched, total_events)
-        stop_event.set()
-    else:
+
+        # Dispatch is done; a curated replay now spends most of its runtime
+        # here, waiting out the real-time position playback. This join() is
+        # INSIDE the try so a SIGTERM during it (via
+        # _reraise_sigterm_as_interrupt — /demo/replay/stop, the kill-switch,
+        # or Ctrl+C) is caught by the handler below and exits cleanly instead
+        # of escaping as a traceback.
         logger.info("Replay complete: %d lap events dispatched", dispatched)
         if position_thread is not None and position_thread.is_alive():
             logger.info("Waiting for position playback to finish...")
             position_thread.join()
+    except KeyboardInterrupt:
+        logger.info("Stopped after dispatching %d/%d lap events", dispatched, total_events)
+        stop_event.set()
     finally:
         stop_event.set()
         if position_thread is not None:
@@ -816,19 +859,62 @@ def replay(
             logger.info("Stopping alert_worker.py subprocess...")
             alert_worker_process.terminate()
             alert_worker_process.wait(timeout=10)
+        # Delete this replay's own gaps key so it can't linger (up to its
+        # 600s TTL) and be misread as a live race by a later
+        # /demo/replay/start. Runs on normal completion and on SIGTERM
+        # (routed to KeyboardInterrupt); only a SIGKILL would skip it, and
+        # the "source": "replay" payload marker covers that case.
+        try:
+            redis_client.delete(f"f1:{season}:{round_number}:gaps")
+        except redis.RedisError:
+            logger.warning("Could not delete replay gaps key on shutdown", exc_info=True)
         redis_client.close()
+
+
+def _guard_against_live_race() -> None:
+    """Abort the process if a real live race is currently being ingested.
+
+    A replay and a live ingestor both write f1:{season}:{round}:gaps /
+    :car:{n}:position — running them at once corrupts the shared keys. The
+    /demo/replay/start endpoint performs the same check before launching this
+    script as a subprocess; this is the direct-CLI-invocation backstop
+    (Day 43 Part 3.2), with no bypass flag by design.
+    """
+    redis_client: redis.Redis = redis.Redis.from_url(  # type: ignore[type-arg]
+        get_redis_settings().redis_url, decode_responses=True
+    )
+    try:
+        status = detect_live_race_sync(redis_client)
+    finally:
+        redis_client.close()
+
+    if status.is_live:
+        logger.error(
+            "Refusing to start replay: %s. Wait until the live session finishes.",
+            status.reason,
+        )
+        sys.exit(1)
 
 
 def main() -> None:
     args = _parse_args()
-    replay(
-        args.session_id,
-        args.rate,
-        start_alert_worker=not args.no_alert_worker,
-        limit=args.limit,
-        start_lap=args.start_lap,
-        end_lap=args.end_lap,
-    )
+    _guard_against_live_race()
+    try:
+        replay(
+            args.session_id,
+            args.rate,
+            start_alert_worker=not args.no_alert_worker,
+            limit=args.limit,
+            start_lap=args.start_lap,
+            end_lap=args.end_lap,
+        )
+    except KeyboardInterrupt:
+        # SIGTERM (via _reraise_sigterm_as_interrupt) or Ctrl+C arriving
+        # during startup — before replay()'s own handler is in scope, e.g.
+        # mid-FastF1-load. replay() catches it once its dispatch/join phase
+        # is running; this covers the phase before that. Nothing durable is
+        # published yet, so a clean exit is all that's needed.
+        logger.info("Replay stopped before it began playing back")
 
 
 if __name__ == "__main__":

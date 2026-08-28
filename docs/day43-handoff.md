@@ -1,12 +1,15 @@
-# Day 43 Handoff — Demo Replay (Checkpoints A-F complete, Parts 3.2/4/5/6 not started)
+# Day 43 Handoff — Demo Replay (Checkpoints A-F + Part 2 complete)
 
 Written at the end of the Day 43 session. Read this in full before resuming
 — it's the single source of truth for exactly where things stand.
-Checkpoints A-F (this session's actual scope) are done and verified. The
-original Day 43 spec's Part 3.2/4/5/6 (replay control API, kill-switch,
-frontend selector UI, safety testing) were deliberately deferred to a
-follow-up session partway through planning and have **not been started at
-all** — don't confuse "Checkpoint F done" with "the whole Day 43 spec done."
+Checkpoints A-F (that session's actual scope) are done and verified.
+
+**Part 2 (spec Part 3.2/4/5/6 — CLI safety guard, replay-control API +
+kill-switch, frontend selector UI, safety testing) is now also complete —
+see section 8 below.** The rest of this document (sections 1-7) is the
+original A-F handoff, kept for context; the "not started" language in
+sections 1-2 refers to the state *before* Part 2 and is superseded by
+section 8.
 
 ## 1. What's done — Checkpoints A-F
 
@@ -367,3 +370,302 @@ When resuming, paste this to Claude Code:
 Claude Code should read section 2 in full before proposing a plan, and
 should not re-open section 5 (dot glide smoothness) without a specific new
 lead.
+
+---
+
+## 8. Part 2 — COMPLETE (Checkpoints 1-5, 2026-08-28)
+
+Spec Part 3.2 / 4 / 5 / 6 delivered across 5 gated checkpoints. Full
+verification green throughout: `ruff check backend/`, `mypy backend/
+--strict` (138 files), `pytest backend/tests/unit -m unit` (166 passed),
+`pytest backend/tests/integration/test_demo_endpoints.py` (8 passed),
+`cd web && npx tsc -b` (clean), `npm run test` (22 passed, 7 files),
+`npm run lint` (only the 2 pre-existing `ui/button.tsx` / `ui/form.tsx`
+warnings).
+
+### Checkpoint 1 — shared live-race detection + CLI guard (Part 3.2)
+- **New `backend/services/live_race_detection.py`** — `detect_live_race`
+  (async) / `detect_live_race_sync` (sync), returning
+  `LiveRaceStatus(is_live, reason)`. Two signals, either one positive =
+  live: (a) any `f1:*:*:gaps` key whose remaining TTL ≤ 90s (a live
+  ingestor actively refreshing its 30s-TTL key — a replay's own key has a
+  600s TTL refreshed only per lap boundary, so it never trips this; the
+  trailing-anchored pattern also excludes the `:gaps:final` / `:last_good`
+  siblings); (b) any `f1:*:*:R:auto_ingestion_triggered` dedup key.
+- **`replay_pipeline.py`** — `_guard_against_live_race()` runs at the top
+  of `main()`, before `replay()`: on a positive result it logs the reason
+  and `sys.exit(1)`. No bypass flag, by design. Also backstops the API
+  path (the `/demo/replay/start` subprocess re-hits `main()`).
+- Tests: `test_live_race_detection.py` (8), `test_replay_pipeline_guard.py`
+  (3).
+
+### Checkpoint 2 — backend replay-control API (Part 4)
+- **New** `backend/schemas/demo_schema.py`, `backend/services/demo_service.py`,
+  `backend/apis/v1/demo.py` (registered in `apis/v1/__init__.py`).
+- `demo_service.CURATED_SESSIONS` — the 3 sessions from section 3,
+  hardcoded (session_id, race, circuit, description, lap window, est.
+  duration).
+- Endpoints (all rate-limited): `GET /demo/sessions`,
+  `GET /demo/replay/available` (**live-race gate only** — does not consider
+  whether a replay is already running), `GET /demo/replay/status`,
+  `POST /demo/replay/start` (202, `Depends(get_current_user)`),
+  `POST /demo/replay/stop` (`Depends(get_current_user)`).
+- **Single global state** in one JSON key `f1:demo:replay:state` (see
+  CLAUDE.md Redis Cache Key Schema): `start_replay` does an atomic
+  `SET … NX` slot claim → 409 if already held, 409 on a live race, 422 if
+  the session isn't curated; then launches `replay_pipeline.py` detached
+  (`--start-lap/--end-lap` from curated metadata, `--rate fast`,
+  `--no-alert-worker`) and writes the full payload (incl. PID). Claim is
+  deleted if the launch raises `OSError`. `stop_replay` reads the PID,
+  `os.kill(pid, SIGTERM)` (tolerates `ProcessLookupError`/
+  `PermissionError`), clears the key; 404 if nothing running.
+- **`replay_pipeline.py`** — `_reraise_sigterm_as_interrupt` handler
+  installed in `replay()`, so SIGTERM (from the stop endpoint or the
+  kill-switch) routes into the existing graceful `KeyboardInterrupt`
+  shutdown instead of a hard kill.
+- CLAUDE.md updated: Redis Cache Key Schema (`f1:demo:replay:state`), API
+  Versioning list (5 endpoints).
+- Tests: `test_demo_service.py` (12 unit), `test_demo_endpoints.py` (8
+  integration — unknown-session 422, live-race 409, already-running 409,
+  claim rollback on launch failure, auth on POST, full start→status→stop
+  roundtrip).
+
+### Checkpoint 3 — Celery Beat kill-switch (Part 4)
+- **`race_detection_worker.check_for_live_session`** — after the dedup
+  claim succeeds (a real race is launching) and before
+  `_launch_ingestion_subprocess`, calls `_force_stop_demo_replay(client)`:
+  reads `f1:demo:replay:state`, `os.kill(pid, SIGTERM)`s the replay
+  subprocess, deletes the key. Tolerates a dead pid or a bare NX-claim
+  sentinel.
+- `demo_service._STATE_KEY` promoted to the public
+  `DEMO_REPLAY_STATE_KEY` so the worker and service share one definition.
+- CLAUDE.md: kill-switch paragraph added to the Auto Race Detection
+  section.
+- Tests: 3 added to `test_race_detection_worker.py` (force-stops an active
+  replay; tolerates a dead pid; no signal when no replay running).
+
+### Checkpoint 4 — frontend replay selector UI (Part 5, web only)
+- **New** `web/src/types/demo.ts` (+ `types/index.ts` re-export),
+  `web/src/api/demo.ts`, `web/src/hooks/useDemoReplay.ts`
+  (`useCuratedSessions`, `useReplayAvailable`, `useReplayStatus` — polls 5s
+  running / 20s idle, `useStartReplay` / `useStopReplay`),
+  `web/src/components/demo/ReplaySelectorPanel.tsx`.
+- Panel mounted in `RacePage.tsx` `<main>` above `<CircuitMapPanel>`.
+  Renders nothing when `isLive` or `available.available !== true`. Idle: a
+  "Watch a Replay" card with the 3 curated session cards (race name,
+  `Laps X–Y · ~N min`, description, "Start Replay"). Running: "Currently
+  replaying: {race} — Lap {current}/{end}" + "Stop Replay".
+- **Current lap is derived frontend-side** from `useSessionGaps` (max
+  `lap_number` across the gaps the replay itself publishes) — no backend
+  progress field, per the plan.
+- **On successful start: `toast` + `navigate(/race/{session_id})`** so the
+  session-scoped panels (timing tower, circuit map, strategy) actually
+  render the replayed session — without this the user starts a replay and
+  sees nothing change on their current view.
+- Tests: `ReplaySelectorPanel.test.tsx` (5 — hidden when live; hidden when
+  unavailable; 3 cards with lap ranges; start fires the mutation with the
+  right session_id; running indicator shows `Lap 47/52` and stop fires the
+  mutation).
+
+### Checkpoint 5 — safety testing + verification (Part 6)
+- **Part 6 item 1** (start → 409 on a live-race key): covered by
+  `test_demo_endpoints.py::test_start_conflicts_with_live_race` +
+  `test_demo_service.py::test_start_rejects_when_live_race`.
+- **Part 6 item 2** (a launching real race force-stops the replay, no
+  orphan): covered by `test_race_detection_worker.py`'s 3 kill-switch
+  tests. No orphaned `alert_worker` child is possible — the API launches
+  the replay with `--no-alert-worker`.
+- **Part 6 item 3** (CLI refuses to start during a live race): covered by
+  `test_replay_pipeline_guard.py` (guard exits 1 when live; passes when
+  not; `main()` aborts before `replay()`).
+- **Part 6 item 4** (manual browser sync check across all panels during a
+  full curated replay): **the user's to do** — not an automated check.
+
+### Post-CP5 fix — live-race guard false positive (2026-08-28)
+
+Found during manual verification: `POST /demo/replay/start` returned 409
+`"live timing feed active for 2026 round 10"` with no live race running.
+Root cause was in CP1's detector. `replay_pipeline.py` wrote
+`f1:{s}:{r}:gaps` with a 600s TTL and never deleted it on shutdown, so
+after a replay ended the key lingered; for the last ~90s before it
+expired, its decaying TTL (<=90s) was indistinguishable from a live
+ingestor's freshly-refreshed 30s-TTL key. A Belgian GP (round 10) replay
+run earlier that evening left exactly this.
+
+Fixed (5 items; `ruff`, `mypy --strict` 138 files, `pytest -m unit` 170
+passed, `test_demo_endpoints.py` 8 passed):
+1. `replay_pipeline._compute_lap_gaps` adds `"source": "replay"` to the
+   gaps payload — the live `_publish_live_gaps` payload has no such key;
+   ignored by `SessionGapsResponse` (extra fields), no consumer changes.
+2. `live_race_detection.detect_live_race` / `_sync` GET + JSON-parse each
+   `f1:*:*:gaps` key and skip any with `source == "replay"`, regardless
+   of TTL. The `0 < TTL <= 90` check still applies to non-replay keys.
+3. `replay_pipeline.replay()`'s `finally` deletes its own
+   `f1:{s}:{r}:gaps` key on exit (normal completion or SIGTERM); only a
+   SIGKILL skips it, and item 2's marker covers that.
+4. `demo_service.get_replay_status` self-heals a stale
+   `f1:demo:replay:state` (a replay that finished on its own never clears
+   it — only `/stop` and the kill-switch do): if the tracked PID is dead
+   (`_process_is_alive` via `os.kill(pid, 0)`, POSIX only — skipped on
+   Windows where `os.kill` would terminate the target), the key is
+   deleted and status reports not-running.
+5. Regression tests: `source:replay` gaps key at TTL 30 is NOT live
+   (async + sync); `get_replay_status` self-heal + still-alive paths.
+
+### Post-CP5 fix round 2 — replay still not starting + Stop button gone (2026-08-28)
+
+Manual re-verification: replay started (state key set) but nothing
+updated, and the panel/Stop button vanished. Investigation:
+- The replay subprocess (launched by `POST /demo/replay/start` inside
+  **`docker-backend-1`**, child of uvicorn) exited immediately as a
+  **zombie** (`/proc/<pid>/status` → `State: Z`). Its own
+  `_guard_against_live_race()` was `sys.exit(1)`-ing.
+- Round-1's `source:replay` marker was not enough. A **third** writer of
+  `f1:{s}:{r}:gaps` exists: `telemetry_service.get_session_gaps`'s
+  `@cacheable(ttl=8)` cache-aside, fired every ~8s by the frontend's
+  `useSessionGaps` poll for **any** session on screen. That payload has
+  **no** `source` and a ≤8s TTL — indistinguishable from a live key under
+  the TTL heuristic. Sampling `f1:2026:10:gaps` showed it blinking in/out
+  at TTL 6→2 with a source-less body while the Belgian GP page was open.
+- `GET /demo/replay/available` uses the same detector → returned
+  `{available:false}` intermittently → `ReplaySelectorPanel` (line 46)
+  rendered `null`, taking the Stop button with it. `useReplayAvailable`
+  had no `refetchInterval`, so a single bad reading stuck for the session.
+- `_process_is_alive` used `os.kill(pid, 0)`, which **succeeds for a
+  zombie**, so `get_replay_status` never self-healed the stuck state.
+
+Fixed (A-E; `ruff`, `mypy --strict` 138 files, `pytest -m unit` 176
+passed, `web tsc -b` + `npm run test` 22 passed):
+- **A** — `ingest_live_session._publish_live_gaps` stamps `"source":
+  "live"`. `detect_live_race` / `_sync` now treat a gaps key as a live
+  race **only** when its payload has `source == "live"` — the TTL
+  heuristic is removed entirely. Replay (`source:replay`) and the
+  `@cacheable` write (no source) are both ignored. Auto-detection dedup
+  key check unchanged.
+- **B** — `_process_is_alive` is now zombie-aware: non-blocking
+  `os.waitpid(pid, WNOHANG)` reaps an exited child (→ not alive), then
+  `os.kill(pid, 0)`, then a `/proc/<pid>/stat` state check (`Z`/`X` →
+  not alive). Windows still short-circuits to `True`. New `_proc_is_zombie`
+  helper; `_WNOHANG = getattr(os, "WNOHANG", 1)` for Windows import safety.
+- **C** — `useReplayAvailable` gets a 30s `refetchInterval` so a transient
+  bad reading self-corrects instead of hiding the panel.
+- **D** — running-indicator row is `flex flex-wrap` + `shrink-0` on the
+  button, so the Stop button wraps below the text instead of being pushed
+  out of an `overflow-x-auto` ancestor.
+- **E** — `test_live_race_detection.py` reworked around `source:live` vs
+  `source:replay` vs source-less (`@cacheable`) payloads incl. the
+  regression case; 5 new `_process_is_alive` / `_proc_is_zombie` tests
+  (windows / reaped-child / gone / zombie / running); `test_demo_service.py`
+  + `test_demo_endpoints.py` live-race fixtures now write a `source:live`
+  payload.
+
+### Post-CP5 fix round 3 — replay subprocess crashes on FastF1 cache (2026-08-28)
+
+Manual re-verification: replay "started" but nothing progressed; page kept
+showing full (unscoped) session data; UI reverted after ~2 min. Running
+the exact command in `docker-backend-1`:
+```
+File ".../replay_pipeline.py", line 283, in _load_fastf1_session
+    fastf1.Cache.enable_cache(settings.fastf1_cache_dir)
+NotADirectoryError: Cache directory does not exist! ... create it first.
+```
+`replay_pipeline._load_fastf1_session` called `fastf1.Cache.enable_cache()`
+**without first creating the dir** — its two siblings both `os.makedirs(...,
+exist_ok=True)` on the line above (`ingest_historical.py:88`,
+`ingest_live_session.py:695`). `/tmp/fastf1_cache` doesn't exist in the
+backend container, so the subprocess died ~1s after launch, before
+publishing anything → frontend fell back to unfiltered historical data
+(Day 42 "no WS data" fallback). The "~2 min" was just zombie-detection
+self-heal latency. Never hit before because Days 43 A-F ran the script
+from the host venv (warm cache). **This same crash would hit
+`ingest_live_session.py` on a real auto-detected live race** launched from
+the worker container.
+
+Fixed (both parts; `ruff`, `mypy --strict` 138 files, `pytest -m unit` 177
+passed):
+- **Part 1 (code)** — `replay_pipeline` gains `import os` and
+  `os.makedirs(settings.fastf1_cache_dir, exist_ok=True)` before
+  `enable_cache`, plus a `logger.info` before `.load()` making the one-time
+  ~30-60s first-run download visible rather than looking hung. New test
+  `test_load_fastf1_session_creates_missing_cache_dir`.
+- **Part 2 (infra)** — `infra/docker/docker-compose.yml`: new named volume
+  `fastf1_cache` mounted at `/tmp/fastf1_cache` on `backend`, `worker`, and
+  `beat`, so the per-session FastF1 download happens once and survives
+  container recreates. `docker compose down && up -d` run to apply;
+  verified the volume is attached (`/dev/sdd on /tmp/fastf1_cache ext4`),
+  `_load_fastf1_session` creates the dir in a fresh container, and
+  `GET /api/v1/demo/replay/available` returns `{"available":true}`.
+- Pre-warming was declined: the first "Start Replay" per curated session
+  still has a silent ~30-60s FastF1 download (log line explains it), then
+  it's cached permanently.
+
+### Post-CP5 fix round 4 — env regression + root-owned FastF1 volume (2026-08-28)
+
+Manual re-verification of round 3: toast "Something went wrong" on replay
+start; Strategy Wall showed "No live race session active" instead of replay
+progression. Two causes, one mine-in-testing and one a real bug in round 3:
+
+1. **`docker compose up -d` was run without `--env-file .env`.** `make dev`
+   always passes it (the Makefile comment says why: Compose looks for `.env`
+   next to the compose file, `infra/docker/`, not repo root). Without it,
+   every `${AWS_*:-}` / `${SENTRY_DSN:-}` etc. resolved to **empty** in
+   `backend`/`worker`/`beat`. `GET /strategy/{session}/overview` (Strategy
+   Wall) does a synchronous S3 model download →
+   `botocore.exceptions.ParamValidationError: Invalid bucket name ""` → HTTP
+   500. `StrategyOverviewGrid` renders its `drivers.length === 0` empty
+   state ("No live race session active") — it is NOT a live-only gate, it
+   just can't render its (replay-aware) `<PitWindowCard compact>` children
+   without the driver list from `/overview`. `main.tsx`'s global
+   `QueryCache.onError` toasts `getApiErrorMessage(error)` with no fallback
+   → its bare default "Something went wrong".
+2. **Round 3's `fastf1_cache` named volume is root-owned; containers run as
+   `f1` (uid 999).** FastF1's `enable_cache` opens a `requests_cache`
+   SQLite DB inside the dir → `sqlite3.OperationalError: unable to open
+   database file` → the replay subprocess crashes on startup, publishes
+   nothing. (Round 3's "verification" only mocked `enable_cache`, so it
+   missed this.)
+
+Fixed:
+- **`infra/docker/Dockerfile.backend` + `Dockerfile.worker`** — added
+  `RUN mkdir -p /tmp/fastf1_cache && chown f1:f1 /tmp/fastf1_cache` before
+  `USER f1`. Docker copies an image dir's ownership into an empty named
+  volume on first mount, so the volume becomes `f1`-writable.
+- Recreated: `down` → `docker volume rm docker_fastf1_cache` (targeted —
+  NOT `down -v`, which would wipe `postgres_data`) →
+  `docker compose -f infra/docker/docker-compose.yml --env-file .env up --build -d`.
+
+**Always recreate the local stack with:**
+```
+docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+```
+(or `make dev`). Omitting `--env-file .env` silently resolves AWS creds,
+`SENTRY_DSN`, and the Slack/Grafana vars to empty — the app boots but S3
+model loading (and anything else needing a real secret) fails at runtime.
+
+### Not done / still open
+- **Desktop app replay selector** — Part 5 explicitly scoped web-only;
+  the desktop mirror was deferred and is not started.
+- **CLAUDE.md "Current Project Phase" block** — left for the user to
+  update per the usual workflow (the `update: phase tracker after Day X`
+  commit).
+- Everything in section 2 that isn't Part 3.2/4/5/6 (Day 40 Fly.io, etc.)
+  is untouched.
+
+### Files — Part 2
+**New:** `backend/services/live_race_detection.py`,
+`backend/schemas/demo_schema.py`, `backend/services/demo_service.py`,
+`backend/apis/v1/demo.py`, `backend/tests/unit/test_live_race_detection.py`,
+`backend/tests/unit/test_replay_pipeline_guard.py`,
+`backend/tests/unit/test_demo_service.py`,
+`backend/tests/integration/test_demo_endpoints.py`,
+`web/src/types/demo.ts`, `web/src/api/demo.ts`,
+`web/src/hooks/useDemoReplay.ts`,
+`web/src/components/demo/ReplaySelectorPanel.tsx`,
+`web/src/__tests__/ReplaySelectorPanel.test.tsx`.
+
+**Modified:** `backend/scripts/replay_pipeline.py`,
+`backend/workers/race_detection_worker.py`, `backend/apis/v1/__init__.py`,
+`backend/tests/unit/test_race_detection_worker.py`, `CLAUDE.md` (Redis
+Cache Key Schema + API Versioning list + Auto Race Detection kill-switch
+note — NOT the Current Project Phase block), `web/src/types/index.ts`,
+`web/src/pages/RacePage.tsx`.

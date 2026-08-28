@@ -376,6 +376,7 @@ f1:circuit:{circuit_id}:detail                               TTL: infinity (stat
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
 f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
+f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. TTL is a safety net well above a curated window's ~20-min playout.)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
@@ -419,6 +420,20 @@ disable without touching the beat schedule itself — the task checks this
 flag first and no-ops. Toggling requires a worker restart (pydantic-settings
 reads env once at process start), same as every other setting in this
 project.
+
+**Demo Replay kill-switch (Day 43 Part 4):** once the dedup claim above
+succeeds (a real race is definitely launching), `check_for_live_session`
+calls `_force_stop_demo_replay(client)` before `_launch_ingestion_
+subprocess`. It reads `f1:demo:replay:state` (see Redis Cache Key Schema),
+`os.kill(pid, SIGTERM)`s the replay subprocess (`replay_pipeline.py`'s
+`_reraise_sigterm_as_interrupt` handler turns that into its graceful
+KeyboardInterrupt shutdown — position thread stopped, keys left to TTL
+out), and deletes the state key. A real live race always wins: a replay
+and a live ingestor both write `f1:{season}:{round}:gaps` /
+`:car:{n}:position`. A dead/exited pid (`ProcessLookupError`/
+`PermissionError`) or a bare NX-claim sentinel with no pid is tolerated —
+the key is cleared regardless. Covered by
+`tests/unit/test_race_detection_worker.py`.
 
 **Requires a running `celery beat` process** (`infra/docker/docker-
 compose.yml`'s `beat` service, same image as `worker`, `celery -A
@@ -475,6 +490,11 @@ Current endpoints overview:
 - PUT    /api/v1/alerts/{id}/read
 - GET    /api/v1/alerts/subscriptions
 - PUT    /api/v1/alerts/subscriptions
+- GET    /api/v1/demo/sessions
+- GET    /api/v1/demo/replay/available
+- GET    /api/v1/demo/replay/status
+- POST   /api/v1/demo/replay/start
+- POST   /api/v1/demo/replay/stop
 - GET    /health
 
 ---
@@ -782,6 +802,93 @@ happen), or was found already fixed and moved into ### Notes below instead.
   Not fixed today — a real fix would bound the lookup to predictions from
   the current session/recent window, not just "most recent regardless of
   age."
+
+- **[deferred] `prediction_worker._resolve_position_context` has no
+  `lap_number <= current_lap` bound, so for a fully-ingested historical
+  session played back through `replay_pipeline.py` it computes every lap's
+  undercut/overcut against the RACE-END field snapshot — `undercut_score`
+  and `overcut_score` come out frozen (and mostly saturated to 0.0/1.0)
+  for the whole replay.** This directly degrades the headline "Undercut
+  Threat Detection" feature during Demo Replay. Discovered Day 43 Part 2
+  during manual verification of a Belgian GP 2026 Round 10 replay (curated
+  window laps 14-23): the Undercut panel showed 0% for every driver the
+  user selected.
+  - **Confirmed with real `strategy_predictions` rows** for that session
+    (`da57b9fd-4976-4fce-91a1-c7d0aac9c619`): `undercut_score` is frozen
+    across all 11 replayed laps per driver — ALB/HAM/LEC/VER `0.000` every
+    lap, ALO/NOR `1.000` every lap; only LIN (~0.93) and PIA (~0.63) drift
+    at all, and only because the deterministic stint projection reads the
+    *incoming lap's* tyre age while the position/gap threshold stays
+    static. HAM/LEC/VER are exactly the drivers a user clicks first, and
+    they all sit at 0.000 — hence "always 0% regardless of driver".
+    `UndercutThreatPanel`'s `ReplayThreatRow` renders
+    `historyEntry.undercut_score` faithfully; the stored value is what's
+    wrong, not the frontend.
+  - **Root cause:** `_resolve_position_context(db, session_id, driver_id)`
+    (no lap arg at all) does
+    `SELECT driver_id, MAX(lap_number) ... WHERE session_id = X GROUP BY
+    driver_id`, joins each driver's absolute-latest `LapData` row, and
+    `.order_by(LapData.position)`. Belgian GP `lap_data` is fully ingested
+    (laps 1-44), so "latest" is lap 44 for everyone → the field is ordered
+    by *finishing* position (LEC P2, VER P3, HAM P4, ALB P15…) and the
+    `target_ahead_driver_id`/`gap_to_car_ahead` it returns are the
+    race-end neighbours and race-end cumulative-time gaps — identical on
+    every `run_strategy_prediction` call the replay dispatches, so
+    `_resolve_undercut_overcut` → `strategy_service.get_undercut_score`
+    gets a constant input and returns a constant, usually-saturated
+    probability. The `_cumulative_race_time` calls *inside*
+    `_resolve_position_context` (lines ~248/254/262) are passed
+    `driver_lap.lap_number` == 44, so they sum the whole race too.
+  - **Known-good fix pattern already exists in this same file.**
+    `prediction_worker._build_race_state` (the Monte Carlo `/simulate`
+    path) had the identical class of bug and was fixed under
+    `feature/pre-day30-monte-carlo-fix` (see "Monte Carlo simulator
+    fixes" in Architecture Decisions). It takes `current_lap` as a
+    parameter and, for field position, uses a second subquery
+    (`position_subq` / `ref_lap`) scoped
+    `WHERE LapData.session_id == session_id AND LapData.lap_number <=
+    current_lap`, joining on `LapData.lap_number == position_subq.c.ref_lap`
+    — "Field position as of current_lap specifically — NOT each driver's
+    own absolute-latest DB row" (its own inline comment). Its batched
+    cumulative-time query is likewise capped `LapData.lap_number <=
+    current_lap`. The fix here is to thread `context["lap_number"]` from
+    `_resolve_undercut_overcut` (it already has `lap_number` in `context`
+    — see its call at line ~589 / `_run_inference`'s `context`) down into
+    `_resolve_position_context` and apply exactly that `<= current_lap`
+    bound to both its field-position subquery and the
+    `_cumulative_race_time` calls it makes. No new pattern to design —
+    just the second call site catching up to the first.
+  - **Relationship to the two items above:**
+    1. The **NULL-lap-sum `SUM(lap_time_seconds) ... IS NOT NULL` bug**
+       (4-call-sites item above): `_resolve_position_context`'s gap
+       numbers go through `_cumulative_race_time`, so they carry that
+       corruption *on top of* the wrong-lap problem. Even after the
+       `<= current_lap` bound lands, the gaps stay approximate until the
+       NULL-lap issue is also addressed (ingestion-time absolute `Lap.Time`
+       or query-time interpolation). The two are independent: this one is
+       "reading the wrong lap's field state", that one is "the per-lap
+       deltas being summed aren't comparable across drivers".
+    2. The **stale-`undercut_score` alert-dedup item** (directly above):
+       that is about `evaluate_threats` reading an *old* persisted
+       prediction row; this is about the row being *wrong when freshly
+       computed* because its position/gap inputs are anchored to the wrong
+       lap. A replay can hit both at once.
+  - **Not the same as the "near-zero `pit_probability` is genuine"
+    finding** (British GP, Day 43 Checkpoints A-F; and Belgian GP's own
+    `pit_probability`, which is genuinely low pre-VSC then correctly
+    spikes ~lap 18-21 as the VSC opens the pit window). `pit_probability`
+    is fine; `undercut_score`/`overcut_score` are not.
+  - **Scope:** any `ingest_historical.py`-ingested session replayed via
+    `replay_pipeline.py`. A genuinely live-ingested session accumulates
+    `lap_data` lap-by-lap, so "latest lap" naturally tracks the current
+    lap there and this bug does not bite — it is specific to replaying a
+    session whose full race is already in the DB. Belgian GP was never
+    directly tested in Day 41 (that was British GP only, and the Day 41
+    undercut work was a 42x perf fix verified via a borderline-equivalence
+    check, not against a fully-ingested session's position context) — this
+    is genuinely newly-observed on Day 43 Part 2.
+  - Deferred to a dedicated future session per explicit instruction — do
+    NOT fold it into an unrelated change.
 
 - **[deferred] `tire_deg_hard.pkl` mispredicts a fresh HARD tyre's first lap
   (`tyre_age_laps=1`), inflating `pit_probability` immediately after a real

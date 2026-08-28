@@ -31,6 +31,14 @@ ENV PYTHONPATH=/app
 
 COPY backend/ ./backend/
 
+# FASTF1_CACHE_DIR (/tmp/fastf1_cache) is a named volume (see docker-compose.yml).
+# Docker copies this dir's ownership into an empty volume on first mount, so
+# pre-creating it as f1:f1 here is what lets the non-root runtime user write
+# FastF1's SQLite request cache — without it, replay_pipeline.py /
+# ingest_live_session.py crash with "sqlite3.OperationalError: unable to open
+# database file" on a root-owned volume mount.
+RUN mkdir -p /tmp/fastf1_cache && chown f1:f1 /tmp/fastf1_cache
+
 USER f1
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
