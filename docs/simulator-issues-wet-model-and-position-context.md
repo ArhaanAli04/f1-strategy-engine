@@ -1,8 +1,31 @@
 # Strategy Simulator — two open issues (WET model crash + nonsensical output)
 
-> **Status:** investigated 2026-08-29, **not fixed**. Deal with in a future day.
-> Surfaced while testing the new `GET /strategy/last-ingested-session` picker (Day 43 follow-up)
-> — the Simulator now auto-selects a session in non-live mode, which made these easy to hit.
+> **Status:** investigated 2026-08-29. **Updated 2026-08-30:**
+> - **Part A (WET schema crash) — ✅ fixed.** Implemented Option 2b (alias
+>   `tire_deg_wet.pkl` → `tire_deg_inter.pkl` at model load) + Option 2a (a
+>   permanent feature-count/exception guard in `race_simulator
+>   ._tire_deg_predictions`). See CLAUDE.md's Notes entry "WET tyre model
+>   schema mismatch" for the full fix writeup and verification. Deferred:
+>   a real 6-feature WET retrain (Option 1), and the promotion-guard
+>   schema-compatibility check — both now tracked in CLAUDE.md Deferred
+>   Wiring.
+> - **Part B1 (garbage position/cumulative-time inputs) — mitigated, not
+>   fixed.** Added `Race.status == "completed"` to `strategy_service
+>   ._fetch_last_ingested_session`'s query, per the doc's own "cheap
+>   targeted mitigation" suggestion below. The underlying cause (CLAUDE.md
+>   Deferred Wiring item A, the NULL-lap cumulative-sum bug) remains open —
+>   this only stops the Simulator's auto-picker from *landing on* a
+>   partially-live-ingested session like Zandvoort R12; a genuinely
+>   completed session with its own missing-lap gaps could still surface the
+>   same class of bug.
+> - **Part B2 (no track-condition awareness) — still fully deferred.**
+>   Deliberately left as documentation-only per an explicit scope decision
+>   made during the 2026-08-30 session (neither the heuristic penalty nor
+>   the frontend guard was implemented). Tracked in CLAUDE.md Deferred
+>   Wiring verbatim from the proposed wording below.
+>
+> The analysis below is kept as-written (investigated 2026-08-29) — it is
+> still accurate background for what was fixed/mitigated/deferred above.
 >
 > **Neither issue is caused by the 2026-08-29 work** (dot-animation render-behind buffer,
 > `avg_deg_per_lap` backfill, `/strategy/last-ingested-session` endpoint). None of that touches

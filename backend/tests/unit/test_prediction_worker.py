@@ -16,8 +16,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis as fakeredis_lib
+import joblib
+import numpy as np
 import pytest
 
+from backend.services.ml import tire_deg_model
 from backend.workers import prediction_worker
 
 
@@ -274,3 +277,43 @@ async def test_build_race_state_position_query_filters_by_session_id(
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
     assert driver_state.starting_position == 10
+
+
+# --- _load_models: WET/INTER schema-mismatch alias (Checkpoint 3) ---
+# See docs/simulator-issues-wet-model-and-position-context.md Part A. Mirrors
+# test_strategy_service.py's identical wiring test — this module has its own
+# duplicated _load_models (see this file's module docstring on the
+# no-cross-service-import convention), so it needs its own coverage.
+
+
+def _fit_pipeline_with_n_features(n_features: int, seed: int) -> Any:
+    rng = np.random.default_rng(seed)
+    n = 60
+    features = rng.random((n, n_features))
+    target = rng.normal(0.0, 0.3, n)
+    pipeline = tire_deg_model._build_pipeline()
+    pipeline.fit(features, target)
+    return pipeline
+
+
+@pytest.mark.unit
+def test_load_models_aliases_schema_incompatible_wet_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_wet = _fit_pipeline_with_n_features(n_features=8, seed=300)
+    inter = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=301)
+    other = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=302)
+    pipelines_by_filename = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    # Patches the joblib module itself (not prediction_worker.joblib) — both
+    # reference the same module object, and reaching through another
+    # module's imported attribute trips mypy --strict's --no-implicit-reexport.
+    monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, other))
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+
+    models = prediction_worker._load_models()
+
+    assert models["tire_deg_wet.pkl"] is inter
+    assert models["tire_deg_inter.pkl"] is inter
+    assert set(models) == set(prediction_worker._MODEL_FILES)

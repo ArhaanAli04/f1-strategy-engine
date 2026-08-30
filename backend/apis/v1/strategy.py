@@ -133,12 +133,15 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
 @router.get(
     "/last-ingested-session",
     response_model=LastIngestedSessionResponse,
-    summary="Most recently ingested race session (by race date)",
+    summary="Most recently ingested completed race session (by race date)",
     description=(
-        "The R session with the newest race_date among sessions that have "
-        "ingested lap data. Used by the Strategy Simulator as its session "
-        "source when no race is live — resolved per-environment from that "
-        "environment's own DB. 404 only on a fresh DB with no ingested races."
+        "The COMPLETED R session with the newest race_date among sessions "
+        "that have ingested lap data. Used by the Strategy Simulator as its "
+        "session source when no race is live — resolved per-environment "
+        "from that environment's own DB. Excludes scheduled/in-progress "
+        "sessions (e.g. a partial live-ingestion dry run) whose lap_data "
+        "may have NULL position or missing laps. 404 only when no completed "
+        "R session with lap data exists yet."
     ),
 )
 @limiter.limit(rate_limit_value)
@@ -161,7 +164,9 @@ async def get_last_ingested_session(
         "at their current race state. Leave pit_laps empty to let the simulation "
         "decide pit timing autonomously, or set pit_laps + compounds to force a "
         "specific what-if pit plan. Returns immediately with a task_id — poll "
-        "GET /simulate/{task_id} for the result."
+        "GET /simulate/{task_id} for the result. current_lap must be at most one "
+        "lap past this session's real ingested progress (404 if the session "
+        "doesn't exist, 422 if current_lap is implausibly far ahead)."
     ),
     openapi_extra={
         "requestBody": {
@@ -203,8 +208,20 @@ async def simulate_strategy(
     request: Request,
     session_id: uuid.UUID,
     payload: SimulateStrategyRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> SimulateTaskAccepted:
+    # Reject before enqueueing anything — a bad current_lap should never
+    # cost a Celery round trip, and the caller gets a synchronous 404/422
+    # instead of having to poll a task to FAILURE to find out. See
+    # docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+    # follow-up finding and strategy_service.validate_current_lap's own
+    # docstring for what this actually checks and why. Also enforced
+    # independently inside prediction_worker._run_simulation (defense in
+    # depth) — a caller that dispatches run_race_simulation directly,
+    # bypassing this route, must not be able to skip it.
+    await strategy_service.validate_current_lap(db, session_id, payload.current_lap)
+
     task_payload = {"session_id": str(session_id), **payload.model_dump(mode="json")}
     # .delay() is a quick synchronous Redis broker call, not the simulation
     # itself (that runs in a separate Celery worker process) — but it's still

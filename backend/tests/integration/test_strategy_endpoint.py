@@ -20,6 +20,7 @@ GET /simulate/{task_id} once and confirm the real dispatch -> result-backend
 -> poll -> schema-parse path round-trips correctly.
 """
 
+import asyncio
 import uuid
 from datetime import date
 from unittest.mock import MagicMock
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from testcontainers.redis import RedisContainer
 
 from backend.core.database import get_engine
+from backend.core.exceptions import ValidationError
 from backend.models.driver import Driver
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
@@ -286,6 +288,138 @@ def test_simulate_returns_task_id(
     assert poll_body["status"] == "SUCCESS"
     assert poll_body["result"] is not None
     assert poll_body["result"]["driver_id"] == str(driver.id)
+
+
+# --- POST /simulate: current_lap-vs-session-progress validation ---
+# See docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+# follow-up finding: current_lap=68 was silently accepted (and simulated!)
+# for a session whose real race was 44 laps. strategy_service
+# .validate_current_lap closes this; these tests cover the route-level call
+# (Checkpoint 3) — the worker-level defense-in-depth call (Checkpoint 4,
+# a caller that bypasses this route entirely) is covered separately.
+
+
+@pytest.mark.integration
+def test_simulate_rejects_current_lap_beyond_session_progress(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact bug: current_lap far beyond the session's real progress.
+
+    _seed_session_with_lap's own driver reaches lap_number=12, and a second
+    car (far_lap) reaches lap_number=50 — this session's real progress
+    ceiling is therefore 50 + 1 = 51. Also asserts the route rejects BEFORE
+    ever calling run_race_simulation.delay() — a bad current_lap must not
+    cost a Celery round trip at all.
+    """
+    session_id, driver_id = _seed_session_with_lap(
+        authenticated_client, db_session_factory, "MEDIUM"
+    )
+    never_enqueue = MagicMock(side_effect=AssertionError("must not enqueue a Celery task"))
+    monkeypatch.setattr(prediction_worker.run_race_simulation, "delay", never_enqueue)
+
+    payload = {
+        "driver_id": str(driver_id),
+        "current_lap": 68,
+        "current_compound": "HARD",
+        "current_tyre_age": 20,
+        "remaining_laps": 5,
+        "pit_laps": [],
+        "compounds": [],
+    }
+    response = authenticated_client.post(f"/api/v1/strategy/{session_id}/simulate", json=payload)
+
+    assert response.status_code == 422
+    never_enqueue.assert_not_called()
+
+
+@pytest.mark.integration
+def test_simulate_rejects_unknown_session(
+    authenticated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    never_enqueue = MagicMock(side_effect=AssertionError("must not enqueue a Celery task"))
+    monkeypatch.setattr(prediction_worker.run_race_simulation, "delay", never_enqueue)
+
+    payload = {
+        "driver_id": str(uuid.uuid4()),
+        "current_lap": 1,
+        "current_compound": "MEDIUM",
+        "current_tyre_age": 2,
+        "remaining_laps": 3,
+        "pit_laps": [],
+        "compounds": [],
+    }
+    response = authenticated_client.post(f"/api/v1/strategy/{uuid.uuid4()}/simulate", json=payload)
+
+    assert response.status_code == 404
+    never_enqueue.assert_not_called()
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_stub_simulation_models")
+def test_run_race_simulation_rejects_excessive_current_lap_when_route_bypassed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Defense in depth (Checkpoint 4): a caller that dispatches
+    run_race_simulation directly — bypassing POST /simulate entirely, e.g. a
+    future replay/backfill script — must not be able to skip the
+    current_lap validation just by not going through the route. Calls the
+    task body directly via .run() (no broker/backend involved), same
+    pattern as test_race_simulation_serialization.py; Checkpoint 3's own
+    tests already cover the route-level rejection, this covers the worker
+    catching what the route never got a chance to.
+    """
+    circuit = Circuit(id=uuid.uuid4(), name="Test Circuit", country="Testland", track_length_km=5.0)
+    race = Race(
+        id=uuid.uuid4(),
+        season=2025,
+        round_number=1,
+        circuit_id=circuit.id,
+        race_date=date(2025, 3, 1),
+        status="in_progress",
+    )
+    session_row = SessionModel(
+        id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=date(2025, 3, 1)
+    )
+    driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
+    lap = LapData(
+        id=uuid.uuid4(),
+        session_id=session_row.id,
+        driver_id=driver.id,
+        lap_number=10,
+        compound="MEDIUM",
+        tyre_age_laps=10,
+        lap_time_seconds=91.0,
+    )
+
+    async def _seed() -> None:
+        async with db_session_factory() as db:
+            db.add_all([circuit, race, session_row, driver, lap])
+            await db.commit()
+        # See db_session_factory's docstring: dispose before the next
+        # separately-asyncio.run()'d unit of work.
+        await get_engine().dispose()
+
+    asyncio.run(_seed())
+
+    # This session's real progress ceiling is 10 + 1 = 11 — current_lap=68
+    # is the same class of gap the route-level tests cover, just reached by
+    # calling the task directly instead of through the route.
+    task_payload = {
+        "session_id": str(session_row.id),
+        "driver_id": str(driver.id),
+        "current_lap": 68,
+        "current_compound": "HARD",
+        "current_tyre_age": 20,
+        "remaining_laps": 5,
+        "pit_laps": [],
+        "compounds": [],
+    }
+
+    with pytest.raises(ValidationError):
+        prediction_worker.run_race_simulation.run(task_payload)
 
 
 def _race_with_r_session(

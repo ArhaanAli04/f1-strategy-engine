@@ -18,6 +18,8 @@ from backend.services.ml.tire_deg_model import (
     MAX_LOOKAHEAD_LAPS,
     _build_pipeline,
     add_engineered_features,
+    apply_incompatible_model_fallbacks,
+    pipeline_feature_count,
     predict_life_remaining_batch,
     train_tire_degradation_model,
 )
@@ -184,3 +186,74 @@ def test_predict_life_remaining_batch_caps_when_never_crossing() -> None:
         driver_id_encoded=np.array([0], dtype=np.int64),
     )
     assert result[0] == MAX_LOOKAHEAD_LAPS
+
+
+# --- pipeline_feature_count / apply_incompatible_model_fallbacks ---
+# Covers the WET/INTER schema-mismatch alias documented in
+# docs/simulator-issues-wet-model-and-position-context.md.
+
+
+def _fit_pipeline_with_n_features(n_features: int, seed: int) -> Pipeline:
+    rng = np.random.default_rng(seed)
+    n_samples = 30
+    features = rng.random((n_samples, n_features))
+    target = rng.normal(0.0, 0.3, n_samples)
+    pipeline = _build_pipeline()
+    pipeline.fit(features, target)
+    return pipeline
+
+
+@pytest.mark.unit
+def test_pipeline_feature_count_reads_fitted_scaler() -> None:
+    pipeline = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=10)
+    assert pipeline_feature_count(pipeline) == len(FEATURE_COLUMNS)
+
+
+@pytest.mark.unit
+def test_pipeline_feature_count_none_for_unfitted_pipeline() -> None:
+    assert pipeline_feature_count(_build_pipeline()) is None
+
+
+@pytest.mark.unit
+def test_pipeline_feature_count_none_for_non_pipeline_object() -> None:
+    assert pipeline_feature_count(object()) is None
+    assert pipeline_feature_count(None) is None
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_aliases_mismatched_wet() -> None:
+    stale_wet = _fit_pipeline_with_n_features(8, seed=11)
+    inter = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=12)
+    models = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+
+    apply_incompatible_model_fallbacks(models)
+
+    assert models["tire_deg_wet.pkl"] is inter
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_leaves_compatible_wet_untouched() -> None:
+    good_wet = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=13)
+    inter = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=14)
+    models = {"tire_deg_wet.pkl": good_wet, "tire_deg_inter.pkl": inter}
+
+    apply_incompatible_model_fallbacks(models)
+
+    assert models["tire_deg_wet.pkl"] is good_wet
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_noop_when_fallback_missing() -> None:
+    stale_wet = _fit_pipeline_with_n_features(8, seed=15)
+    models = {"tire_deg_wet.pkl": stale_wet}
+
+    apply_incompatible_model_fallbacks(models)
+
+    assert models["tire_deg_wet.pkl"] is stale_wet
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_noop_when_model_absent() -> None:
+    models: dict[str, Any] = {"tire_deg_inter.pkl": _fit_pipeline_with_n_features(6, seed=16)}
+    apply_incompatible_model_fallbacks(models)  # must not raise / must not add tire_deg_wet.pkl
+    assert "tire_deg_wet.pkl" not in models
