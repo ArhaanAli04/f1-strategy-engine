@@ -507,13 +507,38 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      43 (COMPLETE — Checkpoints A-F + Part 2 Checkpoints 1-5)
-Status:   Full demo replay feature shipped end-to-end.
-          Backend: live-race detection guard (source-based marker, not TTL heuristic), replay control API (start/stop/status/available/sessions), Celery Beat kill-switch, zombie-aware process tracking. Frontend: replay selector UI with 3 curated session cards, stop button.Fixed 4 real bugs found during manual verification: (1) source:live vs source: replay Redis marker to prevent false-positive live detection, (2) zombie process self-
-          healing in status endpoint, (3) FastF1 cache directory missing + volume ownership (root vs non-root user) causing subprocess crash — also fixes latent bug affecting real live race ingestion, (4) SIGTERM 
-          handling during position_thread.join() tail phase. New Deferred Wiring item: undercut/overcut scores freeze during replay of fully-ingested sessions (_resolve_position_context missing lap_number <= current_lap bound — 
-          same pattern as documented, already-fixed _build_race_state Monte Carlo path).
-Next:     Day 40 A4 — Fly.io deployment
+Day:      Deferred fixes audit (isolated day)
+Status:   Fixed dot animation stutter across web/
+          desktop/mobile. Desktop 
+          brought to full parity with web (was CSS-
+          only, now shares AnimatedDriverDots.tsx).
+          Fixed Driver Style page showing "not enough 
+          data" for 2026 — avg_deg_per_lap was never 
+          backfilled for 2026 tire_stints. Ran backfill 
+          locally + Supabase (141 stints updated in 
+          both). ingest_historical.py now computes 
+          avg_deg_per_lap inline going forward.
+          Strategy Simulator: replaced manual session 
+          UUID input with auto-resolved "last ingested 
+          race" (env-independent — each DB resolves 
+          its own most recent R session with lap data). 
+          New critical findings documented in 
+          docs/simulator-issues-wet-model-and-
+          position-context.md: (A) tire_deg_wet.pkl 
+          has incompatible 8-feature schema vs other 
+          4 models' 6 features — crashes any simulation 
+          involving WET compound; traced to Aug 3 
+          retrain promotion guard being MAE-only with 
+          no schema check. (B) Simulation results can 
+          be nonsensical — NULL lap_data.position 
+          causes wrong starting_position fallback, 
+          AND tyre models have no track-condition 
+          awareness (INTER/WET modeled identically 
+          wet vs dry) — needs its own dedicated session.
+Next:     Fix WET model schema mismatch + position 
+          context bugs (dedicated session, see 
+          docs/simulator-issues-wet-model-and-
+          position-context.md). Then Day 40 A4 — Fly.io deployment
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
