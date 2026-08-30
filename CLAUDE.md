@@ -507,38 +507,45 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Deferred fixes audit (isolated day)
-Status:   Fixed dot animation stutter across web/
-          desktop/mobile. Desktop 
-          brought to full parity with web (was CSS-
-          only, now shares AnimatedDriverDots.tsx).
-          Fixed Driver Style page showing "not enough 
-          data" for 2026 — avg_deg_per_lap was never 
-          backfilled for 2026 tire_stints. Ran backfill 
-          locally + Supabase (141 stints updated in 
-          both). ingest_historical.py now computes 
-          avg_deg_per_lap inline going forward.
-          Strategy Simulator: replaced manual session 
-          UUID input with auto-resolved "last ingested 
-          race" (env-independent — each DB resolves 
-          its own most recent R session with lap data). 
-          New critical findings documented in 
-          docs/simulator-issues-wet-model-and-
-          position-context.md: (A) tire_deg_wet.pkl 
-          has incompatible 8-feature schema vs other 
-          4 models' 6 features — crashes any simulation 
-          involving WET compound; traced to Aug 3 
-          retrain promotion guard being MAE-only with 
-          no schema check. (B) Simulation results can 
-          be nonsensical — NULL lap_data.position 
-          causes wrong starting_position fallback, 
-          AND tyre models have no track-condition 
-          awareness (INTER/WET modeled identically 
-          wet vs dry) — needs its own dedicated session.
-Next:     Fix WET model schema mismatch + position 
-          context bugs (dedicated session, see 
-          docs/simulator-issues-wet-model-and-
-          position-context.md). Then Day 40 A4 — Fly.io deployment
+Day:      Simulator model fixes (isolated day)
+Status:   Fixed WET tyre model schema crash (8 vs 6 
+          features) — permanent alias to INTER model 
+          + defensive backstop in race_simulator.py 
+          against any future model schema drift.
+          Fixed strategy simulator auto-selecting 
+          partially-ingested sessions — added 
+          Race.status == "completed" filter to 
+          last-ingested-session resolution.
+          Fixed missing current_lap bounds validation — 
+          could previously request simulations for 
+          laps that never happened (e.g. lap 68 of a 
+          44-lap race). New validate_current_lap 
+          checks session existence + progress ceiling, 
+          wired into both the API route and worker 
+          (defense in depth). Also fixed pit_laps 
+          silently ignored when out of valid range.
+          Found and fixed a connection pool leak — 
+          get_engine().dispose() was skipped when an 
+          exception propagated in 
+          prediction_worker._run_simulation.
+          Validated fixes with real-data test scenarios: 
+          confirmed position_gain_loss is a genuine 
+          full-race Monte Carlo comparison (mechanically 
+          sound), while predicted_finish_time is 
+          misleading (relative deltas only, not real 
+          elapsed time — new deferred item).
+          9 items now in docs/day-deferred-fixes-
+          session2-handoff.md for future sessions: 
+          predicted_finish_time units gap, driver skill 
+          signal missing, no strategic/reactive 
+          adaptation, NULL-lap-sum bug (4 sites), 
+          WET model retraining, promotion guard schema 
+          check, no track-condition input, telemetry_worker 
+          dispose bug, frontend validation error surfacing.
+Next:     Continue fixing deferred items from 
+          docs/day-deferred-fixes-session2-handoff.md 
+          (9 items catalogued — pick priority order 
+          per session). Then Day 40 A4 — Fly.io deployment
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
