@@ -4,6 +4,7 @@ import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis
 import { useCurrentRace } from "@/hooks/useCurrentRace"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useLastIngestedSession } from "@/hooks/useLastIngestedSession"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
@@ -227,6 +228,14 @@ export function SimulatorPage() {
   const isLiveSessionMode =
     !selectedSessionId && Boolean(liveRaceSession) && (liveSessionGaps.data?.gaps.length ?? 0) > 0
 
+  // Non-live mode: instead of asking the user to paste a session UUID, auto-
+  // select the most recently ingested race (newest race_date among R sessions
+  // that have lap data). Resolved per-environment by the backend, so it's
+  // always valid regardless of which DB the backend runs against. Only
+  // fetched when we'll actually use it.
+  const lastIngestedQuery = useLastIngestedSession(!isLiveSessionMode)
+  const lastIngestedSession = lastIngestedQuery.data
+
   const [step, setStep] = useState<Step>(1)
   const [sessionId, setSessionId] = useState(selectedSessionId ?? "")
   const [driverId, setDriverId] = useState("")
@@ -240,6 +249,10 @@ export function SimulatorPage() {
   useEffect(() => {
     if (isLiveSessionMode && liveRaceSession) setSessionId(liveRaceSession.id)
   }, [isLiveSessionMode, liveRaceSession])
+
+  useEffect(() => {
+    if (!isLiveSessionMode && lastIngestedSession) setSessionId(lastIngestedSession.session_id)
+  }, [isLiveSessionMode, lastIngestedSession])
 
   // Driver stays a fully manual choice (no default) — once picked, default
   // Current Lap/Compound/Tyre Age from their latest lap in this session.
@@ -330,13 +343,26 @@ export function SimulatorPage() {
                 >
                   {currentRace?.event_name ?? currentRace?.circuit?.name ?? "Current race"} — Race
                 </div>
-              ) : (
-                <Input
+              ) : lastIngestedSession ? (
+                <div
                   id="sessionId"
-                  value={sessionId}
-                  onChange={(e) => setSessionId(e.target.value)}
-                  placeholder="Session UUID"
-                />
+                  className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm"
+                >
+                  <span className="text-foreground">
+                    {lastIngestedSession.event_name ?? lastIngestedSession.circuit_name} —{" "}
+                    {lastIngestedSession.season} Round {lastIngestedSession.round_number}
+                  </span>
+                  <span className="text-xs text-muted-foreground">(last ingested race)</span>
+                </div>
+              ) : (
+                <div
+                  id="sessionId"
+                  className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground"
+                >
+                  {lastIngestedQuery.isLoading
+                    ? "Resolving last ingested race…"
+                    : "No ingested race available"}
+                </div>
               )}
             </div>
             <div className="space-y-1.5">

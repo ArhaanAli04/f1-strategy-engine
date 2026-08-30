@@ -39,6 +39,7 @@ from backend.schemas.simulate_schema import (
     SimulateTaskStatusResponse,
 )
 from backend.schemas.strategy_schema import (
+    LastIngestedSessionResponse,
     PitWindowResponse,
     StrategyOverviewResponse,
     StrategyPredictionHistoryResponse,
@@ -125,6 +126,29 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
         SimulateStrategyResponse.model_validate(result.result) if result.successful() else None
     )
     return SimulateTaskStatusResponse(task_id=task_id, status=result.status, result=parsed_result)
+
+
+# Static-prefix route, registered ahead of the /{session_id}/... routes below
+# — same convention as /simulate/{task_id} above.
+@router.get(
+    "/last-ingested-session",
+    response_model=LastIngestedSessionResponse,
+    summary="Most recently ingested race session (by race date)",
+    description=(
+        "The R session with the newest race_date among sessions that have "
+        "ingested lap data. Used by the Strategy Simulator as its session "
+        "source when no race is live — resolved per-environment from that "
+        "environment's own DB. 404 only on a fresh DB with no ingested races."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_last_ingested_session(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> LastIngestedSessionResponse:
+    return await strategy_service.get_last_ingested_session(redis_client, db)
 
 
 @router.post(

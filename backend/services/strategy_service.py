@@ -59,13 +59,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_aws_settings, get_ml_settings
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError
-from backend.models.race import Race
+from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.schemas.strategy_schema import (
     CompetitorStrategyEntry,
     FeatureContributionResponse,
+    LastIngestedSessionResponse,
     PitWindowResponse,
     StrategyOverviewResponse,
     StrategyPredictionHistoryEntry,
@@ -104,6 +105,10 @@ _STINT2_CANDIDATE_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 UNDERCUT_PROJECTION_LAPS = 5
 UNDERCUT_MONTE_CARLO_SIMS = 200
 COMPETITOR_STRATEGY_HORIZON_LAPS = 15
+# Historical ingested data is immutable, so a long TTL is fine — the only
+# thing that changes this result is a new ingest, which touches no Redis, so
+# a newer race surfaces after this expires (or a manual cache_service delete).
+LAST_INGESTED_SESSION_TTL_SECONDS = 86400
 
 _model_cache: dict[str, Any] = {}
 
@@ -1036,6 +1041,88 @@ async def get_strategy_prediction_history(
         }
         for row in rows
     ]
+
+
+# --- get_last_ingested_session ---
+
+
+def _key_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> str:
+    return "f1:strategy:last_ingested_session"
+
+
+@cacheable(ttl=LAST_INGESTED_SESSION_TTL_SECONDS, key_fn=_key_last_ingested_session)
+async def _fetch_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> dict[str, Any]:
+    """Newest-race_date R session that has ingested lap data.
+
+    Args:
+        client: Redis client (cache-aside — first positional arg per cacheable's contract).
+        db: Async DB session.
+    Returns:
+        JSON-serialisable dict: session_id, season, round_number, event_name
+        (nullable), circuit_name, race_date (ISO string).
+    Raises:
+        NotFoundError: No R session with any lap_data exists — a fresh DB
+            only; @cacheable does not cache the raised result, so this
+            re-queries until data lands.
+    """
+    query = (
+        select(
+            SessionModel.id,
+            Race.season,
+            Race.round_number,
+            Race.event_name,
+            Circuit.name,
+            Race.race_date,
+        )
+        .join(Race, SessionModel.race_id == Race.id)
+        .join(Circuit, Race.circuit_id == Circuit.id)
+        .where(
+            SessionModel.session_type == "R",
+            select(LapData.id).where(LapData.session_id == SessionModel.id).exists(),
+        )
+        .order_by(Race.race_date.desc(), Race.season.desc(), Race.round_number.desc())
+        .limit(1)
+    )
+    row = (await db.execute(query)).one_or_none()
+    if row is None:
+        raise NotFoundError("No ingested race sessions available")
+    return {
+        "session_id": str(row[0]),
+        "season": int(row[1]),
+        "round_number": int(row[2]),
+        "event_name": row[3],
+        "circuit_name": row[4],
+        "race_date": row[5].isoformat(),
+    }
+
+
+async def get_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> LastIngestedSessionResponse:
+    """The R session with the newest race_date that has ingested lap data.
+
+    Backs GET /strategy/last-ingested-session — the Strategy Simulator's
+    session source when no race is live. Resolved per-environment from that
+    environment's own DB, so it always points at something valid regardless
+    of which DB the backend is running against.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_last_ingested_session).
+        db: Async DB session.
+    Returns:
+        LastIngestedSessionResponse.
+    Raises:
+        NotFoundError: No R session with any lap_data exists (fresh DB).
+    """
+    data = await _fetch_last_ingested_session(client, db)
+    return LastIngestedSessionResponse.model_validate(data)
 
 
 # --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---

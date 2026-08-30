@@ -80,3 +80,17 @@ export interface StrategyPredictionHistoryResponse {
   driver_id: string
   predictions: StrategyPredictionHistoryEntry[]
 }
+
+// GET /strategy/last-ingested-session — the R session with the newest
+// race_date that has ingested lap data. The Strategy Simulator's session
+// source when no race is live; resolved per-environment. event_name is null
+// for rows ingested before that column existed (pre-2026) — fall back to
+// circuit_name.
+export interface LastIngestedSessionResponse {
+  session_id: string
+  season: number
+  round_number: number
+  event_name: string | null
+  circuit_name: string
+  race_date: string
+}

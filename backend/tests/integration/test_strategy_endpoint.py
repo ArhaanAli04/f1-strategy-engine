@@ -286,3 +286,86 @@ def test_simulate_returns_task_id(
     assert poll_body["status"] == "SUCCESS"
     assert poll_body["result"] is not None
     assert poll_body["result"]["driver_id"] == str(driver.id)
+
+
+def _race_with_r_session(
+    season: int,
+    round_number: int,
+    race_date: date,
+    circuit: Circuit,
+    driver: Driver,
+    *,
+    with_lap: bool,
+) -> list[object]:
+    """A Race + its R Session (+ optionally one LapData row), as a flat list of ORM rows."""
+    race = Race(
+        id=uuid.uuid4(),
+        season=season,
+        round_number=round_number,
+        circuit_id=circuit.id,
+        race_date=race_date,
+        status="completed",
+        event_name=f"Test GP {season} R{round_number}",
+    )
+    session_row = SessionModel(
+        id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=race_date
+    )
+    rows: list[object] = [race, session_row]
+    if with_lap:
+        rows.append(
+            LapData(
+                id=uuid.uuid4(),
+                session_id=session_row.id,
+                driver_id=driver.id,
+                lap_number=1,
+                compound="MEDIUM",
+                tyre_age_laps=1,
+                lap_time_seconds=90.0,
+            )
+        )
+    return rows
+
+
+@pytest.mark.integration
+def test_last_ingested_session_returns_newest_with_lap_data(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    circuit = Circuit(id=uuid.uuid4(), name="Test Circuit", country="Testland", track_length_km=5.0)
+    driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
+    older = _race_with_r_session(2025, 1, date(2025, 3, 1), circuit, driver, with_lap=True)
+    target = _race_with_r_session(2026, 10, date(2026, 7, 19), circuit, driver, with_lap=True)
+    # Newest race_date, but its R session has no lap_data — must be skipped.
+    newest_no_data = _race_with_r_session(
+        2026, 13, date(2026, 9, 6), circuit, driver, with_lap=False
+    )
+
+    seed_via_test_client(
+        authenticated_client,
+        db_session_factory,
+        circuit,
+        driver,
+        *older,
+        *target,
+        *newest_no_data,
+    )
+
+    response = authenticated_client.get("/api/v1/strategy/last-ingested-session")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["season"] == 2026
+    assert body["round_number"] == 10
+    assert body["session_id"] == str(target[1].id)  # type: ignore[attr-defined]
+    assert body["event_name"] == "Test GP 2026 R10"
+    assert body["circuit_name"] == "Test Circuit"
+    assert body["race_date"] == "2026-07-19"
+
+
+@pytest.mark.integration
+def test_last_ingested_session_404_when_no_ingested_races(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    response = authenticated_client.get("/api/v1/strategy/last-ingested-session")
+    assert response.status_code == 404

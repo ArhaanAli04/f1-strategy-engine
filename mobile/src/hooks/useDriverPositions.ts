@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query"
 import * as telemetryApi from "@/api/telemetry"
 
-// Hand-written — mirrors web/src/hooks/useDriverPositions.ts exactly.
-const POSITIONS_POLL_INTERVAL_MS = 2_000
+// Hand-written — mirrors web/src/hooks/useDriverPositions.ts. AnimatedDriverDot.tsx
+// imports this to size its render-behind interpolation delay, so a slower poll
+// here automatically widens the window there.
+export const POSITIONS_POLL_INTERVAL_MS = 2_000
 const CAR_NUMBERS_POLL_INTERVAL_MS = 15_000
 
 // GET /telemetry/{session_id}/positions returns [] (not an error) whenever

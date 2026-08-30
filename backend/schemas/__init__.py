@@ -23,6 +23,7 @@ from backend.schemas.simulate_schema import (
 from backend.schemas.strategy_schema import (
     CompetitorStrategyEntry,
     FeatureContributionResponse,
+    LastIngestedSessionResponse,
     PitWindowResponse,
     StrategyComparisonEntry,
     StrategyComparisonResponse,
@@ -85,6 +86,7 @@ __all__ = [
     # strategy
     "CompetitorStrategyEntry",
     "FeatureContributionResponse",
+    "LastIngestedSessionResponse",
     "PitWindowResponse",
     "StrategyComparisonEntry",
     "StrategyComparisonResponse",

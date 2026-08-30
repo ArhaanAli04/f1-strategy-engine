@@ -3,6 +3,11 @@ import { POSITIONS_POLL_INTERVAL_MS } from "@/hooks/useDriverPositions"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import type { CircuitOutlineTransform, DriverPosition } from "@/types"
 
+// Verbatim copy of web/src/components/circuit/AnimatedDriverDots.tsx — see
+// desktop/src/README.md's sync table. The render-behind delay is derived
+// from this app's own POSITIONS_POLL_INTERVAL_MS import, so desktop's slower
+// 2s poll widens the interpolation window automatically.
+
 const DOT_RADIUS = 12
 const SELECTED_DOT_RADIUS = 18
 const DOT_STROKE_WIDTH = 1.5
@@ -20,8 +25,8 @@ const RENDER_DELAY_JITTER_MS = 150
 const DEFAULT_RENDER_DELAY_MS = POSITIONS_POLL_INTERVAL_MS + RENDER_DELAY_JITTER_MS
 
 // Enough recent samples to always contain the pair straddling the render
-// cursor (cursor = now - renderDelayMs). At a ~1s poll and a ~1.15s delay
-// that's the last 2; 4 leaves slack for one late poll.
+// cursor (cursor = now - renderDelayMs) — the last 2 at the position poll
+// cadence plus render delay; 4 leaves slack for one late poll.
 const MAX_SAMPLES = 4
 
 interface PositionSample {
@@ -101,11 +106,11 @@ interface AnimatedDriverDotsProps {
 // cursor. Because the cursor sits a poll interval (plus margin) in the past,
 // a newer sample has almost always already arrived by the time the cursor
 // reaches any given one, so the dot always has somewhere to move toward and
-// never freezes between updates — the visible ~1s stop-start pulse the old
-// fixed-window lerp produced (it finished early every cycle, then clamped at
-// the target until the next poll) is gone. Motion only holds still on a
-// genuine data stall (no fresh positions for > renderDelayMs), which is the
-// correct thing to show then.
+// never freezes between updates — the visible stop-start pulse the old
+// CSS-transition / fixed-window approach produced (it finished early every
+// cycle, then clamped at the target until the next poll) is gone. Motion
+// only holds still on a genuine data stall (no fresh positions for >
+// renderDelayMs), which is the correct thing to show then.
 //
 // Positions are buffered RAW (pre-applyTransform) and transformed per frame,
 // so a circuit-outline change can't strand stale screen coordinates in the

@@ -377,6 +377,7 @@ f1:alerts:{session_id}                                       pub/sub       (no T
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
 f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
 f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. TTL is a safety net well above a curated window's ~20-min playout.)
+f1:strategy:last_ingested_session                            TTL: 86400s   (newest-race_date R session that has lap_data — GET /strategy/last-ingested-session, the Strategy Simulator's session source when no race is live. Not written by ingestion, so a newer ingest surfaces after this expires or a manual cache_service delete. Constant key — resolved per-environment from that DB.)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
@@ -481,6 +482,7 @@ Current endpoints overview:
 - WS     /api/v1/ws/telemetry/{session_id}
 - GET    /api/v1/telemetry/{session_id}/gaps
 - GET    /api/v1/strategy/simulate/{task_id}
+- GET    /api/v1/strategy/last-ingested-session
 - GET    /api/v1/strategy/{session_id}/{driver_id}/pit-window
 - GET    /api/v1/strategy/{session_id}/{driver_id}/undercut
 - GET    /api/v1/strategy/{session_id}/{driver_id}/history
@@ -1077,6 +1079,19 @@ happen), or was found already fixed and moved into ### Notes below instead.
   StyleRadar}.tsx` onto `app/driver/[id].tsx`. Post-v1.0.0 polish, not
   blocking.
 
+- **[deferred — desktop sync] Strategy Simulator "last ingested race"
+  session source is web-only.** `web/` now replaces the manual "Session
+  UUID" text input on `SimulatorPage` with a read-only display sourced from
+  `GET /strategy/last-ingested-session` (`useLastIngestedSession`) when no
+  race is live — auto-selecting the newest-race_date R session with lap
+  data, resolved per-environment. `desktop/src/pages/SimulatorPage.tsx` is a
+  copied-and-adapted file (see Desktop Sync Protocol) that already dropped
+  web's live-mode detection and sources session/driver from
+  `raceContextStore` instead, so this isn't a blind copy — port the
+  read-only "last ingested race" display there as a follow-up (hand-write a
+  `useLastIngestedSession` equivalent, same as desktop's other hooks). Same
+  convention as the other deferred desktop-sync items.
+
 - **[deferred, consolidated] `/strategy/{session_id}/overview`'s 16-17s
   cold-compute floor — partially addressed, not fully closed.** Originally
   two separate entries (per-driver ML inference loop cost, and the cache
@@ -1134,6 +1149,39 @@ happen), or was found already fixed and moved into ### Notes below instead.
   (Fly.io instead, see Deployment Strategy). Local Docker Desktop
   validation, if ever wanted, remains possible but isn't planned work.
 
+- **[✅ done 2026-08-29] Tyre-degradation backfill applied to Supabase for
+  the 2026 races.** Part of the Driver Style page fix (✅ Notes: "Driver
+  Style page empty for season 2026"), which had only touched the local DB.
+  Ran `backend/scripts/backfill_tire_data.py --season 2026` with
+  `DATABASE_URL` overridden to `SUPABASE_DIRECT_URL` (session-mode pooler,
+  port 5432; `postgresql://` → `postgresql+asyncpg://` conversion applied,
+  same as `cd.yml`'s migrate job) — **141 stint(s) updated, 37 skipped**
+  (<2 valid timed laps). The 141 updates match local exactly (Canada R5
+  48/55, British R9 51/73, Belgian R10 42/50 → `avg_deg_per_lap` non-null);
+  Supabase's skip count is lower than local's 87 only because it lacks
+  Zandvoort R12 (50 live-ingested stints, all skipped locally too).
+  Verified by re-querying Supabase post-run. Idempotent (plain UPDATE of a
+  nullable column) — safe to re-run if 2026 races are re-ingested.
+
+- **[deferred — hardening, only if this class of bug recurs] Driver-style
+  fit is brittle to a single entirely-missing feature and to season
+  selection.** Two optional improvements, both skipped when the 2026
+  Driver Style bug was fixed (see Notes below — the fix was the missing
+  `avg_deg_per_lap` backfill, not either of these):
+  1. `driver_style.build_driver_style_features` inner-merges all four
+     features, so if one is completely empty (as `tyre_management_index`
+     was for 2026 — every stint's `avg_deg_per_lap` NULL) the whole result
+     collapses to empty and `driver_service._fit_population` raises a
+     misleading "Not enough lap/stint data" even though the other three
+     features and 20+ drivers of laps are fine. Could fit on the surviving
+     features (drop that PCA column) when exactly one is missing, and/or
+     make the error name the actual gap.
+  2. `useResolvedSession` picks the Driver Style page's season as "most
+     recent completed race", inheriting live-timing-page semantics. A
+     dedicated "most recent season with a usable style fit" resolver would
+     stop a freshly-ingested, not-yet-backfilled season from breaking the
+     page. Not needed once ingestion is self-sufficient (fix B below).
+
 ### Dependency version drift — prometheus-fastapi-instrumentator (✅ fixed Day 16)
 
 pyproject.toml lower-bound-only pins caused a silent compatibility 
@@ -1145,6 +1193,43 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Driver Style page empty for season 2026 (✅ fixed 2026-08-29):** The
+Driver Style radar (`StyleRadar.tsx` → `GET /drivers/{id}/analysis` →
+`driver_service._fit_population` → `driver_style.build_driver_style_features`)
+started returning `404 "Not enough lap/stint data to build driver-style
+profiles for season 2026"`. Season is not hardcoded — it follows the
+`session_id` `useResolvedSession` passes, which is "most recent *completed*
+race"; once British GP 2026 R9 was ingested (Day 41, `status="completed"`)
+that became a 2026 race, and Day 43's curated ingestion (Spa R10, Canada
+R5) added more. 2026 had ~4.4k laps / 228 stints / 20+ drivers — plenty —
+but **every 2026 `tire_stints` row had `avg_deg_per_lap = NULL`**, because
+`ingest_historical.py._upsert_tire_stints` always wrote `None` and relied
+on a separate manual pass, `backend/scripts/backfill_tire_data.py`
+(`make backfill-tire-data`), which had been run for 2018-2025 but never for
+2026. Empty `avg_deg_per_lap` → `compute_tyre_management_index` returns 0
+rows → the four-feature `inner` merge in `build_driver_style_features`
+collapses the whole result to empty. The other three style features were
+fine. Not a regression from that day's dot-animation work (unrelated
+files). Fixes:
+- **A (data):** ran `backfill_tire_data.py --season 2026` against the local
+  DB — 141/228 stints updated, 87 skipped (<2 valid timed laps, normal).
+  `GET /drivers/{id}/analysis` for the Belgian GP 2026 session now returns
+  a full profile. Also applied to production Supabase the same day (141
+  updated, matches local for the 3 curated races) — see the "[✅ done
+  2026-08-29] Tyre-degradation backfill applied to Supabase" entry in
+  Deferred Wiring above.
+- **B (recurrence):** `_upsert_tire_stints` now computes `avg_deg_per_lap`
+  inline from each stint's valid (`IsAccurate`) timed laps, reusing
+  `backfill_tire_data._regression_slope` (same filter, same `<2 laps →
+  None` guard). `backfill_tire_data.py` stays as the repair tool for
+  already-ingested data.
+- **C / D skipped** (partial-feature fitting; dedicated season resolver) —
+  see the Deferred Wiring "[deferred — hardening]" entry.
+Round 12 (Zandvoort) 2026 stints stay NULL — it was live-ingested Day 36
+(laps 1-8 missing, `is_valid` unreliable) and is `status="scheduled"`, so
+`useResolvedSession` never lands on it and the 2026 fit succeeds without
+it. Separate pre-existing data-quality issue, out of scope.
 
 **Real DB alerts wired + StrategyPrediction history endpoint (✅ fixed
 2026-08-26, Day 42):** Two Day 41 findings closed together.

@@ -74,6 +74,12 @@ testpaths = ["backend/tests"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+# ruff 0.16 promoted Markdown/reStructuredText Python-code-block formatting
+# out of preview, so `ruff format .` now walks every .md/.rst in the repo and
+# reformats fenced ```python blocks. Our docs (docs/, CLAUDE.md, READMEs,
+# .claude/commands/) contain deliberately abbreviated / elided snippets that
+# aren't meant to be canonical source — keep ruff to actual Python files.
+extend-exclude = ["*.md", "*.rst"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "S", "B", "A", "C4", "PT"]
