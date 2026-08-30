@@ -123,6 +123,11 @@ def _load_models() -> dict[str, Any]:
     for filename in _MODEL_FILES:
         path = _download_from_s3(filename)
         _model_cache[filename] = joblib.load(path)
+    # Guards against a stale/schema-incompatible production model (e.g. the
+    # 8-feature tire_deg_wet.pkl leftover from the reverted weather
+    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # context.md) by aliasing it to a compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
     return _model_cache
 
 
@@ -903,6 +908,19 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             compound-validated by SimulateStrategyRequest's model_validator).
     Returns:
         SimulateStrategyResponse-shaped dict (JSON-serialisable).
+    Raises:
+        NotFoundError: No session with this ID exists.
+        ValidationError: current_lap exceeds this session's real progress by
+            more than one lap — see strategy_service.validate_current_lap's
+            own docstring. Checked here too (defense in depth), not just in
+            apis/v1/strategy.py's simulate_strategy route: this task can be
+            enqueued directly (run_race_simulation.delay/.run), bypassing the
+            route entirely, and must not be able to skip the check that way.
+            Raising here degrades to a Celery task FAILURE (logged, no
+            result stored) rather than silently running phantom laps beyond
+            the session's actual race distance — see
+            docs/simulator-issues-wet-model-and-position-context.md's
+            Checkpoint-6 follow-up finding.
     """
     models = _load_models()
     tire_deg_pipelines = {
@@ -927,6 +945,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
     session_factory = _get_session_factory()
     try:
         async with session_factory() as db:
+            await strategy_service.validate_current_lap(db, session_id, current_lap)
             race_state = await _build_race_state(
                 db,
                 async_redis_client,
@@ -939,9 +958,15 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             )
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]
-
-    # See telemetry_worker._persist_lap for why this dispose is required.
-    await get_engine().dispose()
+        # See telemetry_worker._persist_lap for why this dispose is required.
+        # In its own finally (not just after the try/finally above, as this
+        # was before validate_current_lap existed): validate_current_lap
+        # raising here is now the expected, common rejection path for a bad
+        # current_lap, not a rare failure — skipping dispose on that path
+        # would leak the pooled connection into a later, different-loop
+        # asyncio.run() far more often than the original rare-NoResultFound
+        # case this comment already accounted for.
+        await get_engine().dispose()
 
     forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None
     if pit_laps:

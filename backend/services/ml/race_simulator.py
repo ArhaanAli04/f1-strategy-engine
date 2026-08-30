@@ -49,6 +49,7 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +59,8 @@ import numpy.typing as npt
 
 from backend.core.metrics import f1_ml_inference_duration_seconds
 from backend.services.ml import pit_predictor, safety_car_model, tire_deg_model
+
+logger = logging.getLogger(__name__)
 
 N_SIMULATIONS = 1000
 PIT_STOP_SECONDS = 22.0
@@ -213,8 +216,15 @@ def _tire_deg_predictions(
         fuel_adjusted_time: This lap's fuel_adjusted_time proxy (see module docstring).
     Returns:
         (predicted_delta, predicted_life_remaining), each (n_sims, n_drivers). Drivers
-        on a compound with no fitted pipeline get delta=0 and life_remaining capped at
-        tire_deg_model.MAX_LOOKAHEAD_LAPS.
+        on a compound with no fitted pipeline, a pipeline whose fitted feature count
+        doesn't match the built feature vector (schema drift — see
+        docs/simulator-issues-wet-model-and-position-context.md; strategy_service.py/
+        prediction_worker.py's _load_models already alias the one known offender,
+        tire_deg_wet.pkl, before this is ever reached, but this is a permanent
+        backstop against future drift in any compound), or a pipeline whose predict()
+        raises, get delta=0 and life_remaining capped at
+        tire_deg_model.MAX_LOOKAHEAD_LAPS — degrading that compound group only, never
+        crashing the whole Monte Carlo task.
     """
     n_sims, n_drivers = tyre_age.shape
     predicted_delta = np.zeros((n_sims, n_drivers))
@@ -248,19 +258,49 @@ def _tire_deg_predictions(
                 driver_id_encoded_flat.astype(np.float64),
             ]
         )
-        with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
-            predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
 
-            life_flat = tire_deg_model.predict_life_remaining_batch(
-                pipeline,
-                lap_number_arr,
-                compound_encoded_flat,
-                tyre_age_flat,
-                fuel_adjusted_time_arr,
-                circuit_id_encoded_arr,
-                driver_id_encoded_flat,
+        # Permanent backstop against model-shape drift (see this function's
+        # docstring): _load_models() already aliases the one known offender
+        # (tire_deg_wet.pkl) before this is ever reached, but a future
+        # promotion-guard gap on ANY compound must degrade this compound
+        # group only, never crash the whole Monte Carlo task.
+        expected_n_features = features.shape[1]
+        actual_n_features = tire_deg_model.pipeline_feature_count(pipeline)
+        if actual_n_features is not None and actual_n_features != expected_n_features:
+            logger.warning(
+                "tire_deg pipeline for compound %s expects %d features, got %d — "
+                "skipping this compound group for lap %d (delta=0, life=MAX_LOOKAHEAD_LAPS)",
+                compound,
+                actual_n_features,
+                expected_n_features,
+                lap_number,
             )
-        predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
+            continue
+
+        try:
+            with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
+                predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
+
+                life_flat = tire_deg_model.predict_life_remaining_batch(
+                    pipeline,
+                    lap_number_arr,
+                    compound_encoded_flat,
+                    tyre_age_flat,
+                    fuel_adjusted_time_arr,
+                    circuit_id_encoded_arr,
+                    driver_id_encoded_flat,
+                )
+            predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
+        except Exception:  # noqa: BLE001 — degrade this compound group, never crash the task
+            logger.warning(
+                "tire_deg inference failed for compound %s at lap %d — "
+                "skipping this compound group (delta=0, life=MAX_LOOKAHEAD_LAPS)",
+                compound,
+                lap_number,
+                exc_info=True,
+            )
+            predicted_delta[:, idx] = 0.0
+            predicted_life_remaining[:, idx] = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
 
     return predicted_delta, predicted_life_remaining
 

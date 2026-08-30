@@ -22,11 +22,12 @@ from backend.services.ml.race_simulator import (
     DriverRaceState,
     RaceSimulationInput,
     RaceSimulationResult,
+    _tire_deg_predictions,
     simulate_race,
 )
 from backend.services.ml.safety_car_model import SafetyCarModel
 from backend.services.ml.tire_deg_model import FEATURE_COLUMNS as TIRE_FEATURE_COLUMNS
-from backend.services.ml.tire_deg_model import _build_pipeline
+from backend.services.ml.tire_deg_model import MAX_LOOKAHEAD_LAPS, _build_pipeline
 
 CIRCUIT_NAME = "Test Circuit"
 COMPOUND = "MEDIUM"
@@ -35,9 +36,16 @@ N_DRIVERS = 4
 
 
 def _synthetic_tire_pipeline(seed: int) -> Any:
+    return _synthetic_tire_pipeline_with_n_features(len(TIRE_FEATURE_COLUMNS), seed)
+
+
+def _synthetic_tire_pipeline_with_n_features(n_features: int, seed: int) -> Any:
+    """Same as _synthetic_tire_pipeline but with a caller-chosen feature count —
+    used to simulate a schema-drifted model (see tire_deg_model.pipeline_feature_count).
+    """
     rng = np.random.default_rng(seed)
     n = 60
-    features = rng.random((n, len(TIRE_FEATURE_COLUMNS)))
+    features = rng.random((n, n_features))
     target = rng.normal(0.0, 0.3, n)
     pipeline = _build_pipeline()
     pipeline.fit(features, target)
@@ -93,6 +101,149 @@ def pit_model() -> Any:
 @pytest.fixture
 def sc_model() -> SafetyCarModel:
     return SafetyCarModel(circuit_rates={CIRCUIT_NAME: 0.001}, default_rate=0.001)
+
+
+# --- _tire_deg_predictions schema-drift backstop ---
+# Covers docs/simulator-issues-wet-model-and-position-context.md Part A's
+# recommendation 2a: a model-shape mismatch or a raising predict() must
+# degrade only that compound group, never crash the whole simulation. These
+# call _tire_deg_predictions directly (no numba path involved) so they run
+# in milliseconds — not marked @slow, unlike the full simulate_race tests
+# below.
+
+
+def _tire_deg_predictions_inputs(
+    race_state: RaceSimulationInput, n_sims: int = 2
+) -> dict[str, Any]:
+    n_drivers = len(race_state.drivers)
+    return {
+        "race_state": race_state,
+        "compound_groups": {COMPOUND: np.arange(n_drivers)},
+        "compound_encoded_by_driver": np.array(
+            [d.compound_encoded for d in race_state.drivers], dtype=np.int64
+        ),
+        "lap_number": race_state.current_lap + 1,
+        "tyre_age": np.tile(
+            np.array([d.tyre_age_laps for d in race_state.drivers], dtype=np.int64),
+            (n_sims, 1),
+        ),
+        "driver_id_encoded": np.array(
+            [d.driver_id_encoded for d in race_state.drivers], dtype=np.int64
+        ),
+        "fuel_adjusted_time": 0.0,
+    }
+
+
+@pytest.mark.unit
+def test_tire_deg_predictions_skips_mismatched_pipeline_without_raising(
+    race_state: RaceSimulationInput,
+) -> None:
+    n_sims = 2
+    inputs = _tire_deg_predictions_inputs(race_state, n_sims=n_sims)
+    mismatched_pipeline = _synthetic_tire_pipeline_with_n_features(
+        n_features=len(TIRE_FEATURE_COLUMNS) + 2, seed=20
+    )
+
+    predicted_delta, predicted_life_remaining = _tire_deg_predictions(
+        tire_deg_pipelines={COMPOUND: mismatched_pipeline}, **inputs
+    )
+
+    assert np.all(predicted_delta == 0.0)
+    assert np.all(predicted_life_remaining == float(MAX_LOOKAHEAD_LAPS))
+
+
+@pytest.mark.unit
+def test_tire_deg_predictions_skips_pipeline_that_raises_on_predict(
+    race_state: RaceSimulationInput,
+) -> None:
+    inputs = _tire_deg_predictions_inputs(race_state)
+    raising_pipeline = MagicMock()
+    raising_pipeline.named_steps = {"scaler": MagicMock(n_features_in_=len(TIRE_FEATURE_COLUMNS))}
+    raising_pipeline.predict.side_effect = ValueError("boom")
+
+    predicted_delta, predicted_life_remaining = _tire_deg_predictions(
+        tire_deg_pipelines={COMPOUND: raising_pipeline}, **inputs
+    )
+
+    assert np.all(predicted_delta == 0.0)
+    assert np.all(predicted_life_remaining == float(MAX_LOOKAHEAD_LAPS))
+
+
+@pytest.mark.unit
+def test_tire_deg_predictions_uses_compatible_pipeline_normally(
+    race_state: RaceSimulationInput,
+) -> None:
+    inputs = _tire_deg_predictions_inputs(race_state)
+    compatible_pipeline = _synthetic_tire_pipeline_with_n_features(
+        n_features=len(TIRE_FEATURE_COLUMNS), seed=21
+    )
+
+    predicted_delta, _predicted_life_remaining = _tire_deg_predictions(
+        tire_deg_pipelines={COMPOUND: compatible_pipeline}, **inputs
+    )
+
+    # A real (fitted-on-random-data) pipeline should not trivially produce
+    # every value at exactly the degrade-gracefully default (predicted_life_
+    # remaining legitimately caps at MAX_LOOKAHEAD_LAPS for a model that never
+    # crosses the degradation threshold within the lookahead window, so that
+    # field alone can't distinguish "used normally" from "skipped" — delta can).
+    assert not np.all(predicted_delta == 0.0)
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_simulate_race_completes_with_one_mismatched_compound(
+    tire_deg_pipelines: dict[str, Any],
+    pit_model: Any,
+    sc_model: SafetyCarModel,
+) -> None:
+    """A mixed field — one driver on a schema-drifted compound, one on a healthy
+    one — must still produce a full result for both drivers; only the drifted
+    compound's predictions degrade to the safe defaults inside the loop.
+    """
+    drivers = [
+        DriverRaceState(
+            driver_id="healthy-driver",
+            starting_position=1,
+            compound=COMPOUND,
+            compound_encoded=COMPOUND_ENCODED,
+            tyre_age_laps=5,
+            driver_id_encoded=0,
+            cumulative_race_time_seconds=0.0,
+        ),
+        DriverRaceState(
+            driver_id="drifted-driver",
+            starting_position=2,
+            compound="WET",
+            compound_encoded=4,
+            tyre_age_laps=3,
+            driver_id_encoded=1,
+            cumulative_race_time_seconds=10.0,
+        ),
+    ]
+    race_state_with_mismatch = RaceSimulationInput(
+        circuit_name=CIRCUIT_NAME,
+        circuit_id_encoded=0,
+        current_lap=45,
+        total_laps=48,
+        wet_track=True,
+        track_temp=15.0,
+        air_temp=12.0,
+        drivers=drivers,
+    )
+    mismatched_pipelines = {
+        **tire_deg_pipelines,
+        "WET": _synthetic_tire_pipeline_with_n_features(n_features=8, seed=22),
+    }
+
+    result = simulate_race(
+        race_state_with_mismatch, mismatched_pipelines, pit_model, sc_model, rng_seed=42
+    )
+
+    assert result.n_simulations == 1000
+    assert len(result.driver_distributions) == 2
+    for distribution in result.driver_distributions:
+        assert sum(distribution.position_probabilities.values()) == pytest.approx(1.0, abs=1e-9)
 
 
 @pytest.mark.unit

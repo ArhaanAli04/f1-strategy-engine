@@ -58,7 +58,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_aws_settings, get_ml_settings
-from backend.core.exceptions import ModelNotLoadedError, NotFoundError
+from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
@@ -154,6 +154,11 @@ def _load_models() -> dict[str, Any]:
         return _model_cache
     for filename in _MODEL_FILES:
         _model_cache[filename] = joblib.load(_download_from_s3(filename))
+    # Guards against a stale/schema-incompatible production model (e.g. the
+    # 8-feature tire_deg_wet.pkl leftover from the reverted weather
+    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # context.md) by aliasing it to a compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
     return _model_cache
 
 
@@ -205,6 +210,64 @@ async def resolve_season_round(db: AsyncSession, session_id: uuid.UUID) -> tuple
     if row is None:
         raise NotFoundError(f"Session {session_id} not found")
     return int(row[0]), int(row[1])
+
+
+async def validate_current_lap(db: AsyncSession, session_id: uuid.UUID, current_lap: int) -> None:
+    """Reject a Strategy Simulator request whose current_lap is impossible for this session.
+
+    Two checks, in order:
+    1. session_id must resolve to a real session — otherwise the request's
+       current_lap is meaningless, and the failure should be a clear 404
+       raised here, not a raw NoResultFound surfacing later out of
+       prediction_worker._build_race_state's own unrelated context query.
+    2. current_lap must be at most one lap past this session's real
+       progress: MAX(LapData.lap_number) across the whole session, or 0 if
+       no lap_data exists yet for it at all (a genuine pre-race what-if —
+       see tests/integration/test_strategy_endpoint.py's
+       test_simulate_returns_task_id, which seeds zero LapData rows and
+       expects current_lap=1 to succeed). "One past" allows claiming to be
+       currently completing the very next lap after the last one anyone in
+       the field has finished; current_lap any further ahead is either
+       stale client state or a fabricated race length the session never
+       had — see docs/simulator-issues-wet-model-and-position-context.md's
+       Checkpoint-6 follow-up finding (a current_lap=68 what-if was
+       silently accepted for a session whose real race was 44 laps).
+
+    Public (no leading underscore): called from both
+    apis/v1/strategy.py's simulate_strategy (before enqueueing the Celery
+    task) and prediction_worker._run_simulation (defense in depth — a
+    caller that enqueues run_race_simulation directly, bypassing the route
+    entirely, e.g. a future replay/backfill script, must not be able to
+    skip this check just by not going through the API).
+
+    Args:
+        db: Async DB session.
+        session_id: Session the what-if is for.
+        current_lap: The request's claimed current lap.
+    Returns:
+        None.
+    Raises:
+        NotFoundError: No session with this ID exists.
+        ValidationError: current_lap exceeds this session's real progress + 1.
+    """
+    session_exists = (
+        await db.execute(select(SessionModel.id).where(SessionModel.id == session_id))
+    ).scalar_one_or_none()
+    if session_exists is None:
+        raise NotFoundError(f"Session {session_id} not found")
+
+    max_ingested_lap = (
+        await db.execute(
+            select(func.max(LapData.lap_number)).where(LapData.session_id == session_id)
+        )
+    ).scalar_one_or_none()
+    ceiling = (max_ingested_lap or 0) + 1
+    if current_lap > ceiling:
+        latest = max_ingested_lap if max_ingested_lap is not None else "none"
+        raise ValidationError(
+            f"current_lap ({current_lap}) exceeds session {session_id}'s real progress "
+            f"(latest ingested lap: {latest}, max valid current_lap: {ceiling})"
+        )
 
 
 async def _current_state(
@@ -1058,7 +1121,17 @@ async def _fetch_last_ingested_session(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
 ) -> dict[str, Any]:
-    """Newest-race_date R session that has ingested lap data.
+    """Newest-race_date COMPLETED R session that has ingested lap data.
+
+    Race.status == "completed" (quick mitigation for the B1 finding in
+    docs/simulator-issues-wet-model-and-position-context.md, not a fix for
+    the underlying CLAUDE.md Deferred Wiring item A): without this filter,
+    the picker could resolve to a partially live-ingested session whose
+    lap_data has NULL position and unevenly-missing laps (e.g. Dutch GP 2026
+    Round 12, ingested by a Day 36 live dry run, status="scheduled") — that
+    produces nonsensical Strategy Simulator output (garbage starting_position
+    fallback, non-comparable cumulative race times), not a real ingestion
+    fault. A real ingest_historical.py run always sets status="completed".
 
     Args:
         client: Redis client (cache-aside — first positional arg per cacheable's contract).
@@ -1067,8 +1140,9 @@ async def _fetch_last_ingested_session(
         JSON-serialisable dict: session_id, season, round_number, event_name
         (nullable), circuit_name, race_date (ISO string).
     Raises:
-        NotFoundError: No R session with any lap_data exists — a fresh DB
-            only; @cacheable does not cache the raised result, so this
+        NotFoundError: No completed R session with any lap_data exists — a
+            fresh DB, or one with only in-progress/scheduled ingestion so
+            far; @cacheable does not cache the raised result, so this
             re-queries until data lands.
     """
     query = (
@@ -1084,6 +1158,7 @@ async def _fetch_last_ingested_session(
         .join(Circuit, Race.circuit_id == Circuit.id)
         .where(
             SessionModel.session_type == "R",
+            Race.status == "completed",
             select(LapData.id).where(LapData.session_id == SessionModel.id).exists(),
         )
         .order_by(Race.race_date.desc(), Race.season.desc(), Race.round_number.desc())
