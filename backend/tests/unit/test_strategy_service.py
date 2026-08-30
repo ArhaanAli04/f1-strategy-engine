@@ -12,7 +12,7 @@ tests against real Redis, not this tier.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -497,3 +497,56 @@ async def test_strategy_prediction_history_for_session_shapes_response(
     assert len(response.predictions) == 1
     assert response.predictions[0].lap_number == 5
     assert response.predictions[0].predicted_pit_lap == 22
+
+
+def _one_or_none_result(value: Any) -> MagicMock:
+    result = MagicMock()
+    result.one_or_none.return_value = value
+    return result
+
+
+@pytest.mark.unit
+async def test_get_last_ingested_session_shapes_the_newest_row(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    mock_db_session.execute.return_value = _one_or_none_result(
+        (session_id, 2026, 12, "Dutch Grand Prix", "Circuit Zandvoort", date(2026, 8, 23))
+    )
+
+    response = await strategy_service.get_last_ingested_session(fakeredis, mock_db_session)
+
+    assert response.session_id == session_id
+    assert response.season == 2026
+    assert response.round_number == 12
+    assert response.event_name == "Dutch Grand Prix"
+    assert response.circuit_name == "Circuit Zandvoort"
+    assert response.race_date == date(2026, 8, 23)
+
+
+@pytest.mark.unit
+async def test_get_last_ingested_session_tolerates_null_event_name(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    mock_db_session.execute.return_value = _one_or_none_result(
+        (session_id, 2021, 13, None, "Circuit Zandvoort", date(2021, 9, 5))
+    )
+
+    response = await strategy_service.get_last_ingested_session(fakeredis, mock_db_session)
+
+    assert response.event_name is None
+    assert response.circuit_name == "Circuit Zandvoort"
+
+
+@pytest.mark.unit
+async def test_get_last_ingested_session_raises_when_no_ingested_races(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    mock_db_session.execute.return_value = _one_or_none_result(None)
+
+    with pytest.raises(NotFoundError):
+        await strategy_service.get_last_ingested_session(fakeredis, mock_db_session)

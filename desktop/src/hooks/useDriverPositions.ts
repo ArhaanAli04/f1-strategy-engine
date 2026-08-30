@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query"
 import * as telemetryApi from "@/api/telemetry"
 
-// Fast enough to read as smooth dot movement (with a CSS transition between
-// polls) without hammering the backend — matches the Circuit Map Panel
-// plan's REST-polling decision over a WebSocket push.
-const POSITIONS_POLL_INTERVAL_MS = 2_000
+// Fast enough to read as smooth dot movement (AnimatedDriverDots.tsx
+// interpolates between polls) without hammering the backend — matches the
+// Circuit Map Panel plan's REST-polling decision over a WebSocket push.
+// AnimatedDriverDots.tsx imports this to size its render-behind interpolation
+// delay, so a slower poll here automatically widens the window there.
+export const POSITIONS_POLL_INTERVAL_MS = 2_000
 
 // Car-number->driver mapping changes far less often than position itself
 // (only on a reserve-driver substitution) — a slower interval is enough.

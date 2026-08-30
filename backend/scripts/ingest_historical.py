@@ -32,6 +32,7 @@ from backend.scripts._ingest_common import (
     or_default,
     resolve_scheduled_start,
 )
+from backend.scripts.backfill_tire_data import _regression_slope
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -181,6 +182,22 @@ async def _upsert_tire_stints(
         if compounds.empty:
             continue
 
+        # Slope (seconds/lap) of a linear fit over this stint's valid lap
+        # times — positive means the tyre is degrading. Same definition and
+        # IsAccurate / non-null-time filter as backfill_tire_data.py, computed
+        # inline so a fresh ingest is self-sufficient; backfill_tire_data.py
+        # stays the repair tool for stints ingested before this. None for a
+        # stint with fewer than 2 valid timed laps (_regression_slope's own
+        # guard), matching the previous always-None behaviour for those.
+        valid = stint_laps[stint_laps["IsAccurate"].fillna(False).astype(bool)].copy()
+        valid = valid.dropna(subset=["LapNumber"])
+        valid["lap_time_seconds"] = valid["LapTime"].map(lap_time_to_seconds)
+        valid = valid.dropna(subset=["lap_time_seconds"])
+        avg_deg_per_lap = _regression_slope(
+            [int(n) for n in valid["LapNumber"]],
+            [float(t) for t in valid["lap_time_seconds"]],
+        )
+
         rows.append(
             {
                 "id": uuid.uuid4(),
@@ -190,7 +207,7 @@ async def _upsert_tire_stints(
                 "compound": compounds.iloc[0],
                 "start_lap": int(stint_laps["LapNumber"].min()),
                 "end_lap": int(stint_laps["LapNumber"].max()),
-                "avg_deg_per_lap": None,
+                "avg_deg_per_lap": avg_deg_per_lap,
             }
         )
 

@@ -12,28 +12,10 @@ import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 import { useSessionStore } from "@/stores/sessionStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
-import type { CircuitOutlineTransform } from "@/types"
 
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
 
 type Mode = "live" | "non-race" | "finished" | "unknown"
-
-// Mirrors extract_circuit_outlines.py's _build_geometry — applies the same
-// X-mirror-correction/rotation/center/scale to a raw live Position.z X/Y
-// sample that was applied to the outline's own points, so both land in the
-// same viewBox frame. Identical to web's CircuitMapPanel.tsx.
-function applyTransform(x: number, y: number, transform: CircuitOutlineTransform) {
-  const correctedX = -x
-  const angle = (transform.rotation_degrees * Math.PI) / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const rotatedX = correctedX * cos - y * sin
-  const rotatedY = correctedX * sin + y * cos
-  return {
-    cx: (rotatedX - transform.center_x) * transform.scale + transform.viewbox_center,
-    cy: (rotatedY - transform.center_y) * transform.scale + transform.viewbox_center,
-  }
-}
 
 interface CircuitMapPanelProps {
   sessionId: string
@@ -101,12 +83,12 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
             (positions ?? []).map((position) => {
               const meta = driverByCarNumber.get(position.driver_number)
               const isSelected = meta !== undefined && meta.driverId === selectedDriverId
-              const { cx, cy } = applyTransform(position.x, position.y, transform)
               return (
                 <AnimatedDriverDot
                   key={position.driver_number}
-                  cx={cx}
-                  cy={cy}
+                  x={position.x}
+                  y={position.y}
+                  transform={transform}
                   color={meta?.color ?? FALLBACK_TEAM_COLOR}
                   isSelected={isSelected}
                 />

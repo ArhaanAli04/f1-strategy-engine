@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -93,3 +93,22 @@ class StrategyComparisonResponse(BaseModel):
     session_id: uuid.UUID
     driver_id: uuid.UUID
     strategies: list[StrategyComparisonEntry]
+
+
+class LastIngestedSessionResponse(BaseModel):
+    """The R session with the newest race_date that has ingested lap data.
+
+    Backs GET /strategy/last-ingested-session — the Strategy Simulator's
+    session source when no race is live. event_name is NULL for rows ingested
+    before that column was populated (pre-2026); the frontend falls back to
+    circuit_name.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: uuid.UUID
+    season: int
+    round_number: int
+    event_name: str | None
+    circuit_name: str
+    race_date: date

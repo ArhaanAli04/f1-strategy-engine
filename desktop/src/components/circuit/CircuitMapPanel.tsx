@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { AnimatedDriverDots } from "./AnimatedDriverDots"
 import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
@@ -8,40 +9,10 @@ import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 import { useLiveRaceSelectionStore } from "@/stores/liveRaceSelectionStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
-import type { CircuitOutlineTransform } from "@/types"
 
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
-const DOT_RADIUS = 12
-const SELECTED_DOT_RADIUS = 18
-const DOT_STROKE_WIDTH = 1.5
-const SELECTED_DOT_STROKE_WIDTH = 3
-// transform (not cx/cy) so the browser can composite this on the GPU
-// instead of recalculating layout on every one of up to 22 simultaneously
-// moving dots. --duration-dot-glide is slightly under useDriverPositions's
-// 2s poll interval so a dot finishes easing into place before the next
-// update arrives; --ease-in-out-strong reads as a moving object rather
-// than the constant-velocity feel of linear.
-const DOT_TRANSITION = "transform var(--duration-dot-glide) var(--ease-in-out-strong)"
 
 type Mode = "live" | "non-race" | "finished" | "unknown"
-
-// Mirrors extract_circuit_outlines.py's _build_geometry — applies the same
-// X-mirror-correction/rotation/center/scale to a raw live Position.z X/Y
-// sample that was applied to the outline's own points, so both land in the
-// same viewBox frame. See backend/schemas/circuit_schema.py's
-// CircuitOutlineTransform docstring for why the X negation happens first.
-function applyTransform(x: number, y: number, transform: CircuitOutlineTransform) {
-  const correctedX = -x
-  const angle = (transform.rotation_degrees * Math.PI) / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const rotatedX = correctedX * cos - y * sin
-  const rotatedY = correctedX * sin + y * cos
-  return {
-    cx: (rotatedX - transform.center_x) * transform.scale + transform.viewbox_center,
-    cy: (rotatedY - transform.center_y) * transform.scale + transform.viewbox_center,
-  }
-}
 
 interface Countdown {
   days: number
@@ -144,26 +115,15 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
         className="absolute inset-0 h-full w-full"
         aria-hidden="true"
       >
-        {mode === "live" &&
-          transform &&
-          (positions ?? []).map((position) => {
-            const meta = driverByCarNumber.get(position.driver_number)
-            const isSelected = meta !== undefined && meta.driverId === selectedDriverId
-            const { cx, cy } = applyTransform(position.x, position.y, transform)
-            return (
-              <circle
-                key={position.driver_number}
-                r={isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS}
-                fill={meta?.color ?? FALLBACK_TEAM_COLOR}
-                stroke="#fff"
-                strokeWidth={isSelected ? SELECTED_DOT_STROKE_WIDTH : DOT_STROKE_WIDTH}
-                style={{
-                  transform: `translate(${cx}px, ${cy}px)`,
-                  transition: prefersReducedMotion ? "none" : DOT_TRANSITION,
-                }}
-              />
-            )
-          })}
+        {mode === "live" && transform && (
+          <AnimatedDriverDots
+            positions={positions ?? []}
+            transform={transform}
+            driverByCarNumber={driverByCarNumber}
+            selectedDriverId={selectedDriverId}
+            prefersReducedMotion={prefersReducedMotion}
+          />
+        )}
       </svg>
 
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">

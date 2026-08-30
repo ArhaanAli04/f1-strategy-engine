@@ -3,13 +3,11 @@ import * as telemetryApi from "@/api/telemetry"
 
 // Matches the backend's real ~1Hz position publish cadence (both the live
 // Position.z-authenticated path and Demo Replay's position timeline — see
-// CLAUDE.md's Day 43 notes) — polling any slower than the data actually
-// changes means each glide step covers more than one publish interval's
-// worth of movement. AnimatedDriverDots.tsx interpolates against this same
-// interval (its own INTERPOLATION_WINDOW_MS constant, not imported from
-// here — see that file and DESIGN.md's Motion section for why a CSS
-// transition duration couldn't be tuned to fully hide the real interval).
-const POSITIONS_POLL_INTERVAL_MS = 1_000
+// CLAUDE.md's Day 43 notes). AnimatedDriverDots.tsx imports this to size its
+// render-behind interpolation delay (draw the field slightly in the past so
+// a newer sample is always available to glide toward), so a slower poll here
+// automatically widens the interpolation window there.
+export const POSITIONS_POLL_INTERVAL_MS = 1_000
 
 // Car-number->driver mapping changes far less often than position itself
 // (only on a reserve-driver substitution) — a slower interval is enough.

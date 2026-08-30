@@ -1,5 +1,6 @@
 import { apiClient } from "./client"
 import type {
+  LastIngestedSessionResponse,
   PitWindowResponse,
   SimulateStrategyRequest,
   SimulateTaskAccepted,
@@ -62,5 +63,12 @@ export async function simulateStrategy(
 // Unauthenticated on the backend — task_id is an unguessable Celery UUID.
 export async function getSimulationResult(taskId: string): Promise<SimulateTaskStatusResponse> {
   const { data } = await apiClient.get<SimulateTaskStatusResponse>(`/strategy/simulate/${taskId}`)
+  return data
+}
+
+export async function getLastIngestedSession(): Promise<LastIngestedSessionResponse> {
+  const { data } = await apiClient.get<LastIngestedSessionResponse>(
+    "/strategy/last-ingested-session",
+  )
   return data
 }
