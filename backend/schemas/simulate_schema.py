@@ -115,3 +115,9 @@ class SimulateTaskStatusResponse(BaseModel):
     task_id: str
     status: str
     result: SimulateStrategyResponse | None = None
+    # Populated only when status == FAILURE. Deliberately narrow: this route
+    # is unauthenticated (see apis/v1/strategy.py's module docstring), so the
+    # underlying exception is never echoed verbatim — see get_simulation_result
+    # for the F1StrategyError-only safe-message policy this mirrors from
+    # core/exceptions.py's unhandled_error_handler.
+    error: str | None = None

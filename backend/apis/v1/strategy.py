@@ -19,6 +19,7 @@ task UUID, not a computation itself.
 """
 
 import asyncio
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
@@ -29,6 +30,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.database import get_db
+from backend.core.exceptions import F1StrategyError
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import get_current_user
@@ -48,6 +50,8 @@ from backend.schemas.strategy_schema import (
 from backend.services import strategy_service
 from backend.workers.celery_app import app as celery_app
 from backend.workers.prediction_worker import run_race_simulation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 
@@ -75,7 +79,11 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
     description=(
         "Polls the Celery result backend for a task_id returned by POST "
         "/{session_id}/simulate. status is PENDING/STARTED while running; "
-        "result is populated only once status is SUCCESS."
+        "result is populated only once status is SUCCESS. error is populated "
+        "only once status is FAILURE — a user-facing message when the task "
+        "raised a known F1StrategyError (e.g. current_lap validation), or a "
+        "generic message otherwise (the real exception is logged server-side, "
+        "never echoed here — this route is unauthenticated)."
     ),
     openapi_extra={
         "responses": {
@@ -125,7 +133,25 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
     parsed_result = (
         SimulateStrategyResponse.model_validate(result.result) if result.successful() else None
     )
-    return SimulateTaskStatusResponse(task_id=task_id, status=result.status, result=parsed_result)
+    # On FAILURE, Celery's result backend reconstructs the real exception
+    # instance (confirmed against a real celery.backends.redis.RedisBackend,
+    # not assumed — task_serializer="json" still round-trips a known,
+    # importable exception class faithfully, including F1StrategyError
+    # subclasses' .message). Only F1StrategyError's own .message is ever
+    # surfaced here — this route is unauthenticated (see module docstring),
+    # so an arbitrary internal exception's text must never leak the way
+    # unhandled_error_handler already refuses to for every other route.
+    error = None
+    if result.failed():
+        exc = result.result
+        if isinstance(exc, F1StrategyError):
+            error = exc.message
+        else:
+            logger.error("Simulation task %s failed: %r", task_id, exc)
+            error = "Simulation failed due to an unexpected error."
+    return SimulateTaskStatusResponse(
+        task_id=task_id, status=result.status, result=parsed_result, error=error
+    )
 
 
 # Static-prefix route, registered ahead of the /{session_id}/... routes below

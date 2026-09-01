@@ -38,6 +38,7 @@ from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.telemetry import LapData
 from backend.services import strategy_service
+from backend.services.ml import race_simulator
 from backend.services.ml.tire_deg_model import FEATURE_COLUMNS, _build_pipeline
 from backend.tests.integration.conftest import seed_via_test_client
 from backend.workers import prediction_worker
@@ -207,6 +208,34 @@ def _eager_celery_with_stored_results(redis_container: RedisContainer) -> None:
     celery_app.conf.result_backend = redis_url
     celery_app.conf.task_always_eager = True
     celery_app.conf.task_eager_propagates = True
+    celery_app.conf.task_store_eager_result = True
+    celery_app._backend_cache = None
+    celery_app._local.__dict__.pop("backend", None)
+    prediction_worker.run_race_simulation.store_eager_result = True
+
+
+@pytest.fixture
+def _eager_celery_captures_failures(redis_container: RedisContainer) -> None:
+    """Same as _eager_celery_with_stored_results, but task_eager_propagates=False.
+
+    With propagates=True (the other fixture), an exception raised inside the
+    task re-raises synchronously at the .delay()/.run() call site — exactly
+    what test_run_race_simulation_rejects_excessive_current_lap_when_route_bypassed
+    wants (pytest.raises around .run()). GET /simulate/{task_id}'s FAILURE/error
+    surfacing (this file's two _eager_celery_captures_failures tests) needs the
+    opposite: the exception caught by Celery's own eager machinery and stored as
+    a real FAILURE result in the backend, so there's a task_id to actually poll —
+    matching real (non-eager) worker behavior, where a task exception always
+    becomes a stored FAILURE, never a synchronous raise at the enqueue site.
+    """
+    redis_url = (
+        f"redis://{redis_container.get_container_host_ip()}:"
+        f"{redis_container.get_exposed_port(6379)}"
+    )
+    celery_app.conf.broker_url = redis_url
+    celery_app.conf.result_backend = redis_url
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = False
     celery_app.conf.task_store_eager_result = True
     celery_app._backend_cache = None
     celery_app._local.__dict__.pop("backend", None)
@@ -420,6 +449,144 @@ def test_run_race_simulation_rejects_excessive_current_lap_when_route_bypassed(
 
     with pytest.raises(ValidationError):
         prediction_worker.run_race_simulation.run(task_payload)
+
+
+# --- GET /simulate/{task_id}: FAILURE surfaces a user-facing error message ---
+# See docs/day-deferred-fixes-session2-handoff.md item 12: SimulateTaskStatusResponse
+# previously carried no failure reason at all, so a task FAILURE told the
+# frontend nothing beyond the bare status string.
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_eager_celery_captures_failures", "_stub_simulation_models")
+def test_simulation_failure_surfaces_f1_strategy_error_message(
+    test_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A known F1StrategyError's own .message is safe to pass through verbatim.
+
+    Dispatches run_race_simulation.delay() directly (bypassing POST /simulate,
+    same technique as the route-bypass test above) with current_lap=68 against
+    a session whose real progress ceiling is 11 — the worker-level
+    validate_current_lap call raises ValidationError, which real (non-eager)
+    Celery would store as a FAILURE result; this fixture's eager-but-not-
+    propagating config reproduces that same stored-FAILURE shape.
+    """
+    circuit = Circuit(id=uuid.uuid4(), name="Test Circuit", country="Testland", track_length_km=5.0)
+    race = Race(
+        id=uuid.uuid4(),
+        season=2025,
+        round_number=1,
+        circuit_id=circuit.id,
+        race_date=date(2025, 3, 1),
+        status="in_progress",
+    )
+    session_row = SessionModel(
+        id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=date(2025, 3, 1)
+    )
+    driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
+    lap = LapData(
+        id=uuid.uuid4(),
+        session_id=session_row.id,
+        driver_id=driver.id,
+        lap_number=10,
+        compound="MEDIUM",
+        tyre_age_laps=10,
+        lap_time_seconds=91.0,
+    )
+    # seed_via_test_client + portal-loop dispose, not a bespoke asyncio.run()
+    # — see test_simulate_returns_task_id's identical comment: test_client's
+    # own lifespan startup already bound a pooled connection to its portal
+    # loop, and a separate asyncio.run() from the test body would collide
+    # with it (confirmed live while writing this test).
+    seed_via_test_client(test_client, db_session_factory, circuit, race, session_row, driver, lap)
+    test_client.portal.call(get_engine().dispose)  # type: ignore[union-attr]
+
+    task_payload = {
+        "session_id": str(session_row.id),
+        "driver_id": str(driver.id),
+        "current_lap": 68,
+        "current_compound": "HARD",
+        "current_tyre_age": 20,
+        "remaining_laps": 5,
+        "pit_laps": [],
+        "compounds": [],
+    }
+    task = prediction_worker.run_race_simulation.delay(task_payload)
+
+    response = test_client.get(f"/api/v1/strategy/simulate/{task.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "FAILURE"
+    assert body["result"] is None
+    assert body["error"] is not None
+    assert "68" in body["error"]  # ValidationError.message names the offending lap
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_eager_celery_captures_failures", "_stub_simulation_models")
+def test_simulation_failure_hides_unexpected_exception_detail(
+    test_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-F1StrategyError exception must never leak its own text — this route
+    is unauthenticated (see apis/v1/strategy.py's module docstring), same
+    reasoning as core/exceptions.py's unhandled_error_handler for every other
+    route. Forces race_simulator.simulate_race to raise past a valid
+    current_lap, so the failure is a genuine internal error, not a rejected
+    request.
+    """
+    circuit = Circuit(id=uuid.uuid4(), name="Test Circuit", country="Testland", track_length_km=5.0)
+    race = Race(
+        id=uuid.uuid4(),
+        season=2025,
+        round_number=1,
+        circuit_id=circuit.id,
+        race_date=date(2025, 3, 1),
+        status="in_progress",
+    )
+    session_row = SessionModel(
+        id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=date(2025, 3, 1)
+    )
+    driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
+    # See the sibling test above for why this is seed_via_test_client + a
+    # portal-loop dispose, not a bespoke asyncio.run().
+    seed_via_test_client(test_client, db_session_factory, circuit, race, session_row, driver)
+    test_client.portal.call(get_engine().dispose)  # type: ignore[union-attr]
+
+    internal_exception_text = "connection to internal-db-host:5432 refused"
+    # Patched via the direct `race_simulator` import (not
+    # `prediction_worker.race_simulator`, an implicit re-export mypy --strict
+    # rejects) — same module object either way, since prediction_worker.py's
+    # own `from backend.services.ml import ... race_simulator ...` binds the
+    # identical singleton module this patches.
+    monkeypatch.setattr(
+        race_simulator,
+        "simulate_race",
+        MagicMock(side_effect=RuntimeError(internal_exception_text)),
+    )
+
+    task_payload = {
+        "session_id": str(session_row.id),
+        "driver_id": str(driver.id),
+        "current_lap": 1,
+        "current_compound": "MEDIUM",
+        "current_tyre_age": 2,
+        "remaining_laps": 3,
+        "pit_laps": [],
+        "compounds": [],
+    }
+    task = prediction_worker.run_race_simulation.delay(task_payload)
+
+    response = test_client.get(f"/api/v1/strategy/simulate/{task.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "FAILURE"
+    assert body["result"] is None
+    assert body["error"] is not None
+    assert internal_exception_text not in body["error"]
 
 
 def _race_with_r_session(

@@ -68,20 +68,33 @@ async def _persist_lap(lap: LapDataCreate) -> None:
         None.
     """
     session_factory = _get_session_factory()
-    async with session_factory() as db:
-        stmt = (
-            pg_insert(LapData)
-            .values(id=uuid.uuid4(), **lap.model_dump())
-            .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "lap_number"])
-        )
-        await db.execute(stmt)
-        await db.commit()
-
-    # Each task invocation gets its own asyncio.run() (a fresh event loop),
-    # but get_engine()'s pooled asyncpg connections are bound to the loop
-    # that created them. Dispose here so no connection survives into a
-    # later, different-loop task — same convention ingest_historical.py uses.
-    await get_engine().dispose()
+    try:
+        async with session_factory() as db:
+            stmt = (
+                pg_insert(LapData)
+                .values(id=uuid.uuid4(), **lap.model_dump())
+                .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "lap_number"])
+            )
+            await db.execute(stmt)
+            await db.commit()
+    finally:
+        # Each task invocation gets its own asyncio.run() (a fresh event
+        # loop), but get_engine()'s pooled asyncpg connections are bound to
+        # the loop that created them. Dispose here so no connection survives
+        # into a later, different-loop task — same convention
+        # ingest_historical.py uses. In a finally (not just after the `async
+        # with` block, as this was before this fix): a bare
+        # `await get_engine().dispose()` placed after the block is silently
+        # SKIPPED whenever the block raises (a DB constraint violation,
+        # anything LapDataCreate.model_validate didn't already catch) —
+        # identical shape to, and fixed the same way as,
+        # prediction_worker._run_simulation's dispose bug (CLAUDE.md's
+        # Notes, item 1d), which is how this sibling gap was originally
+        # found. Left unguarded, a failed persist leaks a pooled asyncpg
+        # connection into whatever asyncio.run() call happens next in this
+        # worker process (slow pool exhaustion over many failures, not an
+        # immediate crash).
+        await get_engine().dispose()
 
     _publish_lap_completed(lap)
 
@@ -108,16 +121,22 @@ async def _persist_tire_stint(stint: TireStintCreate) -> None:
         None.
     """
     session_factory = _get_session_factory()
-    async with session_factory() as db:
-        stmt = (
-            pg_insert(TireStint)
-            .values(id=uuid.uuid4(), **stint.model_dump())
-            .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "stint_number"])
-        )
-        await db.execute(stmt)
-        await db.commit()
-
-    await get_engine().dispose()
+    try:
+        async with session_factory() as db:
+            stmt = (
+                pg_insert(TireStint)
+                .values(id=uuid.uuid4(), **stint.model_dump())
+                .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "stint_number"])
+            )
+            await db.execute(stmt)
+            await db.commit()
+    finally:
+        # Same dispose-on-exception fix as _persist_lap above — see that
+        # function's own comment for the full explanation. Identical shape,
+        # found in the same file while fixing that one (not part of item
+        # 11's original scope, fixed alongside on request since it's the
+        # same proven fix pattern).
+        await get_engine().dispose()
 
 
 @app.task(name="record_tire_stint")  # type: ignore[untyped-decorator]
