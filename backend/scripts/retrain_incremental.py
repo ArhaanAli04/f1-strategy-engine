@@ -185,18 +185,20 @@ def _promote_and_record(
     version_tag: str,
     filename: str,
     model_obj: Any,
-    metrics: dict[str, float | str],
+    metrics: dict[str, Any],
     summary: dict[str, dict[str, object]],
+    feature_names: list[str] | None = None,
 ) -> None:
     previous = download_metrics(client, bucket, "production", filename)
     previous_mae = float(previous["holdout_mae"]) if previous is not None else None
-    promoted = serialize_evaluate_and_upload(
-        client, bucket, version_tag, filename, model_obj, metrics
+    outcome = serialize_evaluate_and_upload(
+        client, bucket, version_tag, filename, model_obj, metrics, feature_names=feature_names
     )
     summary[filename] = {
         "holdout_mae": float(metrics["holdout_mae"]),
         "previous_production_holdout_mae": previous_mae,
-        "promoted": promoted,
+        "promoted": outcome.promoted,
+        "promotion_reason": outcome.reason,
     }
 
 
@@ -272,6 +274,7 @@ def retrain() -> dict[str, dict[str, object]]:
                 "promotion_basis": promotion_basis,
             },
             summary,
+            feature_names=tire_deg_model.FEATURE_COLUMNS,
         )
         tire_deg_results[compound] = result
 
@@ -321,6 +324,7 @@ def retrain() -> dict[str, dict[str, object]]:
             "n_samples": pit_result.n_samples,
         },
         summary,
+        feature_names=pit_predictor.FEATURE_COLUMNS,
     )
 
     logger.info("Incremental retraining complete. version_tag=%s", version_tag)

@@ -507,33 +507,41 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Deferred items — batch 2 (items 11 & 12)
-Status:   Item 11: connection dispose leak fixed in 
-          both telemetry_worker._persist_lap and 
-          _persist_tire_stint (same shape bug found 
-          in a second function while fixing the first). 
-          Item 12: frontend now surfaces simulation 
-          errors properly across web/desktop/mobile — 
-          new SimulateTaskStatusResponse.error field 
-          (safe F1StrategyError pass-through, generic 
-          fallback otherwise), fixed unhandled promise 
-          rejection on POST /simulate 422/404, users 
-          no longer stranded on spinner with no way 
-          back.
-          7 items remain in docs/day-deferred-fixes-
+Day:      Deferred items — batch 3 (item 9)
+Status:   Item 9 done: model promotion guard 
+          (train_models.py's serialize_evaluate_and_upload) 
+          now checks feature-schema compatibility, not 
+          just holdout_mae — a confirmed schema mismatch 
+          (or an unloadable incumbent .pkl) force-promotes 
+          the candidate regardless of MAE, closing the 
+          root cause behind the original WET incident. 
+          Every sidecar now carries n_features/
+          feature_names/schema_source; a legacy incumbent's 
+          .pkl is only ever introspected once (backfilled 
+          into its sidecar after). retrain_incremental.py 
+          and train_all() both wire real FEATURE_COLUMNS 
+          through. This also removes item 8's old 
+          "manually delete the sidecar first" workaround — 
+          item 8 (WET retrain) is now unblocked, not done.
+          6 items remain in docs/day-deferred-fixes-
           session2-handoff.md: 4 (predicted_finish_time 
-          naming), 5 (driver skill signal), 6 (strategic 
+          naming), 5 (driver skill signal — now easier to 
+          retrain safely thanks to item 9), 6 (strategic 
           adaptation — research-first), 7 (NULL-lap 
           cumulative-sum, high blast radius), 8 (WET 
-          model retrain, low value), 9 (promotion guard 
-          schema check — recommended next, unblocks 5+8), 
+          model retrain, low value, now unblocked), 
           10 (track-condition input).
-Next:     Item 9 recommended next (promotion guard 
-          schema check — root-cause fix behind the 
-          original WET incident), then continue down 
-          the remaining deferred items. Fly.io 
-          deployment (Day 40 A4) after deferred items 
-          are addressed.
+Next:     Continue down the remaining 6 deferred items — 
+          no single one is recommended next; pick per 
+          session based on priority/scope, same as this 
+          session's approach. Fly.io deployment (Day 40 
+          A4) after deferred items are addressed. Note: 
+          train-models.yml currently fetches zero 2026 
+          laps (see the escalated GitHub-Actions/FastF1 
+          deferred item) — resolve or consciously accept 
+          the base-corpus-only outcome before triggering 
+          a real run that would exercise item 9's guard 
+          for the first time in production.
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
@@ -1208,37 +1216,36 @@ happen), or was found already fixed and moved into ### Notes below instead.
   WET-specific model has never existed at the 6-feature schema the rest of
   the tire_deg registry uses since the 2026-07-16 weather-feature revert. To
   retrain: run `train_models.py` against the local corpus (produces a
-  6-feature WET candidate), then **delete
-  `production/tire_deg_wet.pkl.metrics.json` from S3 first** — the MAE-only
-  promotion guard compares against the stale 8-feature incumbent's
-  `cv_mae=5.7906`, and a 319-lap WET corpus is very unlikely to beat that on
-  a fair `cv_mae` basis either, so without deleting the metrics sidecar the
-  guard will just keep rejecting the new candidate for the same reason it
-  already has. Low priority: only 319 valid WET laps exist across the whole
-  2018-2025 corpus (2025 holdout has zero), so any retrained WET model will
-  stay high-variance regardless — this removes the INTER-alias fudge, it
-  doesn't produce a genuinely accurate WET model. Full analysis:
+  6-feature WET candidate). **Manual sidecar deletion is no longer needed
+  before this** — the promotion guard fix directly above (item 9, ✅ done
+  2026-09-02) now force-promotes automatically on a detected schema mismatch
+  against the stale 8-feature incumbent (`cv_mae=5.7906`), regardless of the
+  candidate's own `holdout_mae`; the old workaround of deleting
+  `production/tire_deg_wet.pkl.metrics.json` from S3 first was only ever
+  needed because the guard used to compare MAE blindly. Low priority: only
+  319 valid WET laps exist across the whole 2018-2025 corpus (2025 holdout
+  has zero), so any retrained WET model will stay high-variance regardless —
+  this removes the INTER-alias fudge, it doesn't produce a genuinely
+  accurate WET model. Full analysis:
   `docs/simulator-issues-wet-model-and-position-context.md` Part A, Option 1.
 
-- **[deferred] The model promotion guard (`train_models.py`'s
-  `serialize_evaluate_and_upload`) needs a feature-schema-compatibility
+- **[✅ done 2026-09-02] The model promotion guard (`train_models.py`'s
+  `serialize_evaluate_and_upload`) needed a feature-schema-compatibility
   check, not just an MAE comparison.** Root cause of the WET schema-mismatch
-  bug (✅-fixed entry below): `should_promote = current_holdout_mae is None
-  or holdout_mae < current_holdout_mae` has no idea the kept incumbent could
+  bug (✅-fixed entry above): `should_promote = current_holdout_mae is None
+  or holdout_mae < current_holdout_mae` had no idea the kept incumbent could
   be a different feature schema than what current inference code builds —
   it "correctly" kept a model that crashed in production because nothing
-  ever checked whether the two models were even comparable. Proposed fix:
-  write each model's `n_features`/`feature_names` into its
-  `.pkl.metrics.json` sidecar at `upload_model` time, and have
-  `serialize_evaluate_and_upload` reject promotion (or force-promote instead
-  of silently keeping an incompatible incumbent) whenever the incumbent's
-  recorded schema doesn't match the currently-deployed `FEATURE_COLUMNS`.
-  [[tire_deg_model]]'s new `pipeline_feature_count`/
-  `apply_incompatible_model_fallbacks` (added fixing the entry below) are a
-  runtime symptom-guard, not a substitute for fixing the promotion guard
-  itself — the guard could still promote a NEW incompatible model in the
-  future and this deferred item would still apply. Full analysis:
-  `docs/simulator-issues-wet-model-and-position-context.md` Part A.6-A.7.
+  ever checked whether the two models were even comparable. Fixed: every
+  sidecar now carries `n_features`/`feature_names`/`schema_source`, and a
+  confirmed schema mismatch (including an unloadable incumbent `.pkl`)
+  force-promotes the candidate regardless of `holdout_mae`. [[tire_deg_model]]'s
+  `pipeline_feature_count`/`apply_incompatible_model_fallbacks` (item 1a) stay
+  in effect as the runtime symptom-guard — this closes the promotion-time gap
+  that let an incompatible model reach production in the first place. See the
+  Notes entry below for the full writeup and verification. Full original
+  analysis: `docs/simulator-issues-wet-model-and-position-context.md`
+  Part A.6-A.7.
 
 - **[deferred — model limitation] The tyre-degradation models have no
   track-condition input, so INTERMEDIATE/WET degradation is modelled
@@ -1369,6 +1376,78 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Model promotion guard gained a feature-schema-compatibility check —
+item 9 (✅ fixed 2026-09-02):** Root cause of the WET tyre-model
+schema-mismatch bug (✅-fixed entry below) — `train_models.py`'s promotion
+guard compared `holdout_mae` only, with no idea a kept incumbent could be a
+different feature schema than what current inference code builds, so it
+"correctly" kept a model that crashed in production because nothing ever
+checked whether the two models were even comparable.
+
+- **Every sidecar (`.pkl.metrics.json`) `serialize_evaluate_and_upload` writes
+  now carries `n_features`/`feature_names`/`schema_source`** (`"declared"`
+  for a freshly-trained candidate). New `fitted_feature_count` (in
+  `train_models.py`) is the general form of [[tire_deg_model]]'s existing
+  `pipeline_feature_count` — it also reads a bare `LGBMClassifier`'s
+  `n_features_in_` directly (`pit_predictor` has no `named_steps`) and
+  correctly returns `None` for `safety_car_model.SafetyCarModel` (no
+  feature-vector concept at all — confirmed via a dedicated test asserting
+  zero `.pkl` downloads for that model type even with an existing
+  incumbent, since the schema check never applies to it).
+- **New decision, replacing the bare MAE comparison:** no existing
+  production model → promote (unchanged); the incumbent's feature schema —
+  read from its sidecar, or (only when the sidecar predates this fix and
+  has no schema recorded) recovered by downloading and introspecting the
+  production `.pkl` directly — mismatches the candidate's, or that `.pkl`
+  can't even be loaded → **force-promote regardless of `holdout_mae`**,
+  logged loudly with both feature counts (new `PromotionOutcome` return
+  type carries `reason="schema_mismatch"`, threaded into
+  `retrain_summary.json` as `promotion_reason` and rendered in
+  `train-models.yml`'s Slack/release-notes `jq` output); otherwise → the
+  original MAE comparison, unchanged.
+- **A legacy incumbent's `.pkl` is only ever downloaded once.** On a
+  successful introspection, the recovered `n_features` is backfilled into
+  its sidecar in place (`schema_source="introspected"`, no promotion, the
+  model itself untouched), so the next comparison for that filename reads
+  straight from the sidecar — verified directly by a two-call test
+  (`test_backfills_legacy_sidecar_and_skips_second_download`) asserting
+  `download_file` is called exactly once across both calls.
+- **`train_all()` and `retrain_incremental.py::_promote_and_record`/
+  `retrain()` both wire real `FEATURE_COLUMNS` through** —
+  `tire_deg_model.FEATURE_COLUMNS` (×5), `pit_predictor.FEATURE_COLUMNS`;
+  `safety_car_model.pkl` passes none, by design (no feature vector).
+  `_promote_and_record`'s consumption of the new `PromotionOutcome` return
+  type was itself a real fix, not just plumbing: it previously stored the
+  return value directly under `summary[filename]["promoted"]`, which
+  type-checks fine under that dict's `object`-typed values but crashes
+  `json.dumps(retrain_summary.json)` at runtime now that the return type is
+  a dataclass — confirmed via direct repro before fixing. Fixed by
+  unpacking `.promoted`/`.reason` explicitly into the summary dict.
+- **This is a runtime guard on the *next* promotion decision, not a
+  backfill of existing production state.** `tire_deg_wet.pkl` stays aliased
+  to `tire_deg_inter.pkl` in memory via [[tire_deg_model]]'s
+  `apply_incompatible_model_fallbacks` (item 1a, unrelated code path, still
+  in effect) until a real training run actually calls this guard and
+  force-promotes a schema-correct WET candidate — see the "Retrain a real
+  6-feature `tire_deg_wet.pkl`" entry above (item 8, still deferred) for
+  that retrain; this fix removes the promotion-guard obstacle item 8
+  previously required a manual sidecar deletion to work around, it doesn't
+  perform the retrain itself. **`train-models.yml` currently fetches zero
+  2026 laps** (see the escalated GitHub-Actions/FastF1 deferred item below)
+  — the first real run under this guard should be triggered deliberately
+  once that's resolved or the base-corpus-only outcome is consciously
+  accepted, not casually.
+- Verified: `pytest backend/tests/unit/test_train_models.py -m unit` (new
+  file, 12 tests — 3 direct `fitted_feature_count` cases plus 9 covering
+  the full decision table, including the exact 8-vs-6-feature WET shape
+  force-promoting despite a *worse* `holdout_mae`) and a full `pytest
+  backend/tests/unit/ -m unit` (222 passed, no regressions). `ruff check`/
+  `mypy --strict` clean on all changed files (`train_models.py`,
+  `retrain_incremental.py`, the new test file); `train-models.yml`'s `jq`
+  change validated as well-formed YAML. Not yet verified against a real
+  training run/S3 (deliberately deferred — see the `train-models.yml`
+  zero-laps blocker above).
 
 **Strategy Simulator accepted a current_lap far beyond a session's real
 race distance (✅ fixed 2026-08-30):** Found during manual Checkpoint-6
