@@ -507,56 +507,33 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Simulator model fixes (isolated day) + item 12 follow-up
-Status:   Fixed WET tyre model schema crash (8 vs 6 
-          features) — permanent alias to INTER model 
-          + defensive backstop in race_simulator.py 
-          against any future model schema drift.
-          Fixed strategy simulator auto-selecting 
-          partially-ingested sessions — added 
-          Race.status == "completed" filter to 
-          last-ingested-session resolution.
-          Fixed missing current_lap bounds validation — 
-          could previously request simulations for 
-          laps that never happened (e.g. lap 68 of a 
-          44-lap race). New validate_current_lap 
-          checks session existence + progress ceiling, 
-          wired into both the API route and worker 
-          (defense in depth). Also fixed pit_laps 
-          silently ignored when out of valid range.
-          Found and fixed a connection pool leak — 
-          get_engine().dispose() was skipped when an 
-          exception propagated in 
-          prediction_worker._run_simulation.
-          Validated fixes with real-data test scenarios: 
-          confirmed position_gain_loss is a genuine 
-          full-race Monte Carlo comparison (mechanically 
-          sound), while predicted_finish_time is 
-          misleading (relative deltas only, not real 
-          elapsed time — new deferred item).
-          2026-09-01 follow-up: closed item 12 (frontend
-          never surfaced validate_current_lap's rejection
-          or a task FAILURE's reason) — see CLAUDE.md's own
-          Notes entry for the full writeup. Fixed on all
-          three clients (web/desktop/mobile — mobile had
-          the identical gap, found while reading the file,
-          not originally in the handoff doc's scope).
-          Also closed item 11 (telemetry_worker dispose-on-
-          exception bug) same session — fixed both
-          _persist_lap and _persist_tire_stint (the latter
-          found while fixing the former, same bug shape,
-          not originally scoped, fixed alongside on request).
+Day:      Deferred items — batch 2 (items 11 & 12)
+Status:   Item 11: connection dispose leak fixed in 
+          both telemetry_worker._persist_lap and 
+          _persist_tire_stint (same shape bug found 
+          in a second function while fixing the first). 
+          Item 12: frontend now surfaces simulation 
+          errors properly across web/desktop/mobile — 
+          new SimulateTaskStatusResponse.error field 
+          (safe F1StrategyError pass-through, generic 
+          fallback otherwise), fixed unhandled promise 
+          rejection on POST /simulate 422/404, users 
+          no longer stranded on spinner with no way 
+          back.
           7 items remain in docs/day-deferred-fixes-
-          session2-handoff.md for future sessions: 
-          predicted_finish_time units gap, driver skill 
-          signal missing, no strategic/reactive 
-          adaptation, NULL-lap-sum bug (4 sites), 
-          WET model retraining, promotion guard schema 
-          check, no track-condition input.
-Next:     Continue fixing deferred items from 
-          docs/day-deferred-fixes-session2-handoff.md 
-          (7 items remaining — pick priority order 
-          per session). Then Day 40 A4 — Fly.io deployment
+          session2-handoff.md: 4 (predicted_finish_time 
+          naming), 5 (driver skill signal), 6 (strategic 
+          adaptation — research-first), 7 (NULL-lap 
+          cumulative-sum, high blast radius), 8 (WET 
+          model retrain, low value), 9 (promotion guard 
+          schema check — recommended next, unblocks 5+8), 
+          10 (track-condition input).
+Next:     Item 9 recommended next (promotion guard 
+          schema check — root-cause fix behind the 
+          original WET incident), then continue down 
+          the remaining deferred items. Fly.io 
+          deployment (Day 40 A4) after deferred items 
+          are addressed.
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
