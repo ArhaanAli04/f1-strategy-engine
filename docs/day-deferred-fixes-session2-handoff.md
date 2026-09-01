@@ -26,7 +26,7 @@
 | 6 | No cross-driver reactive/strategic adaptation in the Monte Carlo | 🔴 deferred, long-term | `race_simulator.py` |
 | 7 | NULL-lap cumulative-sum bug (4 call sites) | 🔴 deferred (pre-existing, CLAUDE.md item A) | `telemetry_service.py`, `strategy_service.py`, `prediction_worker.py` (x2) |
 | 8 | `tire_deg_wet.pkl` needs a real 6-feature retrain | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
-| 9 | Promotion guard has no feature-schema compatibility check | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
+| 9 | Promotion guard has no feature-schema compatibility check | ✅ fixed 2026-09-02 | `scripts/train_models.py`, `scripts/retrain_incremental.py`, `.github/workflows/train-models.yml` |
 | 10 | Tyre models have no track-condition input (dry-INTER/WET modelled as wet) | 🔴 deferred (pre-existing) | `tire_deg_model.py`, `race_simulator.py` |
 | 11 | `telemetry_worker._persist_lap` has the same dispose-on-exception bug as #3 | ✅ fixed 2026-09-01 | `telemetry_worker.py` (also `_persist_tire_stint` — identical bug shape, found and fixed in the same session, not originally scoped) |
 | 12 | Frontend never surfaces the new validation errors to a user | ✅ fixed 2026-09-01 | `web/src/pages/SimulatorPage.tsx`, `desktop/` copy, `mobile/app/simulator.tsx` (not originally scoped — same gap found while reading the file) |
@@ -383,20 +383,47 @@ Full detail: `docs/simulator-issues-wet-model-and-position-context.md`
 Part A, Option 1; CLAUDE.md's own Deferred Wiring entry (added session 2
 today, titled "Retrain a real 6-feature `tire_deg_wet.pkl`").
 
-### 9. Promotion guard needs a feature-schema-compatibility check — pre-existing, still deferred
+### 9. Promotion guard needs a feature-schema-compatibility check — ✅ fixed 2026-09-02
 
-Root cause of item 1a/8: `train_models.py::serialize_evaluate_and_upload`'s
+Was root cause of item 1a/8: `train_models.py::serialize_evaluate_and_upload`'s
 `should_promote = current_holdout_mae is None or holdout_mae < current_
-holdout_mae` compares MAE only — it has no idea the kept incumbent could be a
+holdout_mae` compared MAE only — it had no idea the kept incumbent could be a
 different feature schema than what current inference code builds, so it
-"correctly" kept a model that crashes in production. Proposed fix: write each
-model's `n_features`/`feature_names` into its `.pkl.metrics.json` sidecar at
-`upload_model` time, and reject/force-promote based on a schema match/
-mismatch, not MAE alone. `tire_deg_model.pipeline_feature_count`/`apply_
-incompatible_model_fallbacks` (added today) are a **runtime symptom-guard**,
-not a substitute for this — the guard could still promote a new incompatible
-model in the future and this item would still apply. Full detail:
-CLAUDE.md's own Deferred Wiring entry (added session 2 today).
+"correctly" kept a model that crashes in production. Picked up 2026-09-02; see
+CLAUDE.md's own Notes entry ("Model promotion guard gained a
+feature-schema-compatibility check") for the full writeup — summarized here
+for this doc's own completeness:
+
+- Every sidecar `serialize_evaluate_and_upload` writes now carries
+  `n_features`/`feature_names`/`schema_source`. A confirmed schema mismatch
+  between the production incumbent and the new candidate — or an incumbent
+  `.pkl` that can't even be loaded — now **force-promotes the candidate
+  regardless of `holdout_mae`**, via a new `PromotionOutcome` return type
+  (`reason="schema_mismatch"`), logged loudly and threaded into
+  `retrain_summary.json`/`train-models.yml`'s Slack and release-notes `jq`
+  output.
+- A legacy incumbent's `.pkl` (one that predates this fix, no schema in its
+  sidecar) is downloaded and introspected **once**, then backfilled into its
+  sidecar — every later comparison for that filename reads the sidecar
+  directly, no repeat download.
+- `tire_deg_model.pipeline_feature_count`/`apply_incompatible_model_
+  fallbacks` (item 1a, unchanged) stay in effect as the runtime
+  symptom-guard — this fix closes the promotion-time gap that let an
+  incompatible model reach production in the first place, it doesn't
+  replace the runtime alias.
+- **Item 8 (WET retrain) is now unblocked, not done** — its old "delete the
+  sidecar manually first" workaround is obsolete (the guard force-promotes
+  automatically on the schema mismatch now), but the actual retrain hasn't
+  happened.
+- New tests: `backend/tests/unit/test_train_models.py` (new file, 12 tests —
+  3 direct `fitted_feature_count` cases plus 9 covering the full decision
+  table, including the exact 8-vs-6-feature WET shape force-promoting
+  despite a *worse* `holdout_mae`). Full `pytest backend/tests/unit/ -m
+  unit`: 222 passed, no regressions. `ruff`/`mypy --strict` clean.
+- **Not yet verified against a real training run/S3** — `train-models.yml`
+  currently fetches zero 2026 laps (see CLAUDE.md's escalated
+  GitHub-Actions/FastF1 deferred item), so the first real run exercising
+  this guard should wait for that to be resolved or consciously accepted.
 
 ### 10. Tyre models have no track-condition input — pre-existing, still deferred
 
@@ -511,34 +538,54 @@ completeness:
 
 ---
 
+## Key files touched — 2026-09-02 follow-up (item 9)
+
+| Path | What changed |
+|---|---|
+| `backend/scripts/train_models.py` | New `fitted_feature_count`, `_resolve_incumbent_schema`, `PromotionOutcome`; `serialize_evaluate_and_upload` rewritten with the schema-mismatch decision table; `train_all()`'s 3 call sites pass real `feature_names` (item 9) |
+| `backend/scripts/retrain_incremental.py` | `_promote_and_record` widened `metrics` type, threads `feature_names` through, correctly unpacks `PromotionOutcome` into `summary` (fixes a `json.dumps` crash the old code would have hit); `retrain()`'s 3 call sites pass real `feature_names` (item 9) |
+| `.github/workflows/train-models.yml` | Both `jq` summary lines render `promotion_reason` (item 9) |
+| `backend/tests/unit/test_train_models.py` | new file — 12 tests (item 9) |
+| `CLAUDE.md` | Deferred Wiring entry → ✅ done, 1 new Notes entry, item 8's entry updated (obsolete workaround note), Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | this file |
+
+---
+
 # ANCHOR PROMPT — paste into a new session
 
 ```
-Read docs/day-deferred-fixes-session2-handoff.md in full before doing
+Read CLAUDE.md and docs/day-deferred-fixes-session2-handoff.md in full before doing
 anything else — it documents a completed fix session (WET tyre model alias,
-current_lap validation, a connection-dispose bug fix) and a set of distinct
+current_lap validation, a connection-dispose bug fix), a set of distinct
 deferred items found while validating those fixes against real Belgian GP
-2026 R10 data.
+2026 R10 data, and three of those items (9, 11, 12) already closed in
+follow-up sessions since — see the paragraph below for full current status.
 
 Items 11 (telemetry_worker dispose-on-exception bug, both _persist_lap and
 _persist_tire_stint) and 12 (frontend never surfaced validate_current_lap's
-rejection or a task FAILURE's reason, all three clients) are now both
-✅ done as of a 2026-09-01 follow-up session — see this file's own item 11/12
-sections and CLAUDE.md's Notes entries for what landed.
+rejection or a task FAILURE's reason, all three clients) are ✅ done as of a
+2026-09-01 follow-up session, and item 9 (promotion guard feature-schema
+check) is ✅ done as of a 2026-09-02 follow-up session — see this file's own
+item 9/11/12 sections and CLAUDE.md's Notes entries for what landed on each.
 
-7 items remain in the file's Part 3, independent of each other — pick ONE
+6 items remain in the file's Part 3, independent of each other — pick ONE
 to work on this session, don't try to fix several at once:
 
   4.  predicted_finish_time isn't a real elapsed time (units/naming gap)
-  5.  driver_id_encoded has no real driving-skill signal
+  5.  driver_id_encoded has no real driving-skill signal (a retrain for this
+      is now safer to promote thanks to item 9's schema check)
   6.  No strategic/reactive adaptation between drivers in the Monte Carlo
       (long-term, research-first — don't start here unless that's explicitly
       what's wanted)
   7.  NULL-lap cumulative-sum bug, 4 call sites (this is CLAUDE.md's own
       pre-existing Deferred Wiring item A — read that entry directly, it has
       more detail than the handoff doc repeats)
-  8.  tire_deg_wet.pkl needs a real 6-feature retrain
-  9.  Promotion guard needs a feature-schema-compatibility check
+  8.  tire_deg_wet.pkl needs a real 6-feature retrain (unblocked by item 9 —
+      the old manual-sidecar-deletion workaround is obsolete, but the retrain
+      itself hasn't happened; train-models.yml currently fetches zero 2026
+      laps — see CLAUDE.md's escalated GitHub-Actions/FastF1 item — resolve
+      or consciously accept the base-corpus-only outcome before triggering
+      a real run)
   10. Tyre models have no track-condition input (dry vs wet)
 
 If the user hasn't already told you which item to pick, ask before starting

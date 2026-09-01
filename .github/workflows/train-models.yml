@@ -83,14 +83,14 @@ jobs:
           {
             echo "promoted<<PROMOTED_EOF"
             jq -r 'to_entries[] | select(.value.promoted == true) |
-              "- \(.key): holdout_mae=\(.value.holdout_mae) (previous production: \(.value.previous_production_holdout_mae // "none"))"' \
+              "- \(.key): holdout_mae=\(.value.holdout_mae) reason=\(.value.promotion_reason // "holdout_mae_improved") (previous production: \(.value.previous_production_holdout_mae // "none"))"' \
               retrain_summary.json
             echo "PROMOTED_EOF"
           } >> "$GITHUB_OUTPUT"
           {
             echo "candidates<<CANDIDATES_EOF"
             jq -r 'to_entries[] | select(.value.promoted == false) |
-              "- \(.key): holdout_mae=\(.value.holdout_mae) (current production: \(.value.previous_production_holdout_mae // "none"))"' \
+              "- \(.key): holdout_mae=\(.value.holdout_mae) reason=\(.value.promotion_reason // "holdout_mae_not_improved") (current production: \(.value.previous_production_holdout_mae // "none"))"' \
               retrain_summary.json
             echo "CANDIDATES_EOF"
           } >> "$GITHUB_OUTPUT"
