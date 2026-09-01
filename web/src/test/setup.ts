@@ -17,6 +17,13 @@ Object.defineProperty(window, "matchMedia", {
   })),
 })
 
+// jsdom has no scrollIntoView implementation — Radix Select (SimulatorPage's
+// Driver/Compound dropdowns) calls it internally when its content mounts, and
+// an unstubbed call throws (candidate?.scrollIntoView is not a function),
+// crashing the whole render. Behavior is irrelevant in tests (there's no
+// real scrolling), so a no-op stub is enough.
+Element.prototype.scrollIntoView = vi.fn()
+
 afterEach(() => {
   cleanup()
 })

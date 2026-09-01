@@ -28,8 +28,8 @@
 | 8 | `tire_deg_wet.pkl` needs a real 6-feature retrain | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
 | 9 | Promotion guard has no feature-schema compatibility check | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
 | 10 | Tyre models have no track-condition input (dry-INTER/WET modelled as wet) | 🔴 deferred (pre-existing) | `tire_deg_model.py`, `race_simulator.py` |
-| 11 | `telemetry_worker._persist_lap` has the same dispose-on-exception bug as #3, unfixed | 🔴 deferred | `telemetry_worker.py` |
-| 12 | Frontend never surfaces the new validation errors to a user | 🔴 deferred | `web/src/pages/SimulatorPage.tsx`, `desktop/` copy |
+| 11 | `telemetry_worker._persist_lap` has the same dispose-on-exception bug as #3 | ✅ fixed 2026-09-01 | `telemetry_worker.py` (also `_persist_tire_stint` — identical bug shape, found and fixed in the same session, not originally scoped) |
+| 12 | Frontend never surfaces the new validation errors to a user | ✅ fixed 2026-09-01 | `web/src/pages/SimulatorPage.tsx`, `desktop/` copy, `mobile/app/simulator.tsx` (not originally scoped — same gap found while reading the file) |
 
 Items 7-10 pre-date this session (from
 `docs/simulator-issues-wet-model-and-position-context.md` / existing CLAUDE.md
@@ -166,8 +166,9 @@ colliding with the next `asyncio.run()` in the same test process).
 **Fix:** moved `await get_engine().dispose()` into the same `finally` block
 as the Redis client cleanup in `_run_simulation`, so it now always runs.
 
-**The identical shape exists in `telemetry_worker._persist_lap`, left
-unfixed** — see item 11 below.
+**The identical shape existed in `telemetry_worker._persist_lap` (and
+`_persist_tire_stint`), left unfixed at the time** — see item 11 below,
+fixed in a 2026-09-01 follow-up session.
 
 ### Full verification for 1a-1d
 
@@ -407,57 +408,62 @@ track-condition input"). Nothing new to add here except: today's real-data
 test is a second, independent confirmation this is a live, observable
 problem, not a theoretical one.
 
-### 11. `telemetry_worker._persist_lap` has the same dispose-on-exception bug as item 1d, unfixed
+### 11. `telemetry_worker._persist_lap` has the same dispose-on-exception bug as item 1d — ✅ fixed 2026-09-01
 
-`backend/workers/telemetry_worker.py::_persist_lap` has `async with
-session_factory() as db: ...` with **no** enclosing `try/finally`, then an
-unconditional `await get_engine().dispose()` right before
-`_publish_lap_completed(lap)` — if the block ever raises (a DB constraint
-violation, anything `LapDataCreate.model_validate` didn't already catch), the
-pooled asyncpg connection leaks into whatever `asyncio.run()` call happens
-next in that worker process. Not yet observed to bite in production (that
-failure mode there would look like slow connection-pool exhaustion over many
-failed lap-persists, not an immediate crash — different symptom shape than
-the test-fixture-teardown crash that surfaced item 1d).
+Was deferred explicitly at end-of-session-2, picked up 2026-09-01. See
+CLAUDE.md's own Notes entry ("`telemetry_worker._persist_lap` (and
+`_persist_tire_stint`) skipped `get_engine().dispose()` on exception") for
+the full writeup — summarized here for this doc's own completeness:
 
-**Starting point:** the exact fix already applied to `_run_simulation` —
-move `await get_engine().dispose()` into a `finally` block wrapping the
-`async with session_factory() as db:` block. Should be a small, low-risk
-change; write a regression test first that forces an exception inside the
-`async with` block (e.g. monkeypatch something to raise) and asserts
-`dispose()` still gets called, mirroring how item 1d's bug was actually
-*discovered* (a real integration test hit it) rather than reasoned about
-abstractly. Full detail: CLAUDE.md's own Deferred Wiring entry (added session
-2 today, titled "`telemetry_worker._persist_lap` skips
-`get_engine().dispose()`").
+- **`_persist_lap` fixed as scoped:** `await get_engine().dispose()` moved
+  into a `finally` block wrapping the `async with session_factory() as db:`
+  block — the exact fix already applied to `prediction_worker
+  ._run_simulation` under item 1d. `_publish_lap_completed(lap)` stays
+  outside the `try/finally`, unreachable on any exception, unchanged from
+  before.
+- **`_persist_tire_stint` fixed alongside, not originally scoped:** found
+  while fixing `_persist_lap` — the identical bug shape in the same file
+  (`record_tire_stint`'s persist function), fixed with the same pattern on
+  request, same session.
+- New tests (`backend/tests/unit/test_telemetry_worker.py`, new file): 4
+  tests, one pair per function — forces an exception inside the `async
+  with` block via a minimal `_FakeSession` stand-in and asserts `dispose()`
+  still runs (mirroring how item 1d's bug was originally *discovered*, a
+  real integration test hitting it, rather than reasoned about abstractly),
+  plus a happy-path sibling confirming unchanged success behavior.
+- Verified: `ruff check`/`mypy --strict` clean on both changed files; new
+  test file 4/4 passed; full `backend/tests/unit/ -m unit` 210 passed
+  (206 pre-existing before this item + 4 new), no regressions.
 
-### 12. Frontend never surfaces the new validation errors
+### 12. Frontend never surfaces the new validation errors — ✅ fixed 2026-09-01
 
-Deferred explicitly, by the user's own decision mid-session-2, to a later
-day — the backend correctness fix (item 1c) stands on its own regardless.
-Two gaps, confirmed by reading `web/src/pages/SimulatorPage.tsx` directly:
+Was deferred explicitly, by the user's own decision mid-session-2, to a
+later day. Picked up 2026-09-01; see CLAUDE.md's own Notes entry ("Frontend
+never surfaced validate_current_lap's rejection or a task FAILURE's
+reason") for the full writeup — summarized here for this doc's own
+completeness:
 
-- `handleRunSimulation`'s `await simulateMutation.mutateAsync(payload)` (the
-  initial `POST /simulate` call) has no error handling around it at all — a
-  new `404`/`422` from `validate_current_lap` would currently just be an
-  unhandled promise rejection in the browser.
-- The async-task-`FAILURE` UI path (step 3's status card) renders a fixed
-  string `"Simulation failed."` regardless of what actually went wrong — it
-  never reads the underlying error message.
-- `web/src/utils/errors.ts::getApiErrorMessage` already exists and correctly
-  parses this exact backend error shape (`{message, detail}` from
-  `f1_strategy_error_handler`) — it's just not called anywhere in
-  `SimulatorPage.tsx` today. Wiring it in is likely most of the fix for the
-  first gap; the second (task `FAILURE`) needs a bit more thought since
-  `GET /simulate/{task_id}`'s `SimulateTaskStatusResponse` doesn't currently
-  carry the failure's error message at all — check whether `AsyncResult
-  .result` (an exception instance on failure) is worth surfacing through
-  that schema, or whether that's out of scope and only the synchronous
-  route-level rejection is worth fixing.
-- Per the Desktop Sync Protocol (see `desktop/src/README.md`), whatever
-  changes here also need porting to `desktop/src/pages/SimulatorPage.tsx`
-  (copied-and-adapted, not shared) — check that file too, don't assume it's
-  identical.
+- **Synchronous rejection:** `handleRunSimulation`'s `mutateAsync` call is
+  now try/caught; `setStep(3)` only runs on success; the rejection renders
+  inline on step 2 via `getApiErrorMessage` (already existed, just wasn't
+  called here). `handleReset` calls `simulateMutation.reset()`.
+- **Async task `FAILURE`:** `SimulateTaskStatusResponse` gained `error: str
+  | None`, populated by `get_simulation_result` — an `F1StrategyError`'s own
+  `.message` passes through verbatim (verified against a real Celery
+  `RedisBackend`, `task_serializer="json"` faithfully reconstructs known
+  exception classes), anything else becomes a fixed generic string (this
+  route is unauthenticated, so no arbitrary exception text is ever echoed).
+- **Ported to all three clients, not just web + desktop as originally
+  scoped:** `mobile/app/simulator.tsx` had the identical gap (bare
+  `mutateAsync`, hardcoded `"Simulation failed."`) — not mentioned above
+  when this item was written, found while reading the file at the start of
+  the follow-up session, fixed alongside using the same
+  `getApiErrorMessage`/`role="alert"` pattern already established in
+  `mobile/app/(auth)/login.tsx`.
+- New tests: 2 backend integration tests (`test_strategy_endpoint.py`), 2
+  web tests (`SimulatorPage.test.tsx`, new file). `desktop`/`mobile` have no
+  test runner — verified via `tsc --noEmit` only, per their own existing
+  sync-protocol convention.
 
 ---
 
@@ -483,6 +489,28 @@ Two gaps, confirmed by reading `web/src/pages/SimulatorPage.tsx` directly:
 
 ---
 
+## Key files touched — 2026-09-01 follow-up (items 11 & 12)
+
+| Path | What changed |
+|---|---|
+| `backend/schemas/simulate_schema.py` | `SimulateTaskStatusResponse.error: str \| None` (item 12) |
+| `backend/apis/v1/strategy.py` | `get_simulation_result` derives `error` on `FAILURE` — `F1StrategyError.message` pass-through, generic fallback otherwise (item 12) |
+| `backend/tests/integration/test_strategy_endpoint.py` | 2 new tests — `F1StrategyError` pass-through, generic-exception safe-message (item 12) |
+| `backend/workers/telemetry_worker.py` | `_persist_lap` **and** `_persist_tire_stint` — dispose moved into `finally` (item 11) |
+| `backend/tests/unit/test_telemetry_worker.py` | new file — 4 tests, one raise/success pair per function (item 11) |
+| `web/src/pages/SimulatorPage.tsx` | try/caught `mutateAsync`, inline error banner, `error`-aware `FAILURE` text, `reset()` on `handleReset` (item 12) |
+| `web/src/types/simulate.ts` | `SimulateTaskStatusResponse.error` (item 12) |
+| `web/src/test/setup.ts` | `scrollIntoView` jsdom stub — reusable infra, not scoped to item 12 alone (item 12) |
+| `web/src/__tests__/SimulatorPage.test.tsx` | new file — 2 tests (item 12) |
+| `desktop/src/pages/SimulatorPage.tsx` | same fix as web's copy (item 12) |
+| `desktop/src/types/simulate.ts` | `SimulateTaskStatusResponse.error` (item 12) |
+| `mobile/app/simulator.tsx` | same fix — not originally scoped, found while reading the file (item 12) |
+| `mobile/src/types/simulate.ts` | `SimulateTaskStatusResponse.error` (item 12) |
+| `CLAUDE.md` | 2 new ✅-fixed Notes entries (items 11 & 12), Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | this file |
+
+---
+
 # ANCHOR PROMPT — paste into a new session
 
 ```
@@ -492,8 +520,14 @@ current_lap validation, a connection-dispose bug fix) and a set of distinct
 deferred items found while validating those fixes against real Belgian GP
 2026 R10 data.
 
-The deferred items, in the file's Part 3, are independent of each other —
-pick ONE to work on this session, don't try to fix several at once:
+Items 11 (telemetry_worker dispose-on-exception bug, both _persist_lap and
+_persist_tire_stint) and 12 (frontend never surfaced validate_current_lap's
+rejection or a task FAILURE's reason, all three clients) are now both
+✅ done as of a 2026-09-01 follow-up session — see this file's own item 11/12
+sections and CLAUDE.md's Notes entries for what landed.
+
+7 items remain in the file's Part 3, independent of each other — pick ONE
+to work on this session, don't try to fix several at once:
 
   4.  predicted_finish_time isn't a real elapsed time (units/naming gap)
   5.  driver_id_encoded has no real driving-skill signal
@@ -506,10 +540,6 @@ pick ONE to work on this session, don't try to fix several at once:
   8.  tire_deg_wet.pkl needs a real 6-feature retrain
   9.  Promotion guard needs a feature-schema-compatibility check
   10. Tyre models have no track-condition input (dry vs wet)
-  11. telemetry_worker._persist_lap has the same dispose-on-exception bug
-      already fixed in prediction_worker._run_simulation
-  12. Frontend (SimulatorPage.tsx, web + desktop) never surfaces the new
-      current_lap validation errors to a user
 
 If the user hasn't already told you which item to pick, ask before starting
 — several of these (5, 6 especially) are moderate-to-large scope changes
