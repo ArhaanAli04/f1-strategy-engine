@@ -21,7 +21,7 @@
 | 1 | WET tyre model 8-vs-6 feature schema mismatch (crashes any WET-compound sim) | ✅ fixed | `tire_deg_model.py`, `race_simulator.py`, both `_load_models` copies |
 | 2 | `current_lap` had zero validation anywhere — a 68-lap what-if silently ran against a 44-lap race | ✅ fixed | `simulate_schema.py`, `strategy_service.py`, `apis/v1/strategy.py`, `prediction_worker.py` |
 | 3 | `_run_simulation` skipped `get_engine().dispose()` on any exception (found while testing #2) | ✅ fixed | `prediction_worker.py` |
-| 4 | `predicted_finish_time` isn't a real elapsed time, just relative deltas | 🔴 deferred | `race_simulator.py` |
+| 4 | `predicted_finish_time` isn't a real elapsed time, just relative deltas | ✅ fixed 2026-09-03 | `race_simulator.py`, `prediction_worker.py`, `web`/`desktop` formatters + `SimulatorPage.tsx` |
 | 5 | `driver_id_encoded` has no real skill signal (hash only) | 🔴 deferred | `race_simulator.py`, `tire_deg_model.py`, `pit_predictor.py` |
 | 6 | No cross-driver reactive/strategic adaptation in the Monte Carlo | 🔴 deferred, long-term | `race_simulator.py` |
 | 7 | NULL-lap cumulative-sum bug (4 call sites) | ✅ fixed 2026-09-02 | `telemetry_service.py`, `strategy_service.py`, `prediction_worker.py` (x2), new migration + `backfill_lap_session_time.py` |
@@ -258,6 +258,19 @@ represents** (see `race_simulator.py:417-542`):
   forecast to hit one specific real outcome — none of this was introduced by
   today's fixes.
 
+**⚠️ Correction (2026-09-03): the "real final cumulative time of 4604.0s"
+above is wrong — it predates item 7's fix and was itself computed via the
+exact `SUM(lap_time_seconds)`-drops-NULL-laps bug item 7 fixed.** VER's pit
+in/out laps around lap 18 are exactly the kind of NULL-time lap that method
+silently drops, undercounting his real total. The validated ground truth
+(via `LapData.session_elapsed_seconds`, accurate to ≤0.18s against FastF1's
+own classification — see CLAUDE.md's item-A Notes entry) is **5094.285s**,
+not 4604.0s — a ~490s difference. This does not change finding 2 above
+(`position_gain_loss` is still mechanically sound and still misses VER's
+real +1 gain for the same items-5/6 reasons); it only means the *magnitude*
+of finding 1's gap was itself unreliable. See item 4's own section below for
+the real comparison against the corrected 5094.285s figure.
+
 ---
 
 ## Part 3 — Deferred items, one section each
@@ -265,7 +278,7 @@ represents** (see `race_simulator.py:417-542`):
 Each section below is written to be picked up independently — you shouldn't
 need to re-read this whole document to work on just one.
 
-### 4. `predicted_finish_time` is not a real elapsed race time (units/naming gap)
+### 4. `predicted_finish_time` is not a real elapsed race time (units/naming gap) — ✅ fixed 2026-09-03
 
 **Core issue:** the API response field `predicted_finish_time` (and
 `confidence_interval`, both sourced from `DriverPositionDistribution
@@ -308,6 +321,46 @@ asking the person who owns the product decision:**
 - Either way, `position_gain_loss` (the actually-reliable field) is
   unaffected by whichever option is chosen — don't let (b)'s implementation
   accidentally touch the ranking logic.
+
+**Fixed via option (b) ("make it real"), picked after asking the product
+owner directly** (per this section's own "don't assume" guidance). See
+CLAUDE.md's own Notes entry ("`predicted_finish_time` made a real elapsed
+time") for the full writeup — summarized here for this doc's own
+completeness:
+
+- New `DriverRaceState.baseline_lap_time_seconds` (each driver's own real
+  median lap time through `current_lap`, computed by `prediction_worker
+  ._build_race_state` via `percentile_cont(0.5)` — the same definition
+  `tire_deg_model.add_engineered_features` uses for `lap_time_delta`'s own
+  training baseline) is added to every simulated lap alongside the model's
+  delta, so `cumulative_race_time_seconds` becomes a genuine absolute time.
+  A driver with no median of their own falls back to the field's median
+  (not 0.0, which would falsely rank them P1). The SC lap-time constant now
+  scales off the field's median baseline (`SC_LAP_TIME_MULTIPLIER = 1.4`)
+  instead of a small fixed value, for the same real-absolute-time reason.
+- `web`/`desktop` gained `formatRaceTime` (h:mm:ss.sss) and now use it for
+  the Finish Time columns/tooltip, replacing `formatLapTime` (which has no
+  hours segment). Mobile renders neither field — no change needed there.
+- **Validated against real data, not just tests:** re-ran this doc's own
+  Test 2 (VER's real pit stop replayed) against the real worker — landed
+  within **21.5s (0.4%)** of VER's real finish time (see the ⚠️ Correction
+  above Part 3 for the corrected 5094.285s ground truth), versus the old
+  value being off by ~3400s (67x). Re-ran Test 1 (ANT) too: `position_gain_
+  loss` shifted by exactly -1 on both variants (-6→-7, -5→-6) — the
+  expected, flagged side effect of real pace now propagating over the
+  remaining laps instead of the starting gap staying frozen, not a
+  regression. Item 10 (no track-condition input) confirmed still
+  unaffected: INTER (1b) still shows a lower cost than MEDIUM (1a),
+  unchanged in direction.
+- Tests: 3 new in `test_race_simulator.py` (direct `_advance_lap` baseline
+  arithmetic, SC-lap-time derivation end-to-end via `simulate_race`), 2 new
+  in `test_prediction_worker.py` (field-median fallback, zero-when-field-
+  has-none), 4 new in `web/src/__tests__/formatters.test.ts`. Full `pytest
+  backend/tests/unit/ -m unit`: 236 passed. Full `pytest backend/tests/
+  integration/ -m integration` (real testcontainers): 45 passed. `ruff`/
+  `ruff format --check`/`mypy --strict` clean across `backend/`. `web`:
+  `vitest run` 32 passed, `tsc --noEmit` clean, `oxlint` clean. `desktop`/
+  `mobile`: `tsc --noEmit` clean.
 
 ### 5. `driver_id_encoded` has no real skill signal
 
@@ -609,6 +662,23 @@ completeness:
 
 ---
 
+## Key files touched — 2026-09-03 follow-up (item 4)
+
+| Path | What changed |
+|---|---|
+| `backend/services/ml/race_simulator.py` | New `DriverRaceState.baseline_lap_time_seconds`, `_advance_lap` adds it per racing lap, `SC_LAP_TIME_MULTIPLIER`-derived SC lap time, module docstring updated (item 4) |
+| `backend/workers/prediction_worker.py` | `_build_race_state`'s existing batched `cumulative_time_query` gained a `percentile_cont(0.5)` column (no new DB round trip); field-median fallback chain; wired into both `DriverRaceState` construction sites (item 4) |
+| `web/src/utils/formatters.ts`, `desktop/src/utils/formatters.ts` | New `formatRaceTime` (h:mm:ss.sss), kept identical between web/desktop (item 4) |
+| `web/src/pages/SimulatorPage.tsx`, `desktop/src/pages/SimulatorPage.tsx` | `formatLapTime` → `formatRaceTime` at all finish-time call sites (item 4) |
+| `web/src/components/landing/FeatureTiles.tsx` | Landing mock's `SimulatorTile` finish-time render switched to `formatRaceTime` (item 4) |
+| `backend/tests/unit/test_race_simulator.py` | 3 new tests (item 4) |
+| `backend/tests/unit/test_prediction_worker.py` | 2 new tests (item 4) |
+| `web/src/__tests__/formatters.test.ts` | 4 new tests (item 4) |
+| `CLAUDE.md` | New ✅ Notes entry for item 4; condensed the item 7/9/11/12 Notes entries (bloat control — see this session's own request); Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | This file — item 4 → ✅ fixed in the TL;DR table and its own Part 3 section, plus a ⚠️ Correction note on the stale 4604.0s Test-2 ground-truth figure (Part 2) |
+
+---
+
 # ANCHOR PROMPT — paste into a new session
 
 ```
@@ -616,7 +686,7 @@ Read CLAUDE.md and docs/day-deferred-fixes-session2-handoff.md in full before do
 anything else — it documents a completed fix session (WET tyre model alias,
 current_lap validation, a connection-dispose bug fix), a set of distinct
 deferred items found while validating those fixes against real Belgian GP
-2026 R10 data, and four of those items (7, 9, 11, 12) already closed in
+2026 R10 data, and five of those items (4, 7, 9, 11, 12) already closed in
 follow-up sessions since — see the paragraph below for full current status.
 
 Items 11 (telemetry_worker dispose-on-exception bug, both _persist_lap and
@@ -624,17 +694,21 @@ _persist_tire_stint) and 12 (frontend never surfaced validate_current_lap's
 rejection or a task FAILURE's reason, all three clients) are ✅ done as of a
 2026-09-01 follow-up session; item 9 (promotion guard feature-schema check)
 and item 7 (NULL-lap cumulative-sum bug, CLAUDE.md's own Deferred Wiring
-item A) are both ✅ done as of 2026-09-02 follow-up sessions — see this
-file's own item 7/9/11/12 sections and CLAUDE.md's Notes entries for what
-landed on each. Item 7's fix also surfaced a new, distinct, pre-existing
-CLAUDE.md Deferred Wiring entry ("No F1 penalty/post-race-classification
-data is ingested anywhere") — read that if working anywhere near
-`_compute_session_gaps`/`lap_data.position`.
+item A) are both ✅ done as of 2026-09-02 follow-up sessions; item 4
+(predicted_finish_time made a real elapsed time) is ✅ done as of a
+2026-09-03 follow-up session — see this file's own item 4/7/9/11/12
+sections and CLAUDE.md's Notes entries for what landed on each. Item 7's
+fix also surfaced a new, distinct, pre-existing CLAUDE.md Deferred Wiring
+entry ("No F1 penalty/post-race-classification data is ingested anywhere")
+— read that if working anywhere near `_compute_session_gaps`/
+`lap_data.position`. Item 4's fix also caught a stale ground-truth figure
+in this doc's own Part 2 Test 2 (the old "4604.0s" was itself computed via
+the pre-item-7 SUM(lap_time_seconds) bug) — see the ⚠️ Correction note
+there before citing that section's numbers.
 
-5 items remain in the file's Part 3, independent of each other — pick ONE
+4 items remain in the file's Part 3, independent of each other — pick ONE
 to work on this session, don't try to fix several at once:
 
-  4.  predicted_finish_time isn't a real elapsed time (units/naming gap)
   5.  driver_id_encoded has no real driving-skill signal (a retrain for this
       is now safer to promote thanks to item 9's schema check)
   6.  No strategic/reactive adaptation between drivers in the Monte Carlo

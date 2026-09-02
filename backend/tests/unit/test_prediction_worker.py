@@ -69,10 +69,12 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         (driver_b_id, lap_b.position, None),
     ]
 
+    # 3rd column is each driver's own median lap_time_seconds through
+    # current_lap (percentile_cont(0.5)) — see baseline_lap_time_seconds.
     cumulative_time_result = MagicMock()
     cumulative_time_result.all.return_value = [
-        (driver_a_id, 4321.5),
-        (driver_b_id, 4310.0),
+        (driver_a_id, 4321.5, 91.2),
+        (driver_b_id, 4310.0, 90.5),
     ]
 
     captured_queries: list[Any] = []
@@ -108,9 +110,11 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         58,
     )
 
-    # Exactly one query for cumulative time regardless of field size — the N+1 fix
-    # this test guards: 4 total db.execute() calls (context, latest_laps, position,
-    # cumulative_time), never one more per driver.
+    # Exactly one query for cumulative time (and baseline_lap_time_seconds,
+    # selected in the same query — see item 4's Checkpoint 2) regardless of
+    # field size — the N+1 fix this test guards: 4 total db.execute() calls
+    # (context, latest_laps, position, cumulative_time), never one more per
+    # driver, and no extra query added for the baseline either.
     assert len(captured_queries) == 4
 
     cumulative_time_query = captured_queries[3]
@@ -123,11 +127,14 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     assert f"lap_number <= {current_lap}" in compiled
     assert f"lap_number <= {lap_a.lap_number}" not in compiled
     assert f"lap_number <= {lap_b.lap_number}" not in compiled
+    assert "percentile_cont" in compiled
 
     driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
     driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
     assert driver_a_state.cumulative_race_time_seconds == 4321.5
     assert driver_b_state.cumulative_race_time_seconds == 4310.0
+    assert driver_a_state.baseline_lap_time_seconds == pytest.approx(91.2)
+    assert driver_b_state.baseline_lap_time_seconds == pytest.approx(90.5)
 
 
 @pytest.mark.unit
@@ -164,7 +171,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
     position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 0.0, 88.0)]
 
     mock_db_session.execute.side_effect = [
         context_result,
@@ -235,7 +242,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
     position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 0.0, 88.0)]
 
     captured_queries: list[Any] = []
 
@@ -401,7 +408,7 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
 
     # Present but must be ignored in favour of the 900.5 above.
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 1.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 1.0, 88.0)]
 
     mock_db_session.execute.side_effect = [
         context_result,
@@ -428,3 +435,150 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
     assert driver_state.cumulative_race_time_seconds == pytest.approx(900.5)
+
+
+# --- baseline_lap_time_seconds (item 4: predicted_finish_time should be a real
+# absolute elapsed time, not just an accumulated delta) ---
+
+
+@pytest.mark.unit
+async def test_build_race_state_missing_baseline_falls_back_to_field_median(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A driver with zero valid timed laps through current_lap (no median of
+    their own — the cumulative_time_query's 3rd column is None for them) must
+    get the field's own median baseline_lap_time_seconds, not 0.0 — 0.0 would
+    give them an artificial ~0s/lap pace and rank them P1 in the simulation
+    regardless of their real position.
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    driver_a_id = uuid.uuid4()
+    driver_b_id = uuid.uuid4()
+    driver_c_id = uuid.uuid4()
+    current_lap = 30
+    season, round_number = 2026, 10
+
+    context_result = MagicMock()
+    context_result.one.return_value = (
+        circuit_id,
+        season,
+        round_number,
+        "Circuit de Spa-Francorchamps",
+    )
+
+    lap_a = SimpleNamespace(
+        driver_id=driver_a_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=1
+    )
+    lap_b = SimpleNamespace(
+        driver_id=driver_b_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=2
+    )
+    lap_c = SimpleNamespace(
+        driver_id=driver_c_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=3
+    )
+    latest_laps_result = MagicMock()
+    latest_laps_result.scalars.return_value.all.return_value = [lap_a, lap_b, lap_c]
+
+    position_result = MagicMock()
+    position_result.all.return_value = [
+        (driver_a_id, 1, None),
+        (driver_b_id, 2, None),
+        (driver_c_id, 3, None),
+    ]
+
+    # driver_c has NO median (3rd column None) — unlike driver_a/driver_b's
+    # real values, e.g. every one of their laps through current_lap was an
+    # out-lap/in-lap/SC lap with a NULL lap_time_seconds.
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [
+        (driver_a_id, 2700.0, 90.0),
+        (driver_b_id, 2760.0, 92.0),
+        (driver_c_id, 0.0, None),
+    ]
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
+
+    await fakeredis.set(
+        prediction_worker._weather_key(season, round_number),
+        json.dumps({"track_temp": 25.0, "air_temp": 18.0}),
+    )
+
+    race_state = await prediction_worker._build_race_state(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        driver_a_id,
+        current_lap,
+        "MEDIUM",
+        10,
+        44,
+    )
+
+    driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
+    driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
+    driver_c_state = next(d for d in race_state.drivers if d.driver_id == str(driver_c_id))
+    assert driver_a_state.baseline_lap_time_seconds == pytest.approx(90.0)
+    assert driver_b_state.baseline_lap_time_seconds == pytest.approx(92.0)
+    # median([90.0, 92.0]) = 91.0 — the field median, not either individual
+    # driver's own value, and not 0.0.
+    assert driver_c_state.baseline_lap_time_seconds == pytest.approx(91.0)
+
+
+@pytest.mark.unit
+async def test_build_race_state_baseline_zero_when_field_has_none(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """When NO driver in the field has any median yet (e.g. a genuine pre-race
+    what-if with zero ingested lap_data), baseline_lap_time_seconds collapses
+    to 0.0 for the requester — ranking-neutral, identical to the pre-baseline
+    behaviour, rather than favouring any one driver.
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    requesting_driver_id = uuid.uuid4()
+    season, round_number = 2026, 12
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, season, round_number, "Circuit Zandvoort")
+
+    latest_laps_result = MagicMock()
+    latest_laps_result.scalars.return_value.all.return_value = []
+
+    position_result = MagicMock()
+    position_result.all.return_value = []
+
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = []
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
+
+    await fakeredis.set(
+        prediction_worker._weather_key(season, round_number),
+        json.dumps({"track_temp": 22.0, "air_temp": 17.0}),
+    )
+
+    race_state = await prediction_worker._build_race_state(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        requesting_driver_id,
+        1,
+        "SOFT",
+        0,
+        50,
+    )
+
+    driver_state = next(d for d in race_state.drivers if d.driver_id == str(requesting_driver_id))
+    assert driver_state.baseline_lap_time_seconds == 0.0

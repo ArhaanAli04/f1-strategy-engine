@@ -16,7 +16,7 @@ import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import { exportStrategiesAsCsv } from "@/utils/csvExport"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
-import { formatLapTime } from "@/utils/formatters"
+import { formatRaceTime } from "@/utils/formatters"
 import type { DriverResponse, SimulatedRaceOutcome, SimulateStrategyRequest } from "@/types"
 
 type Step = 1 | 2 | 3 | 4
@@ -531,7 +531,7 @@ export function SimulatorPage() {
                       const change = typeof value === "number" ? value : 0
                       const finishTime =
                         typeof item.payload?.finishTime === "number"
-                          ? formatLapTime(item.payload.finishTime)
+                          ? formatRaceTime(item.payload.finishTime)
                           : "—"
                       return [
                         `${change > 0 ? "+" : ""}${change} position(s), finish ${finishTime}`,
@@ -588,10 +588,10 @@ export function SimulatorPage() {
                       {entry.positionChange}
                     </span>
                     <span className="text-right font-mono tabular-nums text-muted-foreground">
-                      {formatLapTime(entry.finishTime)}
+                      {formatRaceTime(entry.finishTime)}
                     </span>
                     <span className="text-right font-mono tabular-nums text-muted-foreground">
-                      {formatLapTime(entry.confidenceInterval[0])}–{formatLapTime(entry.confidenceInterval[1])}
+                      {formatRaceTime(entry.confidenceInterval[0])}–{formatRaceTime(entry.confidenceInterval[1])}
                     </span>
                   </div>
                 ))}
