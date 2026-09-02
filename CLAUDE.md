@@ -533,17 +533,18 @@ Status:   Item 7 done: NULL-lap cumulative-sum gap/race-time
           is ingested anywhere, so a penalized driver's
           on-track order can disagree with the official
           result — logged as its own new Deferred Wiring
-          entry, not fixed today. 5 items remain in docs/day-
-          deferred-fixes-session2-handoff.md: 4 (predicted_
-          finish_time naming), 5 (driver skill signal), 6
-          (strategic adaptation — research-first), 8 (WET
-          model retrain, low value, unblocked since item 9),
-          10 (track-condition input). Item 7's Supabase
-          backfill is a manual post-merge step (see docs/
-          runbook.md's new "One-time: backfill session_
-          elapsed_seconds on Supabase" section) — cannot run
-          until this branch merges and cd.yml's migrate job
-          adds the column to Supabase.
+          entry, not fixed today. Item 7's Supabase (production)
+          backfill is also done (2026-09-02, after merge) —
+          3,196 rows across the 3 curated sessions, verified
+          against local + FastF1's official classification (see
+          docs/runbook.md's "One-time: backfill session_
+          elapsed_seconds on Supabase" section, now marked done).
+          Item 7 is fully closed, local and production. 5 items
+          remain in docs/day-deferred-fixes-session2-handoff.md:
+          4 (predicted_finish_time naming), 5 (driver skill
+          signal), 6 (strategic adaptation — research-first),
+          8 (WET model retrain, low value, unblocked since
+          item 9), 10 (track-condition input).
 Next:     Continue down the remaining 5 deferred items — no
           single one is recommended next; pick per session
           based on priority/scope. Fly.io deployment (Day 40
@@ -1517,17 +1518,21 @@ entry above for the original bug; this Notes entry covers the fix.
   exercising the new migration from base→head and downgrade/upgrade
   idempotency): **45 passed**. `ruff check`/`ruff format --check`/
   `mypy --strict` clean across the entire `backend/` tree.
-- **Not done, and cannot be done yet:** Supabase (production) backfill —
-  this session only ran against the local Docker Postgres.
-  `session_elapsed_seconds` doesn't exist on Supabase until this branch
-  merges to `main` and `cd.yml`'s `migrate` job applies the migration —
-  running the backfill before that merges is not possible (the column
-  isn't there to write to), not just premature. Correct sequence, a manual
-  post-merge step: see `docs/runbook.md`'s "One-time: backfill
-  session_elapsed_seconds on Supabase" section — (1) merge, confirm the
-  migration job succeeded, (2) then run `backfill_lap_session_time.py`
-  against `SUPABASE_DIRECT_URL` (same pattern as the tyre-degradation
-  backfill above).
+- **✅ Supabase (production) backfill done 2026-09-02**, after this branch
+  merged and `cd.yml`'s `migrate` job applied the migration — confirmed
+  directly first (`information_schema.columns` against
+  `SUPABASE_DIRECT_URL`: column present, 0/3,196 R-session rows populated)
+  before running the backfill, per `docs/runbook.md`'s "One-time: backfill
+  session_elapsed_seconds on Supabase" procedure (now marked done there,
+  kept as the repeatable procedure for a future curated round). **Result:**
+  3,196 rows updated across the 3 curated sessions — Canadian GP 2026 R5
+  (1,211), British GP 2026 R9 (1,113), Belgian GP 2026 R10 (872) — an exact
+  match to the local backfill's per-session counts. Re-verified directly
+  against Supabase afterward: 3,196/3,196 populated, zero NULLs remaining.
+  Spot-checked British GP R9's LEC/RUS/HAM gaps directly on Supabase (RUS
+  +0.399s, HAM +0.806s vs. LEC) — bit-for-bit identical to the local values
+  already verified against FastF1's own official classification above.
+  Item 7 is now fully closed in both local and production.
 
 **Model promotion guard gained a feature-schema-compatibility check —
 item 9 (✅ fixed 2026-09-02):** Root cause of the WET tyre-model

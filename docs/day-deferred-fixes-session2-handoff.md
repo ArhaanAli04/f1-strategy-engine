@@ -387,13 +387,20 @@ for the full write-up — summarized here for this doc's own completeness:
   unit`: 231 passed. Full `pytest backend/tests/integration/ -m
   integration` (real testcontainers): 45 passed. `ruff`/`ruff format
   --check`/`mypy --strict` clean across the entire `backend/` tree.
-- **Not done:** Supabase (production) backfill — this session only ran
-  against the local Docker Postgres. **Cannot be run until after this
-  branch merges to `main`** — the new `session_elapsed_seconds` column
-  itself doesn't exist on Supabase yet; `cd.yml`'s `migrate` job only adds
-  it on merge. Correct sequence and exact commands: `docs/runbook.md`'s new
-  "One-time: backfill session_elapsed_seconds on Supabase" section — merge
-  first, confirm the migration job succeeded, then run the backfill.
+- **✅ Done 2026-09-02, in a follow-up after merge:** Supabase (production)
+  backfill. Confirmed `cd.yml`'s `migrate` job had applied the migration
+  first (queried `information_schema.columns` directly against
+  `SUPABASE_DIRECT_URL` — column existed, 0/3,196 R-session rows
+  populated), then ran the backfill against production. Result: 3,196 rows
+  updated across the 3 curated sessions (Canadian GP R5: 1,211; British GP
+  R9: 1,113; Belgian GP R10: 872) — an exact match to the local counts.
+  Re-verified afterward: 3,196/3,196 populated. Spot-checked British GP
+  R9's LEC/RUS/HAM gaps directly on Supabase (RUS +0.399s, HAM +0.806s) —
+  bit-for-bit identical to the local values already verified against
+  FastF1's own official classification. Full procedure now documented as
+  a completed, repeatable-for-future-rounds runbook entry:
+  `docs/runbook.md`'s "One-time: backfill session_elapsed_seconds on
+  Supabase" section.
 
 ### 8. `tire_deg_wet.pkl` needs a real 6-feature retrain — pre-existing, still deferred
 
@@ -641,16 +648,12 @@ to work on this session, don't try to fix several at once:
       a real run)
   10. Tyre models have no track-condition input (dry vs wet)
 
-Also outstanding, not part of the numbered list above: item 7's Supabase
-(production) backfill was never run — this session's backfill only touched
-the local Docker Postgres, and it CANNOT be run yet regardless — the
-`session_elapsed_seconds` column doesn't exist on Supabase until this
-branch merges to `main` and `cd.yml`'s `migrate` job applies it. Correct
-sequence (a manual post-merge step, not something for a future session to
-attempt before the merge): `docs/runbook.md`'s "One-time: backfill
-session_elapsed_seconds on Supabase" section — (1) merge, confirm the
-migration job succeeded, (2) then run `backfill_lap_session_time.py`
-against `SUPABASE_DIRECT_URL`.
+Item 7's Supabase (production) backfill is also done (2026-09-02, after
+this branch merged) — 3,196 rows across the 3 curated sessions, verified
+against both the local backfill and FastF1's own official classification.
+See `docs/runbook.md`'s "One-time: backfill session_elapsed_seconds on
+Supabase" section (now marked done, kept as the procedure for a future
+round). Nothing outstanding on item 7.
 
 If the user hasn't already told you which item to pick, ask before starting
 — several of these (5, 6 especially) are moderate-to-large scope changes
