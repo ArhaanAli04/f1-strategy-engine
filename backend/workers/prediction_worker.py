@@ -793,8 +793,26 @@ async def _build_race_state(
     # just grouped by driver_id instead of scoped to one — every driver in
     # this loop shares the same up_to_lap (current_lap), so one GROUP BY
     # query covers all of them.
+    # Also selects each driver's own real median lap_time_seconds through
+    # current_lap (percentile_cont(0.5), Postgres's SQL median) in the same
+    # query — see DriverRaceState.baseline_lap_time_seconds. This is the
+    # exact same definition tire_deg_model.add_engineered_features uses for
+    # lap_time_delta's own baseline (df.groupby(["session_id",
+    # "driver_id"])["lap_time_seconds"].median()), just bounded to
+    # lap_number <= current_lap since a forward simulation can't see the
+    # session's full median. Reuses this query's existing GROUP BY
+    # (driver_id) / WHERE (lap_time_seconds IS NOT NULL, matching pandas
+    # .median()'s implicit NaN-skip) shape rather than adding a fourth DB
+    # round trip. Independent of session_elapsed_seconds (item 7's fix,
+    # elapsed_by_driver above) entirely: lap_time_seconds is populated the
+    # same way whether or not a session has been backfilled, so there is no
+    # elapsed-vs-sum-style fallback distinction for this column.
     cumulative_time_query = (
-        select(LapData.driver_id, func.sum(LapData.lap_time_seconds))
+        select(
+            LapData.driver_id,
+            func.sum(LapData.lap_time_seconds),
+            func.percentile_cont(0.5).within_group(LapData.lap_time_seconds),
+        )
         .where(
             LapData.session_id == session_id,
             LapData.lap_number <= current_lap,
@@ -806,6 +824,21 @@ async def _build_race_state(
     cumulative_time_by_driver: dict[uuid.UUID, float] = {
         row[0]: float(row[1] or 0.0) for row in cumulative_time_rows
     }
+    baseline_lap_time_by_driver: dict[uuid.UUID, float] = {
+        row[0]: float(row[2]) for row in cumulative_time_rows if row[2] is not None
+    }
+    # A driver with no median of their own (e.g. zero valid timed laps
+    # through current_lap) falls back to the field's own median baseline,
+    # not 0.0 — 0.0 would give them an artificial ~0s/lap pace and rank them
+    # P1 in the simulation regardless of their real position. Only when NO
+    # driver in the field has a baseline (e.g. the pre-race zero-lap-data
+    # case below) does this collapse to 0.0 for everyone, which is
+    # ranking-neutral — identical to the pre-baseline behaviour — rather
+    # than favouring any one driver.
+    field_baseline_values = list(baseline_lap_time_by_driver.values())
+    field_median_baseline = (
+        float(np.median(field_baseline_values)) if field_baseline_values else 0.0
+    )
 
     drivers: list[DriverRaceState] = []
     requesting_driver_found = False
@@ -836,6 +869,7 @@ async def _build_race_state(
         starting_position = (
             position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
         )
+        baseline_lap_time = baseline_lap_time_by_driver.get(lap.driver_id, field_median_baseline)
         drivers.append(
             DriverRaceState(
                 driver_id=driver_id_str,
@@ -845,12 +879,17 @@ async def _build_race_state(
                 tyre_age_laps=tyre_age_laps,
                 driver_id_encoded=_stable_code(driver_id_str),
                 cumulative_race_time_seconds=cumulative_time,
+                baseline_lap_time_seconds=baseline_lap_time,
             )
         )
 
     if not requesting_driver_found:
         # No persisted lap data yet for the requester (e.g. pre-race what-if) —
         # their request fields are the only state available; race starts fresh.
+        # baseline_lap_time_seconds falls back to the field's own median (0.0
+        # if the field has none either, e.g. a genuinely empty session) since
+        # the requester has no laps of their own to compute a median from —
+        # same fallback rationale as the loop above.
         driver_id_str = str(requesting_driver_id)
         drivers.append(
             DriverRaceState(
@@ -863,6 +902,7 @@ async def _build_race_state(
                 tyre_age_laps=current_tyre_age,
                 driver_id_encoded=_stable_code(driver_id_str),
                 cumulative_race_time_seconds=0.0,
+                baseline_lap_time_seconds=field_median_baseline,
             )
         )
 

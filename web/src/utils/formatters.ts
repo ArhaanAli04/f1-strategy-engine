@@ -10,6 +10,24 @@ export function formatLapTime(seconds: number | null | undefined): string {
   return `${minutes}:${remainder.toFixed(3).padStart(6, "0")}`
 }
 
+// Formats seconds as a race clock: "1:16:44.000" once past an hour, otherwise
+// delegates to formatLapTime ("16:44.000" past a minute, "44.000" below it).
+// For a value that can genuinely span a full race (SimulatedRaceOutcome.
+// predicted_finish_time/confidence_interval — see race_simulator.py's
+// baseline_lap_time_seconds, which made this a real absolute elapsed time,
+// not a small relative delta) — formatLapTime alone has no hours segment and
+// would render a real ~90-minute race as "90:32.104", which reads as
+// implausible lap/sector data rather than a real finish time.
+// null/undefined -> "—".
+export function formatRaceTime(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined) return "—"
+  const hours = Math.floor(seconds / 3600)
+  if (hours <= 0) return formatLapTime(seconds)
+  const minutes = Math.floor((seconds - hours * 3600) / 60)
+  const secondsRemainder = seconds - hours * 3600 - minutes * 60
+  return `${hours}:${String(minutes).padStart(2, "0")}:${secondsRemainder.toFixed(3).padStart(6, "0")}`
+}
+
 // Formats a signed gap in seconds: "+0.234s" / "-1.052s". null/undefined -> "—".
 export function formatGap(seconds: number | null | undefined): string {
   if (seconds === null || seconds === undefined) return "—"

@@ -19,9 +19,11 @@ import pytest
 from backend.services.ml.pit_predictor import FEATURE_COLUMNS as PIT_FEATURE_COLUMNS
 from backend.services.ml.pit_predictor import _build_model
 from backend.services.ml.race_simulator import (
+    SC_LAP_TIME_MULTIPLIER,
     DriverRaceState,
     RaceSimulationInput,
     RaceSimulationResult,
+    _advance_lap,
     _tire_deg_predictions,
     simulate_race,
 )
@@ -190,6 +192,71 @@ def test_tire_deg_predictions_uses_compatible_pipeline_normally(
     assert not np.all(predicted_delta == 0.0)
 
 
+# --- _advance_lap baseline_lap_time_seconds handling (item 4: predicted_finish_time
+# should be a real absolute elapsed time, not just an accumulated delta) ---
+# Direct, deterministic tests of the numba inner loop (noise_std=0.0) — exact
+# arithmetic can be asserted without a Monte Carlo run.
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_advance_lap_adds_baseline_on_a_racing_lap() -> None:
+    cumulative_time = np.array([[1000.0, 2000.0]])
+    tyre_age = np.array([[5, 5]], dtype=np.int64)
+    predicted_delta = np.array([[0.0, 0.0]])
+    baseline_lap_time = np.array([50.0, 80.0])
+    pit_flags = np.array([[False, False]])
+    sc_active = np.array([False])
+
+    _advance_lap(
+        cumulative_time,
+        tyre_age,
+        predicted_delta,
+        baseline_lap_time,
+        0.0,  # noise_std
+        pit_flags,
+        22.0,  # pit_stop_seconds
+        sc_active,
+        999.0,  # sc_lap_time_seconds — irrelevant, sc not active this lap
+    )
+
+    assert cumulative_time[0, 0] == pytest.approx(1050.0)
+    assert cumulative_time[0, 1] == pytest.approx(2080.0)
+    assert tyre_age[0, 0] == 6
+    assert tyre_age[0, 1] == 6
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_advance_lap_ignores_baseline_on_an_sc_lap() -> None:
+    """sc_lap_time_seconds is already a real absolute lap time in its own right
+    (see simulate_race's derivation) — per-driver baseline_lap_time_seconds must
+    NOT also be added on top during the SC-bunching branch.
+    """
+    cumulative_time = np.array([[1000.0, 1200.0]])
+    tyre_age = np.array([[5, 5]], dtype=np.int64)
+    predicted_delta = np.array([[0.0, 0.0]])
+    baseline_lap_time = np.array([50.0, 999999.0])  # wildly different — must not matter
+    pit_flags = np.array([[False, False]])
+    sc_active = np.array([True])
+
+    _advance_lap(
+        cumulative_time,
+        tyre_age,
+        predicted_delta,
+        baseline_lap_time,
+        0.0,
+        pit_flags,
+        22.0,
+        sc_active,
+        30.0,  # sc_lap_time_seconds
+    )
+
+    expected = 1000.0 + 30.0  # leader_time (min of the two) + sc_lap_time_seconds
+    assert cumulative_time[0, 0] == pytest.approx(expected)
+    assert cumulative_time[0, 1] == pytest.approx(expected)
+
+
 @pytest.mark.unit
 @pytest.mark.slow
 def test_simulate_race_completes_with_one_mismatched_compound(
@@ -347,3 +414,65 @@ def test_forced_pit_laps_changes_outcome_only_for_that_driver(
     assert _finish_time(baseline, forced_driver_id) != pytest.approx(
         _finish_time(forced, forced_driver_id)
     )
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_sc_lap_time_derived_from_field_median_baseline(
+    tire_deg_pipelines: dict[str, Any],
+) -> None:
+    """With SC certain every lap and pitting suppressed, _advance_lap's SC branch
+    bunches the whole field to leader_time + sc_lap_time_seconds each lap — so
+    starting every driver's cumulative_race_time_seconds at 0.0 makes the final
+    mean_finish_time_seconds exactly n_remaining_laps * sc_lap_time_seconds for
+    every driver, letting SC_LAP_TIME_MULTIPLIER's effect be checked precisely
+    end-to-end through simulate_race rather than only via _advance_lap directly.
+    """
+    baseline = 90.0
+    n_remaining_laps = 3  # current_lap=45, total_laps=48, same as the race_state fixture
+    drivers = [
+        DriverRaceState(
+            driver_id=str(uuid.uuid4()),
+            starting_position=i + 1,
+            compound=COMPOUND,
+            compound_encoded=COMPOUND_ENCODED,
+            tyre_age_laps=5,
+            driver_id_encoded=i,
+            cumulative_race_time_seconds=0.0,
+            baseline_lap_time_seconds=baseline,
+        )
+        for i in range(N_DRIVERS)
+    ]
+    race_state_with_baseline = RaceSimulationInput(
+        circuit_name=CIRCUIT_NAME,
+        circuit_id_encoded=0,
+        current_lap=45,
+        total_laps=48,
+        wet_track=False,
+        track_temp=30.0,
+        air_temp=20.0,
+        drivers=drivers,
+    )
+    always_sc_model = MagicMock()
+    always_sc_model.probability_within.return_value = 1.0
+
+    def _no_pit_predict_proba(features: np.ndarray) -> np.ndarray:
+        return np.tile([0.95, 0.05], (features.shape[0], 1))
+
+    no_pit_model = MagicMock()
+    no_pit_model.predict_proba.side_effect = _no_pit_predict_proba
+
+    result = simulate_race(
+        race_state_with_baseline,
+        tire_deg_pipelines,
+        no_pit_model,
+        always_sc_model,
+        n_simulations=10,
+        rng_seed=1,
+    )
+
+    expected_finish_time = n_remaining_laps * (baseline * SC_LAP_TIME_MULTIPLIER)
+    for distribution in result.driver_distributions:
+        assert distribution.mean_finish_time_seconds == pytest.approx(
+            expected_finish_time, abs=1e-6
+        )

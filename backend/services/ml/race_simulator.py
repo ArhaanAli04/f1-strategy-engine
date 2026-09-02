@@ -30,16 +30,32 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   trend across the race at the cost of not matching the training distribution's
   absolute scale. Acceptable since compound/tyre_age dominate the model's splits.
 - cumulative_race_time_seconds accumulates real elapsed race time (input, carrying
-  today's actual gaps) plus simulated lap_time_delta going forward. Since
-  lap_time_delta is relative to each driver's own session median (not absolute pace),
-  this preserves real observed pace differences at simulation start and simulates how
-  tyre wear/variance/pit stops change the field from there — it does not attempt to
-  model absolute per-driver pace.
+  today's actual gaps) plus, for each simulated lap, that driver's own
+  baseline_lap_time_seconds (their real median lap time through current_lap —
+  see DriverRaceState) plus the tire_deg model's predicted lap_time_delta plus
+  noise. Since lap_time_delta is trained as a deviation from the driver's own
+  session median (see tire_deg_model.add_engineered_features), baseline +
+  delta reconstructs a genuine absolute lap time by construction — this makes
+  cumulative_race_time_seconds (and therefore predicted_finish_time in the API
+  response) a real elapsed-time estimate, not just the starting gap held
+  static while small deltas accumulate on top. A caller that omits
+  baseline_lap_time_seconds (defaults to 0.0) gets the old relative-delta-only
+  behaviour for that driver. A real per-driver baseline also means two
+  drivers with genuinely different race pace now diverge further apart over
+  the simulated remainder, instead of holding today's gap fixed for the rest
+  of the race — a real modelling improvement, not just a units fix.
 - After a pit stop, compound is assumed unchanged (no compound-choice model exists
   yet) and tyre age resets to 0.
 - A safety car lap "neutralises gaps" by collapsing every driver's cumulative time to
-  the simulation's current leader time plus a fixed SC lap time — the exact SC lap
-  time value is inconsequential to relative standings since it's applied uniformly.
+  the simulation's current leader time plus an SC lap time — the exact value is
+  inconsequential to relative standings since it's applied uniformly, but now that
+  cumulative_race_time_seconds is a real absolute time (see above), that SC lap time
+  itself must also be a plausible absolute lap time, not a small fixed constant far
+  below real race pace (which would make an SC lap shorten the simulated race).
+  simulate_race derives it from the field's own median baseline_lap_time_seconds
+  (SC_LAP_TIME_MULTIPLIER) when at least one driver has a real baseline, falling back
+  to the fixed SC_LAP_TIME_SECONDS constant only when none do (e.g. a caller that
+  never supplies baseline_lap_time_seconds — see DriverRaceState).
 - LAP_TIME_NOISE_STD_SECONDS is an assumed lap-to-lap variability constant (no
   computed historical variance exists in the codebase yet), in the same spirit as
   tire_deg_model.ASSUMED_START_FUEL_KG.
@@ -65,7 +81,16 @@ logger = logging.getLogger(__name__)
 N_SIMULATIONS = 1000
 PIT_STOP_SECONDS = 22.0
 LAP_TIME_NOISE_STD_SECONDS = 0.35
+# Fallback SC lap time when no driver in the field has a real
+# baseline_lap_time_seconds (see DriverRaceState / SC_LAP_TIME_MULTIPLIER
+# below) — kept as the pre-existing constant for that degraded case only.
 SC_LAP_TIME_SECONDS = 25.0
+# An SC lap is slower than green-flag pace (bunched field, delta neutralised)
+# but still a real, plausible absolute lap time — applied to the field's own
+# median baseline_lap_time_seconds when at least one driver has one. 1.4 is
+# an assumed multiplier (no computed historical SC-lap-time data exists in
+# this codebase), same spirit as LAP_TIME_NOISE_STD_SECONDS.
+SC_LAP_TIME_MULTIPLIER = 1.4
 MIN_LAPS_BETWEEN_PITS = 5
 
 
@@ -86,6 +111,17 @@ class DriverRaceState:
     tyre_age_laps: int
     driver_id_encoded: int
     cumulative_race_time_seconds: float = 0.0
+    # This driver's own real median lap time (seconds) through current_lap —
+    # see prediction_worker._build_race_state, which computes it the same way
+    # tire_deg_model.add_engineered_features defines lap_time_delta's baseline
+    # (per-driver session median), just bounded to laps <= current_lap since a
+    # forward simulation can't see the session's full median. Added to every
+    # simulated lap's predicted delta so cumulative_race_time_seconds
+    # accumulates a real absolute time (see this module's docstring) instead
+    # of only the small delta-from-median. Default 0.0: a caller that omits
+    # this (e.g. an older/synthetic test fixture) gets the pre-existing
+    # relative-delta-only behaviour for that driver, unchanged.
+    baseline_lap_time_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +166,7 @@ def _advance_lap(
     cumulative_time: npt.NDArray[np.float64],
     tyre_age: npt.NDArray[np.int64],
     predicted_delta: npt.NDArray[np.float64],
+    baseline_lap_time: npt.NDArray[np.float64],
     noise_std: float,
     pit_flags: npt.NDArray[np.bool_],
     pit_stop_seconds: float,
@@ -148,6 +185,12 @@ def _advance_lap(
         cumulative_time: (n_sims, n_drivers) elapsed race time in seconds, mutated.
         tyre_age: (n_sims, n_drivers) laps on current tyre, mutated.
         predicted_delta: (n_sims, n_drivers) tire_deg-model-predicted lap time delta.
+        baseline_lap_time: (n_drivers,) each driver's own real median lap time
+            (DriverRaceState.baseline_lap_time_seconds) — added on top of
+            predicted_delta on a racing lap so cumulative_time accumulates a real
+            absolute lap time, not just the delta. Not applied on an SC lap: the
+            caller's sc_lap_time_seconds is already a real absolute lap time in
+            its own right (see this function's caller).
         noise_std: Standard deviation of the per-lap Gaussian noise term.
         pit_flags: (n_sims, n_drivers) whether this driver pits this lap.
         pit_stop_seconds: Fixed pit stop time loss.
@@ -173,7 +216,7 @@ def _advance_lap(
         else:
             for d in range(n_drivers):
                 noise = np.random.normal(0.0, noise_std)
-                cumulative_time[s, d] += predicted_delta[s, d] + noise
+                cumulative_time[s, d] += baseline_lap_time[d] + predicted_delta[s, d] + noise
                 tyre_age[s, d] += 1
                 if pit_flags[s, d]:
                     cumulative_time[s, d] += pit_stop_seconds
@@ -431,6 +474,23 @@ def simulate_race(
         (n_simulations, 1),
     )
     driver_id_encoded = np.array([d.driver_id_encoded for d in race_state.drivers], dtype=np.int64)
+    # Static for the whole simulation — a driver's own real median pace does
+    # not change mid-race (unlike compound/tyre age, which forced_pit_laps
+    # can mutate). See DriverRaceState.baseline_lap_time_seconds.
+    baseline_lap_time = np.array(
+        [d.baseline_lap_time_seconds for d in race_state.drivers], dtype=np.float64
+    )
+    # SC lap time must itself be a real absolute lap time now that
+    # cumulative_time accumulates one (see module docstring) — derived from
+    # the field's own median baseline when at least one driver has a real,
+    # nonzero baseline; falls back to the fixed constant only when none do
+    # (e.g. every DriverRaceState omitted baseline_lap_time_seconds).
+    nonzero_baselines = baseline_lap_time[baseline_lap_time > 0]
+    sc_lap_time_seconds = (
+        float(np.median(nonzero_baselines)) * SC_LAP_TIME_MULTIPLIER
+        if nonzero_baselines.size > 0
+        else SC_LAP_TIME_SECONDS
+    )
 
     driver_index_by_id = {d.driver_id: i for i, d in enumerate(race_state.drivers)}
     # Mutable per-lap state — unlike everything else derived from race_state
@@ -502,11 +562,12 @@ def simulate_race(
             cumulative_time,
             tyre_age,
             predicted_delta,
+            baseline_lap_time,
             LAP_TIME_NOISE_STD_SECONDS,
             pit_flags,
             PIT_STOP_SECONDS,
             sc_active,
-            SC_LAP_TIME_SECONDS,
+            sc_lap_time_seconds,
         )
 
         if forced_pit_laps:
