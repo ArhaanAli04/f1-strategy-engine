@@ -1,4 +1,4 @@
-.PHONY: install dev dev-down test test-unit test-int test-integration test-e2e lint type-check migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data ingest-live warm-cache fly-race-up fly-race-down
+.PHONY: install dev dev-down test test-unit test-int test-integration test-e2e lint type-check migrate new-migration train seed seed-circuits seed-teams ingest ingest-season backfill-tire-data backfill-lap-session-time ingest-live warm-cache fly-race-up fly-race-down
 
 # Installs the backend (editable, with dev extras — there is no
 # backend/requirements.txt, dependencies are declared in pyproject.toml)
@@ -75,6 +75,9 @@ ingest-season:
 
 backfill-tire-data:
 	python backend/scripts/backfill_tire_data.py $(if $(SEASON),--season $(SEASON),)
+
+backfill-lap-session-time:
+	python backend/scripts/backfill_lap_session_time.py $(if $(SEASON),--season $(SEASON),) $(if $(ROUND),--round $(ROUND),)
 
 ingest-live:
 	python backend/scripts/ingest_live_session.py --season $(SEASON) $(if $(ROUND),--round $(ROUND) --session-type $(SESSION_TYPE),--poll)

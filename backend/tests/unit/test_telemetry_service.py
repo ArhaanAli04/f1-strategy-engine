@@ -75,7 +75,8 @@ async def test_session_gaps_returns_all_20_drivers(mock_db_session: AsyncMock) -
             "driver_id": driver_id,
             "lap_number": 20,
             "position": i + 1,
-            "cumulative_seconds": 1800.0 + i * 0.5,
+            "session_elapsed_seconds": 1800.0 + i * 0.5,
+            "fallback_cumulative_seconds": None,
         }
         for i, driver_id in enumerate(driver_ids)
     ]
@@ -259,7 +260,15 @@ async def test_get_session_gaps_returns_gaps(
 ) -> None:
     session_id = uuid.uuid4()
     driver_id = uuid.uuid4()
-    rows = [{"driver_id": driver_id, "lap_number": 10, "position": 1, "cumulative_seconds": 900.0}]
+    rows = [
+        {
+            "driver_id": driver_id,
+            "lap_number": 10,
+            "position": 1,
+            "session_elapsed_seconds": 900.0,
+            "fallback_cumulative_seconds": None,
+        }
+    ]
     mock_db_session.execute.return_value = _rows_result(rows)
 
     result = await telemetry_service.get_session_gaps(
@@ -284,8 +293,20 @@ async def test_get_session_gaps_ranks_lapped_driver_behind_despite_smaller_cumul
     driver_a = uuid.uuid4()
     driver_b = uuid.uuid4()
     rows = [
-        {"driver_id": driver_b, "lap_number": 57, "position": 1, "cumulative_seconds": 5300.0},
-        {"driver_id": driver_a, "lap_number": 58, "position": 1, "cumulative_seconds": 5400.0},
+        {
+            "driver_id": driver_b,
+            "lap_number": 57,
+            "position": 1,
+            "session_elapsed_seconds": 5300.0,
+            "fallback_cumulative_seconds": None,
+        },
+        {
+            "driver_id": driver_a,
+            "lap_number": 58,
+            "position": 1,
+            "session_elapsed_seconds": 5400.0,
+            "fallback_cumulative_seconds": None,
+        },
     ]
     mock_db_session.execute.return_value = _rows_result(rows)
 
@@ -295,6 +316,110 @@ async def test_get_session_gaps_ranks_lapped_driver_behind_despite_smaller_cumul
 
     gaps_by_driver = {gap["driver_id"]: gap for gap in result["gaps"]}
     assert gaps_by_driver[str(driver_a)]["position"] < gaps_by_driver[str(driver_b)]["position"]
+
+
+@pytest.mark.unit
+async def test_compute_session_gaps_prefers_session_elapsed_seconds_over_fallback(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A backfilled historical session (session_elapsed_seconds populated) must
+    compute gaps from it directly — not from fallback_cumulative_seconds, even
+    when both are present on the same row. Values are chosen so the two sources
+    would produce a DIFFERENT gap if the wrong one were used (100.0 vs 900.0),
+    making this a real discriminating test, not just a "doesn't crash" check.
+    """
+    session_id = uuid.uuid4()
+    driver_ahead = uuid.uuid4()
+    driver_behind = uuid.uuid4()
+    rows = [
+        {
+            "driver_id": driver_ahead,
+            "lap_number": 10,
+            "position": 1,
+            "session_elapsed_seconds": 900.0,
+            "fallback_cumulative_seconds": 100.0,
+        },
+        {
+            "driver_id": driver_behind,
+            "lap_number": 10,
+            "position": 2,
+            "session_elapsed_seconds": 905.0,
+            "fallback_cumulative_seconds": 999.0,
+        },
+    ]
+    mock_db_session.execute.return_value = _rows_result(rows)
+
+    result = await telemetry_service._compute_session_gaps(mock_db_session, session_id)
+
+    gaps_by_driver = {gap["driver_id"]: gap for gap in result["gaps"]}
+    # 905.0 - 900.0 = 5.0 (session_elapsed_seconds-derived) — a fallback-derived
+    # result would be 999.0 - 100.0 = 899.0, an easily distinguishable wrong value.
+    assert gaps_by_driver[str(driver_behind)]["gap_to_ahead_seconds"] == pytest.approx(5.0)
+
+
+@pytest.mark.unit
+async def test_compute_session_gaps_falls_back_when_session_elapsed_seconds_null(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A live-ingested session (session_elapsed_seconds never backfilled — see
+    CLAUDE.md Deferred Wiring item A) must fall back to fallback_cumulative_seconds
+    (the original SUM(lap_time_seconds) reconstruction) unchanged.
+    """
+    session_id = uuid.uuid4()
+    driver_ahead = uuid.uuid4()
+    driver_behind = uuid.uuid4()
+    rows = [
+        {
+            "driver_id": driver_ahead,
+            "lap_number": 10,
+            "position": 1,
+            "session_elapsed_seconds": None,
+            "fallback_cumulative_seconds": 100.0,
+        },
+        {
+            "driver_id": driver_behind,
+            "lap_number": 10,
+            "position": 2,
+            "session_elapsed_seconds": None,
+            "fallback_cumulative_seconds": 112.5,
+        },
+    ]
+    mock_db_session.execute.return_value = _rows_result(rows)
+
+    result = await telemetry_service._compute_session_gaps(mock_db_session, session_id)
+
+    gaps_by_driver = {gap["driver_id"]: gap for gap in result["gaps"]}
+    assert gaps_by_driver[str(driver_behind)]["gap_to_ahead_seconds"] == pytest.approx(12.5)
+
+
+@pytest.mark.unit
+async def test_compute_session_gaps_defaults_to_zero_when_both_sources_null(
+    mock_db_session: AsyncMock,
+) -> None:
+    """Neither session_elapsed_seconds nor fallback_cumulative_seconds is
+    available (e.g. this row IS a driver's first lap and it has no recorded
+    time, so the windowed SUM over zero non-NULL values is itself NULL) —
+    must default to 0.0, not crash comparing None in the sort key. This case
+    was impossible before the WHERE lap_time_seconds IS NOT NULL filter was
+    removed from _GAPS_QUERY (every previously-returned row guaranteed a
+    non-NULL contribution to its own running sum).
+    """
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    rows = [
+        {
+            "driver_id": driver_id,
+            "lap_number": 1,
+            "position": 1,
+            "session_elapsed_seconds": None,
+            "fallback_cumulative_seconds": None,
+        }
+    ]
+    mock_db_session.execute.return_value = _rows_result(rows)
+
+    result = await telemetry_service._compute_session_gaps(mock_db_session, session_id)
+
+    assert result["gaps"][0]["gap_to_ahead_seconds"] == 0.0
 
 
 @pytest.mark.unit

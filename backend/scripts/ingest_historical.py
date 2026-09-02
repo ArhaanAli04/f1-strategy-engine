@@ -106,6 +106,53 @@ def lap_time_to_seconds(value: pd.Timedelta) -> float | None:
     return float(value.total_seconds())
 
 
+def resolve_session_start(laps: pd.DataFrame) -> pd.Timedelta:
+    """Anchor for session_elapsed_seconds: the earliest LapStartTime across the
+    whole session (lap 1's start, effectively race start), not each driver's
+    own first lap — every driver's LapStartTime for lap 1 is identical in
+    practice (confirmed live: 3339.562s for all 22 drivers, British GP 2026
+    R9), and a single session-wide anchor is what makes session_elapsed_
+    seconds directly comparable across drivers, which is the entire point of
+    that column (see CLAUDE.md Deferred Wiring item A). FastF1's `Time` is
+    already session-clock-relative and internally consistent across drivers
+    on its own — this subtraction only reshapes it into a more legible
+    "seconds since race start" number, it isn't load-bearing for correctness.
+
+    Shared by _upsert_lap_data (fresh ingest) and backfill_lap_session_
+    time.py (backfilling pre-existing rows) so both compute the identical
+    anchor for the same session — do not duplicate this logic inline.
+
+    Args:
+        laps: A loaded FastF1 session's `.laps` DataFrame.
+    Returns:
+        The session-wide anchor Timedelta, or Timedelta(0) (no anchor, raw
+        Time used as-is) if LapStartTime is entirely missing for this session.
+    """
+    if "LapStartTime" not in laps:
+        return pd.Timedelta(0)
+    start = laps["LapStartTime"].dropna().min()
+    return start if pd.notna(start) else pd.Timedelta(0)
+
+
+def compute_session_elapsed_seconds(
+    raw_time: pd.Timedelta | None, session_start: pd.Timedelta
+) -> float | None:
+    """LapData.session_elapsed_seconds for one lap: raw_time anchored to session_start.
+
+    Args:
+        raw_time: A lap row's FastF1 `Time` value (session clock at lap end).
+        session_start: This session's anchor, from resolve_session_start.
+    Returns:
+        Elapsed seconds since session_start, or None if raw_time itself is
+        missing (not observed in practice — FastF1's Time is populated on
+        every lap row, including ones with a NULL LapTime — but handled
+        defensively rather than assumed).
+    """
+    if raw_time is None or pd.isna(raw_time):
+        return None
+    return lap_time_to_seconds(raw_time - session_start)
+
+
 async def _upsert_lap_data(
     db: AsyncSession,
     session_id: uuid.UUID,
@@ -114,6 +161,7 @@ async def _upsert_lap_data(
     driver_code_to_id: dict[str, uuid.UUID],
 ) -> int:
     rows: list[dict[str, object]] = []
+    session_start = resolve_session_start(laps)
 
     for _, lap in tqdm(laps.iterrows(), total=len(laps), desc=f"laps ({session_type})"):
         try:
@@ -125,6 +173,10 @@ async def _upsert_lap_data(
                 logger.warning("Skipping lap with missing LapNumber for driver '%s'", lap["Driver"])
                 continue
 
+            session_elapsed_seconds = compute_session_elapsed_seconds(
+                lap.get("Time"), session_start
+            )
+
             rows.append(
                 {
                     "id": uuid.uuid4(),
@@ -132,6 +184,7 @@ async def _upsert_lap_data(
                     "driver_id": driver_id,
                     "lap_number": int(lap["LapNumber"]),
                     "lap_time_seconds": lap_time_to_seconds(lap["LapTime"]),
+                    "session_elapsed_seconds": session_elapsed_seconds,
                     "compound": or_default(lap["Compound"], "UNKNOWN"),
                     "tyre_age_laps": (int(lap["TyreLife"]) if not pd.isna(lap["TyreLife"]) else 0),
                     "is_valid": (

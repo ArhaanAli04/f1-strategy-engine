@@ -43,6 +43,23 @@ class LapData(Base):
     )
     lap_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lap_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Elapsed session time (seconds since the session's own first recorded
+    # LapStartTime) at the moment this lap was completed — FastF1's `Time`
+    # column, captured directly rather than reconstructed from LapTime deltas.
+    # Unlike lap_time_seconds (a per-lap delta, NULL on any out-lap/in-lap/SC
+    # lap with no recorded time), this is populated on every historically-
+    # ingested lap row regardless of NULL lap_time_seconds — see CLAUDE.md's
+    # Deferred Wiring item A ("NULL-lap cumulative-sum gap/race-time
+    # reconstruction") for why SUM(lap_time_seconds) across drivers with
+    # differing NULL-lap counts produces non-comparable totals, which this
+    # column exists to fix. NULL for a live-ingested session (ingest_live_
+    # session.py's TimingData stream carries no absolute session clock) —
+    # those sessions fall back to the SUM(lap_time_seconds) reconstruction,
+    # same as before this column existed. Only ever populated by
+    # ingest_historical.py; backfilled for pre-existing rows by
+    # backfill_lap_session_time.py (R sessions only — see that script's own
+    # docstring for scope).
+    session_elapsed_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     compound: Mapped[str] = mapped_column(String(20), nullable=False)
     tyre_age_laps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
