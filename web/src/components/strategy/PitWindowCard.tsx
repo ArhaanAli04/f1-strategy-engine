@@ -1,4 +1,4 @@
-import { usePitWindow } from "@/hooks/useStrategy"
+import { useCurrentLapHistoryEntry, usePitWindow } from "@/hooks/useStrategy"
 import { cn } from "@/lib/utils"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
@@ -51,7 +51,37 @@ function formatShapExplanation(shap: FeatureContributionResponse[] | null): stri
 }
 
 export function PitWindowCard({ sessionId, driverId, compact, className }: PitWindowCardProps) {
-  const { data: windows, isLoading } = usePitWindow(sessionId, driverId)
+  const { entry: historyEntry, isReplayActive } = useCurrentLapHistoryEntry(sessionId, driverId)
+  // Skip the live ML-inference recompute while a replay/live session is
+  // progressing for this driver — useCurrentLapHistoryEntry's lap-gated
+  // history read is what actually gets rendered in that case (see below).
+  const { data: windows, isLoading } = usePitWindow(sessionId, driverId, !isReplayActive)
+
+  // Replay/live progression: show the prediction as it stood at this
+  // driver's current lap, not /pit-window's always-current recompute.
+  // StrategyPredictionHistoryEntry carries no window range or SHAP
+  // explanation (see CLAUDE.md's Day 43 notes) — this reduced-detail
+  // rendering is compact-only, matching where this card is actually used
+  // during replay (the Strategy Wall grid).
+  if (compact && isReplayActive) {
+    return (
+      <Card className={cn("p-2", className)}>
+        <div className="flex items-center justify-between gap-2">
+          {driverId && <DriverChip driverId={driverId} />}
+          {historyEntry && (
+            <span className="font-mono text-xs font-semibold tabular-nums">
+              Lap {historyEntry.predicted_pit_lap}
+            </span>
+          )}
+        </div>
+        <p className="mt-1 line-clamp-1 text-[10px] text-muted-foreground">
+          {historyEntry
+            ? `${Math.round(historyEntry.pit_probability * 100)}% pit probability — as of lap ${historyEntry.lap_number}`
+            : "No prediction yet"}
+        </p>
+      </Card>
+    )
+  }
 
   if (isLoading) {
     return <LoadingSkeleton className={cn(compact ? "h-24" : "h-40", "w-full", className)} />

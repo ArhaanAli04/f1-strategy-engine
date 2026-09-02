@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 # Matches strategy_service._COMPOUND_ENCODING / prediction_worker._COMPOUND_ENCODING's
 # key set — the only compounds any tire_deg pipeline was ever trained on.
@@ -9,10 +9,19 @@ _KNOWN_COMPOUNDS = frozenset({"HARD", "INTERMEDIATE", "MEDIUM", "SOFT", "WET"})
 
 class SimulateStrategyRequest(BaseModel):
     driver_id: uuid.UUID
-    current_lap: int
+    # >= 1, not >= 0: a session with zero ingested laps yet is a genuine
+    # pre-race what-if (see strategy_service.validate_current_lap), but "lap
+    # 0" itself isn't a meaningful race state to simulate from — the earliest
+    # is "currently on lap 1". The actual upper bound (this can't exceed the
+    # session's real progress by more than one lap) needs a DB lookup and is
+    # enforced at request time by strategy_service.validate_current_lap, not
+    # here — see docs/simulator-issues-wet-model-and-position-context.md's
+    # Checkpoint-6 follow-up finding.
+    current_lap: int = Field(ge=1)
     current_compound: str
-    current_tyre_age: int
-    remaining_laps: int
+    # 0 is a fresh tyre, not invalid — unlike current_lap/remaining_laps.
+    current_tyre_age: int = Field(ge=0)
+    remaining_laps: int = Field(ge=1)
     # Empty (default): the Monte Carlo simulation decides pit timing for this
     # driver autonomously, same as every other driver in the field. Non-empty:
     # forces this driver's simulated pit stops onto these exact laps — the
@@ -33,6 +42,21 @@ class SimulateStrategyRequest(BaseModel):
         unknown = set(self.compounds) - _KNOWN_COMPOUNDS
         if unknown:
             raise ValueError(f"Unknown compound(s): {sorted(unknown)}")
+        # A forced pit lap outside the simulated horizon was previously
+        # silently ignored — race_simulator.simulate_race only ever checks
+        # `if lap_number in schedule` inside its `range(current_lap+1,
+        # total_laps+1)` loop, so a pit_laps entry <= current_lap or beyond
+        # current_lap + remaining_laps never fires, with no error to say so.
+        # Rejecting it here surfaces that as a clear 422 instead of a
+        # what-if that quietly does nothing.
+        horizon_end = self.current_lap + self.remaining_laps
+        out_of_range = [lap for lap in self.pit_laps if not (self.current_lap < lap <= horizon_end)]
+        if out_of_range:
+            raise ValueError(
+                f"pit_laps {out_of_range} must each be greater than current_lap "
+                f"({self.current_lap}) and at most current_lap + remaining_laps "
+                f"({horizon_end})"
+            )
         return self
 
 
@@ -91,3 +115,9 @@ class SimulateTaskStatusResponse(BaseModel):
     task_id: str
     status: str
     result: SimulateStrategyResponse | None = None
+    # Populated only when status == FAILURE. Deliberately narrow: this route
+    # is unauthenticated (see apis/v1/strategy.py's module docstring), so the
+    # underlying exception is never echoed verbatim — see get_simulation_result
+    # for the F1StrategyError-only safe-message policy this mirrors from
+    # core/exceptions.py's unhandled_error_handler.
+    error: str | None = None

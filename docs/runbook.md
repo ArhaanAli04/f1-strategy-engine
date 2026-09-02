@@ -8,31 +8,33 @@ generated resource names (`{{ include "f1-strategy-engine.fullname" . }}-backend
 `-worker`) — verified directly against a running cluster on Day 24, not just
 inferred from the templates.
 
-**Production is Fly.io, not Kubernetes (decided Day 24, see `cd.yml`'s
-`deploy-production` job) — every `-n production` command below currently has
-no real target.** `infra/helm-chart/` and the kubectl/Helm procedures in this
-runbook were built and validated only against the local Docker Desktop
-cluster (`-n local`; see CLAUDE.md's Deployment Strategy and Day 22/24
-notes) — there is no `production` namespace or cluster today, and there
-won't be a Kubernetes-based one once the real production deploy lands after
-Day 40. Until then, treat every command below as validated against `-n
-local` only; substitute `-n local` if you're actually running one of these
-procedures today. App rollback, race day scaling, and the Kubernetes-secret
-half of secret rotation will need a Fly.io-specific rewrite once that
-deploy exists — this is flagged here rather than guessed at, since Fly.io's
-equivalent primitives (`fly deploy`, `fly scale count`, `fly secrets set`)
-aren't a 1:1 mapping of what's documented below.
+**Production is Fly.io, not Kubernetes (decided Day 24, real deploy landed
+Day 40 — see [Fly.io deployment](#flyio-deployment) below).**
+`infra/helm-chart/` and the kubectl/Helm procedures in this runbook (App
+rollback, the old Race day scaling procedure, the Kubernetes-secret half of
+Secret rotation) were built and validated only against the local Docker
+Desktop cluster (`-n local`; see CLAUDE.md's Deployment Strategy and Day
+22/24 notes) — there is no `production` Kubernetes namespace or cluster and
+there never will be one; `infra/helm-chart/`/`infra/k8s/` remain local-only
+reference material, not something running in production. Every `-n
+production` command below is local-cluster procedure, not a real target —
+substitute `-n local` if you're actually running one of these today. Fly.io
+equivalents (deploy, rollback, scaling, secrets) are their own sections
+below, not a 1:1 mapping of the Kubernetes commands.
 
 ## Table of Contents
 
 - [Race day checklist](#race-day-checklist)
+- [Post-race weekend: keeping Supabase current](#post-race-weekend-keeping-supabase-current)
+- [One-time: backfill session_elapsed_seconds on Supabase](#one-time-backfill-session_elapsed_seconds-on-supabase)
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
-- [App rollback (Helm)](#app-rollback-helm)
+- [Fly.io deployment](#flyio-deployment)
+- [App rollback (Helm — local cluster only)](#app-rollback-helm--local-cluster-only)
 - [Database rollback (Alembic)](#database-rollback-alembic)
 - [Model rollback (S3)](#model-rollback-s3)
 - [Promoting a candidate model to production](#promoting-a-candidate-model-to-production)
-- [Race day scaling procedure](#race-day-scaling-procedure)
+- [Race day scaling procedure (Fly.io)](#race-day-scaling-procedure-flyio)
 - [Secret rotation procedure](#secret-rotation-procedure)
 
 ---
@@ -77,6 +79,68 @@ doesn't yet — see that section's own caveat).
    [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing))
    is the fastest way to get a populated timing tower back for a demo,
    even though it isn't the actual live session.
+
+---
+
+## Post-race weekend: keeping Supabase current
+
+After each race weekend, run the `ingest-historical` workflow (Actions tab →
+`ingest-historical.yml` → Run workflow) for that round to keep the Supabase
+production DB current for the deployed web app.
+
+`.github/workflows/ingest-historical.yml` runs
+`backend/scripts/ingest_historical.py` directly against Supabase
+(`SUPABASE_DIRECT_URL`) — same script `make ingest` runs locally, see that
+script's own docstring: it writes `lap_data`/`tire_stints` only, no Celery
+or live-pipeline involvement. Set `season`/`round`/`session_type` (default
+`R`) to the weekend just completed.
+
+Once ingested, consider manually triggering `train-models.yml` afterward so
+the weekly retrain picks up the new round sooner than its Monday 02:00 UTC
+schedule — see that workflow's own docstring.
+
+---
+
+## One-time: backfill session_elapsed_seconds on Supabase
+
+Item 7 (CLAUDE.md Deferred Wiring item A, the NULL-lap cumulative-sum bug —
+✅ fixed 2026-09-02, see CLAUDE.md's own Notes entry) added
+`LapData.session_elapsed_seconds` (migration
+`20260902_add_session_elapsed_seconds_to_lap_data`) and backfilled it for
+every local R session, but **production Supabase has not been touched
+yet** — this is a manual, one-time post-merge step, not something to run
+ahead of the merge.
+
+**Correct sequence, in order — do not run step 2 before step 1 has
+actually landed on Supabase:**
+
+1. **Merge this branch to `main`.** `cd.yml`'s `migrate` job runs `alembic
+   upgrade head` against Supabase (`SUPABASE_DIRECT_URL`) automatically on
+   merge — this adds the `session_elapsed_seconds` column, NULL for every
+   existing row (identical to what happened locally in
+   `backend/migrations/versions/20260902_add_session_elapsed_seconds_to_lap_data.py`
+   before the local backfill ran). Confirm the job succeeded (Actions tab
+   → `cd.yml` → the `migrate` job) before proceeding — do not run step 2
+   against a Supabase DB that hasn't actually picked up the column yet.
+2. **Then, manually run the backfill** against Supabase, same pattern as
+   the tyre-degradation backfill (`backend/scripts/backfill_tire_data.py`)
+   documented in CLAUDE.md's own Notes:
+   ```bash
+   DATABASE_URL=$SUPABASE_DIRECT_URL \
+     .venv/Scripts/python.exe backend/scripts/backfill_lap_session_time.py
+   ```
+   (`postgresql://` → `postgresql+asyncpg://` conversion applied the same
+   way `cd.yml`'s migrate job does, if `SUPABASE_DIRECT_URL` doesn't
+   already carry the `+asyncpg` driver suffix.) No `--season`/`--round`
+   flags needed — Supabase only has the 3 curated 2026 races
+   (`ingest_historical.py`), so this backfills all of them in one run,
+   R-only per the script's own scope decision (see CLAUDE.md's item A
+   Notes entry).
+3. Verify the same way CLAUDE.md's tyre-degradation-backfill entry did:
+   re-query Supabase directly afterward and confirm `session_elapsed_seconds`
+   is populated (`SELECT COUNT(*), COUNT(session_elapsed_seconds) FROM
+   lap_data` for each of the 3 sessions, or reuse this same query pattern
+   from the local verification in CLAUDE.md's Notes entry).
 
 ---
 
@@ -133,7 +197,87 @@ ORDER BY c.name;
 
 ---
 
-## App rollback (Helm)
+## Fly.io deployment
+
+Single Fly app (`f1-strategy`, `fly.toml` at repo root) with three process
+groups sharing one build — `web` (FastAPI, always-on), `worker` (Celery,
+scaled to 0 except race weekends), `beat` (Celery Beat, same). See
+`fly.toml`'s own header comment for the architecture reasoning (single app
+vs. three, sizing, why `web` doesn't auto-stop) — this section is the
+day-to-day procedure, not the reasoning.
+
+### Prerequisites (one-time)
+
+1. Create a Fly.io account at [fly.io](https://fly.io) and install `flyctl`:
+   ```powershell
+   powershell -c "iwr https://fly.io/install.ps1 -useb | iex"
+   ```
+2. `fly auth login`
+3. `fly apps create f1-strategy` — claims the app name; does not deploy.
+   `fly.toml` already exists and is complete, so **do not** run `fly
+   launch` (its interactive flow can regenerate/overwrite `fly.toml`).
+
+### Secrets
+
+One `fly secrets set` call populates all three process groups (they share
+the app). Same conversion `infra/k8s/create-secrets.sh` already does for
+the local Kubernetes Secret — Supabase's transaction-mode pooler URL (port
+6543) becomes `DATABASE_URL`/`TIMESCALE_URL` with the `+asyncpg` scheme
+swap, Upstash's `rediss://` URL becomes `REDIS_URL` directly:
+
+```bash
+fly secrets set --app f1-strategy \
+  DATABASE_URL="postgresql+asyncpg://...<SUPABASE_DATABASE_URL, scheme swapped>..." \
+  TIMESCALE_URL="postgresql+asyncpg://...<same as DATABASE_URL>..." \
+  REDIS_URL="<UPSTASH_REDIS_URL, rediss://...>" \
+  SECRET_KEY="<production SECRET_KEY>" \
+  SENTRY_DSN="<production SENTRY_DSN>" \
+  AWS_ACCESS_KEY_ID="<...>" \
+  AWS_SECRET_ACCESS_KEY="<...>" \
+  AWS_REGION="ap-south-1" \
+  AWS_BUCKET_NAME="f1-strategy-models" \
+  ALLOWED_ORIGINS="https://<real Vercel URL>.vercel.app" \
+  ENVIRONMENT="production"
+```
+
+`ALLOWED_ORIGINS` is set here directly, **not** as a GitHub Secret — CORS is
+a runtime concern of the deployed app, not a CI-time one. `SLACK_WEBHOOK_DEPLOY`
+is deliberately **not** set here — `backend/core/config.py` never reads it;
+it's a GitHub Actions-only secret for CI deploy notifications (see
+CLAUDE.md's GitHub Secrets Checklist).
+
+### Deploy
+
+```bash
+fly deploy --app f1-strategy
+```
+
+Builds from `infra/docker/Dockerfile.worker` (see `fly.toml`'s `[build]`)
+and starts one machine per process group (`web`, `worker`, `beat`) on first
+deploy.
+
+### Verify
+
+```bash
+curl https://f1-strategy.fly.dev/health
+# {"status":"ok","db":"ok","redis":"ok"}
+
+fly logs --app f1-strategy -i <worker machine id>   # look for "celery@... ready."
+fly logs --app f1-strategy -i <beat machine id>     # look for the beat scheduler tick
+```
+
+Then immediately scale `worker`/`beat` down to the resting state (see
+[Race day scaling procedure](#race-day-scaling-procedure-flyio) below) —
+the point of confirming they boot correctly right after deploy is to catch
+a broken image *before* the next race weekend, not to leave them running.
+
+```bash
+make fly-race-down
+```
+
+---
+
+## App rollback (Helm — local cluster only)
 
 Fastest rollback path — reverts to a previous Helm release revision, which
 points at a previously-built image already in ECR. No rebuild, no CI run.
@@ -267,30 +411,29 @@ candidate after reviewing it:
 
 ---
 
-## Race day scaling procedure
+## Race day scaling procedure (Fly.io)
 
-Race day traffic is bursty and predictable (practice/qualifying/race
-sessions at known times) — pre-scale ahead of it rather than relying on
-reactive autoscaling alone, since the Day 18 500-user load test showed the
-default HPA/KEDA response lag isn't fast enough to absorb the step-change at
-a session's green light (see CLAUDE.md's Deferred Wiring notes on Celery
-worker backlog and DB pool exhaustion).
+`worker`/`beat` rest at 0 machines between races (see `fly.toml`'s module
+comment) — this is the cost-saving side of the Day 40 hybrid deployment
+decision, not an incident response. `web` never needs scaling for this;
+it's always-on and everything it serves alone (dashboard, driver stats,
+historical races, pit-window/undercut/overview predictions — these run
+inline in `web` on a cache miss, not via Celery, see the Day 40
+worker-dependency audit) keeps working the whole time regardless.
 
-1. **30+ minutes before a session:** confirm `infra/k8s/race-weekend-cronjob.yaml`
-   pre-scaled the backend Deployment to 5 replicas (or do it manually if the
-   CronJob isn't deployed yet):
+1. **30+ minutes before a session:** scale `worker`/`beat` up.
 
    ```bash
-   kubectl scale deployment/f1-strategy-engine-backend -n production --replicas=5
+   make fly-race-up
+   # = ./infra/fly/scale-race-weekend.sh up
+   # = fly scale count worker=1 beat=1 --app f1-strategy --yes
    ```
 
-2. **Confirm the worker pool is scaled for the queue depth you expect.** The
-   Day 18 load test found a single `--pool=solo` worker takes 65-88s per
-   `run_race_simulation` task — size worker replicas from expected concurrent
-   `/strategy/simulate` calls, not from CPU alone:
+2. **Confirm both came up healthy:**
 
    ```bash
-   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=8
+   fly status --app f1-strategy
+   fly logs --app f1-strategy -i <worker machine id>   # "celery@... ready."
    ```
 
 3. **Warm the cache** before the session starts, so the first wave of
@@ -303,24 +446,33 @@ worker backlog and DB pool exhaustion).
    ```
 
 4. **Watch Grafana** (Celery queue depth, cache hit rate, DB pool usage)
-   during the session. If `prediction_queue` length climbs faster than
-   workers are draining it, scale workers further:
+   during the session. A single `--pool=solo` worker machine is the only
+   consumer for `telemetry_queue`/`prediction_queue`/`alert_queue` — if
+   queue depth climbs faster than it drains, scale worker count up further
+   (Fly bills per-second, so this is cheap for the duration of a session):
 
    ```bash
-   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=<N>
+   fly scale count worker=<N> --app f1-strategy --yes
    ```
 
-5. **Scale back down** after the session ends to avoid idle cost:
+   Only ever run **one** `beat` machine — Fly has no declarative
+   single-instance guarantee for a process group (confirmed Day 40
+   research), so this is operator discipline, not something the platform
+   enforces. Never scale `beat` above 1.
+
+5. **Scale back down** after the session ends:
 
    ```bash
-   kubectl scale deployment/f1-strategy-engine-backend -n production --replicas=2
-   kubectl scale deployment/f1-strategy-engine-worker -n production --replicas=2
+   make fly-race-down
+   # = fly scale count worker=0 beat=0 --app f1-strategy --yes
    ```
 
-Once `infra/k8s/hpa.yaml` and `infra/k8s/worker-scaledobject.yaml` are
-applied (Day 22), steps 4-5 become largely automatic — this manual procedure
-is the fallback for whenever autoscaling isn't fast enough for a session's
-opening minutes, or before KEDA is installed.
+If you forget step 5, the cost impact is small (Fly's per-second billing
+means idle-but-running `worker`/`beat` cost roughly $9.24/month combined at
+the sizing in `fly.toml` — see CLAUDE.md's Day 40 cost research) but not
+zero, and `beat` left running outside a race weekend just polls Ergast to
+no effect (see CLAUDE.md's Auto Race Detection section) rather than causing
+harm.
 
 ---
 
@@ -351,24 +503,34 @@ individual with access leaves the project.
    Actions) with the new value. Do this for every secret listed in
    `cd.yml`'s and `train-models.yml`'s header comments.
 
-3. **Update the Kubernetes Secret** — never commit the plaintext value to
-   any YAML file. Sealed Secrets is still deferred (no real cloud cluster
-   exists yet — see CLAUDE.md's Deferred Wiring); the actual interim
-   mechanism, confirmed working Day 24, is `infra/k8s/create-secrets.sh`,
-   which reads `.env` (including `SUPABASE_DATABASE_URL`/
-   `UPSTASH_REDIS_URL` — update `.env` with the new value first) and
-   recreates the Secret:
+3. **Update the production secret — Fly.io:**
+
+   ```bash
+   fly secrets set --app f1-strategy <NAME>="<new value>"
+   ```
+
+   `fly secrets set` restarts every machine across all three process groups
+   (`web`/`worker`/`beat`) automatically to pick up the new value — no
+   separate roll step needed, unlike the Kubernetes path below.
+
+   **Local Kubernetes Secret (local dev cluster only, not production)** —
+   never commit the plaintext value to any YAML file. Sealed Secrets is
+   still deferred (see CLAUDE.md's Deferred Wiring); the interim mechanism,
+   confirmed working Day 24, is `infra/k8s/create-secrets.sh`, which reads
+   `.env` (including `SUPABASE_DATABASE_URL`/`UPSTASH_REDIS_URL` — update
+   `.env` with the new value first) and recreates the Secret:
 
    ```bash
    ./infra/k8s/create-secrets.sh local
    ```
 
-4. **Roll the deployment** so running pods pick up the new value (secrets
-   mounted as env vars are not hot-reloaded):
+4. **Roll the local Kubernetes deployment** so running pods pick up the new
+   value (secrets mounted as env vars are not hot-reloaded; skip this step
+   for Fly.io — step 3 already restarted it):
 
    ```bash
-   kubectl rollout restart deployment/f1-strategy-engine-backend -n production
-   kubectl rollout restart deployment/f1-strategy-engine-worker -n production
+   kubectl rollout restart deployment/f1-strategy-engine-backend -n local
+   kubectl rollout restart deployment/f1-strategy-engine-worker -n local
    ```
 
 5. **Verify** the app is healthy on the new secret (`GET /health`, a real

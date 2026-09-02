@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils"
 import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import { exportStrategiesAsCsv } from "@/utils/csvExport"
 import { isActiveDriver } from "@/utils/drivers"
+import { getApiErrorMessage } from "@/utils/errors"
 import { formatLapTime } from "@/utils/formatters"
 import type { DriverResponse, SimulatedRaceOutcome, SimulateStrategyRequest } from "@/types"
 
@@ -269,14 +270,26 @@ export function SimulatorPage() {
       pit_laps: pitStops.map((row) => row.lap),
       compounds: pitStops.map((row) => row.compound),
     }
-    setStep(3)
-    const accepted = await simulateMutation.mutateAsync(payload)
-    setTaskId(accepted.task_id)
+    // A bad current_lap (validate_current_lap, see CLAUDE.md's Deferred
+    // Wiring) rejects synchronously here with a 404/422 — stay on step 2 and
+    // surface it via simulateMutation.error below instead of advancing to
+    // step 3's spinner, which would otherwise strand the user with no task
+    // ever created and no FAILURE/timedOut condition to show a "Try Again".
+    // Mirrors web/src/pages/SimulatorPage.tsx.
+    try {
+      const accepted = await simulateMutation.mutateAsync(payload)
+      setTaskId(accepted.task_id)
+      setStep(3)
+    } catch {
+      // Rendered from simulateMutation.error in step 2's JSX — nothing more
+      // to do here.
+    }
   }
 
   function handleReset() {
     setStep(1)
     setTaskId(null)
+    simulateMutation.reset()
   }
 
   async function handleExportCsv() {
@@ -442,11 +455,16 @@ export function SimulatorPage() {
             <Button type="button" variant="outline" size="sm" onClick={addPitStop}>
               + Add Pit Stop
             </Button>
+            {simulateMutation.isError && (
+              <p role="alert" className="text-sm font-medium text-destructive">
+                {getApiErrorMessage(simulateMutation.error, "Failed to start simulation")}
+              </p>
+            )}
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setStep(1)}>
                 Back
               </Button>
-              <Button onClick={handleRunSimulation}>Run Simulation</Button>
+              <Button onClick={() => void handleRunSimulation()}>Run Simulation</Button>
             </div>
           </CardContent>
         </Card>
@@ -455,13 +473,27 @@ export function SimulatorPage() {
       {step === 3 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12">
-            <div className="h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-primary" />
-            <p className="text-sm text-muted-foreground">
-              {simulationResult.data?.status === "FAILURE"
-                ? "Simulation failed."
-                : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
-            </p>
-            {simulationResult.data?.status === "FAILURE" && (
+            {/* worker offline outside race weekends (Day 40 hybrid
+                deployment, see fly.toml) — a task enqueued then never
+                resolves, so useSimulationResult's timedOut swaps this in
+                after 60s instead of spinning forever. Mirrors
+                web/src/pages/SimulatorPage.tsx. */}
+            {simulationResult.data?.status !== "FAILURE" && simulationResult.timedOut ? (
+              <p className="max-w-sm text-center text-sm text-muted-foreground">
+                Strategy simulation requires an active race weekend. The worker is currently
+                offline — scale up before the next race to enable this feature.
+              </p>
+            ) : (
+              <>
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-muted border-t-primary" />
+                <p className="text-sm text-muted-foreground">
+                  {simulationResult.data?.status === "FAILURE"
+                    ? (simulationResult.data.error ?? "Simulation failed.")
+                    : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
+                </p>
+              </>
+            )}
+            {(simulationResult.data?.status === "FAILURE" || simulationResult.timedOut) && (
               <Button variant="outline" onClick={handleReset}>
                 Try Again
               </Button>

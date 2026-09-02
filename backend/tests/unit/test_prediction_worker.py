@@ -16,8 +16,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis as fakeredis_lib
+import joblib
+import numpy as np
 import pytest
 
+from backend.services.ml import tire_deg_model
 from backend.workers import prediction_worker
 
 
@@ -56,10 +59,14 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     latest_laps_result = MagicMock()
     latest_laps_result.scalars.return_value.all.return_value = [lap_a, lap_b]
 
+    # session_elapsed_seconds (3rd column) is None for both drivers here —
+    # this test is specifically about the SUM(lap_time_seconds) batched-
+    # query fallback path (cumulative_time_result below), so the elapsed_
+    # by_driver-preferred path must fall through for both.
     position_result = MagicMock()
     position_result.all.return_value = [
-        (driver_a_id, lap_a.position),
-        (driver_b_id, lap_b.position),
+        (driver_a_id, lap_a.position, None),
+        (driver_b_id, lap_b.position, None),
     ]
 
     cumulative_time_result = MagicMock()
@@ -154,7 +161,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
     latest_laps_result.scalars.return_value.all.return_value = [final_lap]
 
     position_result = MagicMock()
-    position_result.all.return_value = [(driver_id, 10)]
+    position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
     cumulative_time_result.all.return_value = [(driver_id, 0.0)]
@@ -225,7 +232,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
     # What a correctly session_id-filtered query returns from a real DB — the
     # other_session_id=99 row is excluded by Postgres, not filtered by this mock.
     position_result = MagicMock()
-    position_result.all.return_value = [(driver_id, 10)]
+    position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
     cumulative_time_result.all.return_value = [(driver_id, 0.0)]
@@ -274,3 +281,150 @@ async def test_build_race_state_position_query_filters_by_session_id(
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
     assert driver_state.starting_position == 10
+
+
+# --- _load_models: WET/INTER schema-mismatch alias (Checkpoint 3) ---
+# See docs/simulator-issues-wet-model-and-position-context.md Part A. Mirrors
+# test_strategy_service.py's identical wiring test — this module has its own
+# duplicated _load_models (see this file's module docstring on the
+# no-cross-service-import convention), so it needs its own coverage.
+
+
+def _fit_pipeline_with_n_features(n_features: int, seed: int) -> Any:
+    rng = np.random.default_rng(seed)
+    n = 60
+    features = rng.random((n, n_features))
+    target = rng.normal(0.0, 0.3, n)
+    pipeline = tire_deg_model._build_pipeline()
+    pipeline.fit(features, target)
+    return pipeline
+
+
+@pytest.mark.unit
+def test_load_models_aliases_schema_incompatible_wet_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_wet = _fit_pipeline_with_n_features(n_features=8, seed=300)
+    inter = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=301)
+    other = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=302)
+    pipelines_by_filename = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    # Patches the joblib module itself (not prediction_worker.joblib) — both
+    # reference the same module object, and reaching through another
+    # module's imported attribute trips mypy --strict's --no-implicit-reexport.
+    monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, other))
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+
+    models = prediction_worker._load_models()
+
+    assert models["tire_deg_wet.pkl"] is inter
+    assert models["tire_deg_inter.pkl"] is inter
+    assert set(models) == set(prediction_worker._MODEL_FILES)
+
+
+@pytest.mark.unit
+async def test_cumulative_race_time_prefers_session_elapsed_seconds(
+    mock_db_session: AsyncMock,
+) -> None:
+    """Mirrors strategy_service's equivalent test — same duplicated-function
+    convention as _cumulative_race_time itself. A backfilled historical
+    session's real session_elapsed_seconds must be returned directly; the
+    SUM(lap_time_seconds) fallback query must never even run.
+    """
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    latest_row_result = MagicMock()
+    latest_row_result.scalar_one_or_none.return_value = 5231.627
+    mock_db_session.execute.return_value = latest_row_result
+
+    result = await prediction_worker._cumulative_race_time(
+        mock_db_session, session_id, driver_id, 52
+    )
+
+    assert result == pytest.approx(5231.627)
+    mock_db_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_cumulative_race_time_falls_back_to_sum_when_session_elapsed_seconds_null(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A live-ingested session (never backfilled) must fall back to the
+    original SUM(lap_time_seconds) reconstruction, unchanged."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    latest_row_result = MagicMock()
+    latest_row_result.scalar_one_or_none.return_value = None
+    sum_result = MagicMock()
+    sum_result.scalar_one.return_value = 4310.0
+    mock_db_session.execute.side_effect = [latest_row_result, sum_result]
+
+    result = await prediction_worker._cumulative_race_time(
+        mock_db_session, session_id, driver_id, 40
+    )
+
+    assert result == pytest.approx(4310.0)
+    assert mock_db_session.execute.call_count == 2
+
+
+@pytest.mark.unit
+async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallback(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """When the position-as-of-current_lap row carries a real
+    session_elapsed_seconds (a backfilled historical session), it must be
+    used for cumulative_race_time_seconds instead of the batched
+    SUM(lap_time_seconds) query's value — even though both are present on
+    the same row, chosen here to be clearly distinguishable (900.5 vs 1.0).
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    current_lap = 52
+    season, round_number = 2026, 9
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, season, round_number, "Silverstone Circuit")
+
+    lap = SimpleNamespace(
+        driver_id=driver_id, lap_number=52, compound="MEDIUM", tyre_age_laps=20, position=1
+    )
+    latest_laps_result = MagicMock()
+    latest_laps_result.scalars.return_value.all.return_value = [lap]
+
+    position_result = MagicMock()
+    position_result.all.return_value = [(driver_id, 1, 900.5)]
+
+    # Present but must be ignored in favour of the 900.5 above.
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [(driver_id, 1.0)]
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
+
+    await fakeredis.set(
+        prediction_worker._weather_key(season, round_number),
+        json.dumps({"track_temp": 30.0, "air_temp": 22.0}),
+    )
+
+    race_state = await prediction_worker._build_race_state(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        driver_id,
+        current_lap,
+        "MEDIUM",
+        20,
+        52,
+    )
+
+    driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
+    assert driver_state.cumulative_race_time_seconds == pytest.approx(900.5)

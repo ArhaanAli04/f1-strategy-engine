@@ -46,6 +46,12 @@ services:
       DB_MAX_OVERFLOW: "40"
     volumes:
       - ../../backend:/app/backend
+      # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the
+      # dir to pre-exist (replay_pipeline.py / ingest_*.py makedirs it), and
+      # a persisted volume means the ~30-60s per-session download happens
+      # once, not on every container recreate — for demo replays AND a real
+      # live/auto-detected race ingestion.
+      - fastf1_cache:/tmp/fastf1_cache
     ports:
       - "8000:8000"
     depends_on:
@@ -73,6 +79,12 @@ services:
       AWS_REGION: "${AWS_REGION:-ap-south-1}"
     volumes:
       - ../../backend:/app/backend
+      # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the
+      # dir to pre-exist (replay_pipeline.py / ingest_*.py makedirs it), and
+      # a persisted volume means the ~30-60s per-session download happens
+      # once, not on every container recreate — for demo replays AND a real
+      # live/auto-detected race ingestion.
+      - fastf1_cache:/tmp/fastf1_cache
     # No host port mapping: worker:9090/metrics (hand-rolled Celery metrics
     # server started in workers/celery_app.py's worker_init signal) only
     # needs to be reachable from prometheus over the internal Compose
@@ -101,6 +113,12 @@ services:
       ENVIRONMENT: development
     volumes:
       - ../../backend:/app/backend
+      # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the
+      # dir to pre-exist (replay_pipeline.py / ingest_*.py makedirs it), and
+      # a persisted volume means the ~30-60s per-session download happens
+      # once, not on every container recreate — for demo replays AND a real
+      # live/auto-detected race ingestion.
+      - fastf1_cache:/tmp/fastf1_cache
     # --schedule points PersistentScheduler's dbm file at /tmp: Dockerfile.worker's
     # WORKDIR /app is created (and owned) by root before USER f1 switches to
     # the non-root runtime user, so the default schedule path
@@ -201,3 +219,4 @@ volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
+  fastf1_cache:

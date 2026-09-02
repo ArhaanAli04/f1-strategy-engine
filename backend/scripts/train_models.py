@@ -35,6 +35,7 @@ and are only reused by export_training_data.py, which populates that parquet cac
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -218,9 +219,37 @@ def s3_client() -> Any:
     )
 
 
-def download_metrics(
-    client: Any, bucket: str, tag: str, filename: str
-) -> dict[str, float | str] | None:
+def fitted_feature_count(model_obj: Any) -> int | None:
+    """Fitted input feature count for any model object in the training registry.
+
+    Handles every model shape serialize_evaluate_and_upload sees: a tire_deg
+    Pipeline (StandardScaler -> XGBRegressor; delegates to tire_deg_model.
+    pipeline_feature_count), a bare pit_predictor LGBMClassifier (reads
+    n_features_in_ directly, since it has no named_steps), and
+    safety_car_model.SafetyCarModel (a plain per-circuit-rate dataclass with no
+    feature vector at all — correctly returns None here, not a mismatch:
+    schema compatibility has no meaning for a model with no feature vector).
+
+    Args:
+        model_obj: A fitted model/pipeline from the training registry, or any
+            other object (defensive — a registry entry could in principle be
+            missing/wrong-typed).
+    Returns:
+        The input feature count as an int, or None if it can't be determined
+        (no feature-vector concept applies, or the object is unfitted/unknown)
+        — callers must treat None as "not applicable", not as a mismatch.
+    """
+    count = tire_deg_model.pipeline_feature_count(model_obj)
+    if count is not None:
+        return count
+    try:
+        n_features = model_obj.n_features_in_
+    except AttributeError:
+        return None
+    return int(n_features) if isinstance(n_features, int | np.integer) else None
+
+
+def download_metrics(client: Any, bucket: str, tag: str, filename: str) -> dict[str, Any] | None:
     try:
         obj = client.get_object(Bucket=bucket, Key=f"{tag}/{filename}.metrics.json")
     except ClientError as exc:
@@ -236,7 +265,7 @@ def upload_model(
     tag: str,
     filename: str,
     local_path: Path,
-    metrics: dict[str, float | str],
+    metrics: dict[str, Any],
 ) -> None:
     client.upload_file(str(local_path), bucket, f"{tag}/{filename}")
     client.put_object(
@@ -246,15 +275,130 @@ def upload_model(
     )
 
 
+@dataclass(frozen=True)
+class PromotionOutcome:
+    """Result of a promotion decision.
+
+    reason is one of:
+        "no_production_model"      — first run for this filename, nothing to compare against.
+        "schema_mismatch"          — the production incumbent's feature schema didn't match
+                                      this candidate's; promoted regardless of holdout_mae,
+                                      since an incompatible incumbent cannot even serve
+                                      inference (see tire_deg_wet.pkl's 8-vs-6-feature crash).
+        "holdout_mae_improved"     — schema matched (or wasn't applicable); candidate's
+                                      holdout_mae beat the incumbent's.
+        "holdout_mae_not_improved" — schema matched (or wasn't applicable); candidate's
+                                      holdout_mae did not beat the incumbent's.
+    """
+
+    promoted: bool
+    reason: str
+
+
+def _resolve_incumbent_schema(
+    client: Any, bucket: str, filename: str, current_metrics: dict[str, Any]
+) -> tuple[int | None, bool]:
+    """Determine the production incumbent's feature count, backfilling its sidecar if needed.
+
+    Prefers the sidecar's own recorded n_features — present on every sidecar this
+    module writes once this schema check is live. Falls back to downloading and
+    introspecting the production .pkl only when the sidecar predates this fix and
+    has no schema recorded; on a successful introspection, backfills the recovered
+    count into the sidecar in place (existing metric values preserved, n_features/
+    schema_source="introspected" added, feature_names left absent since names
+    aren't recoverable from a fitted object) — so this filename's incumbent never
+    needs a .pkl download again after the first time.
+
+    Args:
+        client: boto3 S3 client.
+        bucket: S3 bucket name.
+        filename: Model registry filename, e.g. "tire_deg_wet.pkl".
+        current_metrics: The production sidecar's already-downloaded metrics dict
+            (caller must have already confirmed a production model exists).
+    Returns:
+        (n_features, unrecoverable). unrecoverable is True only when the .pkl
+        itself could not be downloaded, loaded, or yielded a determinable feature
+        count — the caller treats an unrecoverable incumbent as incompatible (a
+        production model that can't even be loaded is exactly what should be
+        replaced), not as "unknown, don't block."
+    """
+    recorded = current_metrics.get("n_features")
+    if recorded is not None:
+        return int(recorded), False
+
+    local_path = MODEL_DIR / f"_incumbent_{filename}"
+    try:
+        client.download_file(bucket, f"production/{filename}", str(local_path))
+        incumbent_obj = joblib.load(local_path)
+    except Exception:
+        logger.warning(
+            "%s: production .pkl could not be downloaded or loaded to recover its "
+            "feature schema (legacy sidecar, no n_features recorded) — treating the "
+            "incumbent as incompatible",
+            filename,
+            exc_info=True,
+        )
+        return None, True
+    finally:
+        local_path.unlink(missing_ok=True)
+
+    n_features = fitted_feature_count(incumbent_obj)
+    if n_features is None:
+        logger.warning(
+            "%s: production .pkl loaded but has no determinable feature count — "
+            "treating the incumbent's schema as unrecoverable",
+            filename,
+        )
+        return None, True
+
+    backfilled = dict(current_metrics)
+    backfilled["n_features"] = n_features
+    backfilled["schema_source"] = "introspected"
+    client.put_object(
+        Bucket=bucket,
+        Key=f"production/{filename}.metrics.json",
+        Body=json.dumps(backfilled).encode("utf-8"),
+    )
+    logger.info(
+        "%s: recovered production incumbent's feature schema via .pkl introspection "
+        "(n_features=%d) and backfilled its sidecar — future runs won't need to "
+        "download this .pkl again",
+        filename,
+        n_features,
+    )
+    return n_features, False
+
+
 def serialize_evaluate_and_upload(
     client: Any,
     bucket: str,
     version_tag: str,
     filename: str,
     model_obj: Any,
-    metrics: dict[str, float | str],
-) -> bool:
-    """Serialize a model, upload it under version_tag, and promote if holdout MAE improved.
+    metrics: dict[str, Any],
+    feature_names: list[str] | None = None,
+) -> PromotionOutcome:
+    """Serialize a model, upload it under version_tag, and promote based on schema + holdout MAE.
+
+    Promotion logic, in order:
+    1. No existing production model for this filename -> promote (first run).
+    2. This model type has a feature-vector concept (fitted_feature_count(model_obj)
+       is not None) AND the production incumbent's feature schema is either
+       unrecoverable or a different feature count than this candidate -> force-
+       promote regardless of holdout_mae. A schema-incompatible incumbent doesn't
+       just predict worse, it raises at inference time (tire_deg_wet.pkl's
+       2026-08-30 8-vs-6-feature crash) — any schema-correct candidate is strictly
+       better than a model that cannot run, so MAE isn't a meaningful comparison
+       across the mismatch.
+    3. Otherwise (schema matches, schema isn't applicable to this model type — e.g.
+       safety_car_model, which has no feature vector at all — or there's no
+       incumbent to compare against) -> promote only if holdout_mae improved, same
+       as before this check existed.
+
+    Every sidecar this function writes (the version_tag copy always, the production
+    copy on promotion) carries n_features/feature_names/schema_source="declared", so
+    a legacy incumbent's schema only ever needs recovering via .pkl download once —
+    see _resolve_incumbent_schema.
 
     Args:
         client: boto3 S3 client.
@@ -263,32 +407,88 @@ def serialize_evaluate_and_upload(
         filename: Model registry filename, e.g. "tire_deg_soft.pkl".
         model_obj: The fitted model/pipeline to serialize with joblib.
         metrics: Metrics dict; must include "holdout_mae" for promotion comparison.
+        feature_names: This model's FEATURE_COLUMNS, in training order, or None for
+            a model type with no feature-vector concept (safety_car_model). When
+            given, must have exactly fitted_feature_count(model_obj) entries.
     Returns:
-        True if this run's model was promoted to the 'production' tag.
+        PromotionOutcome — whether this run's model was promoted to the
+        'production' tag, and why.
     """
+    candidate_n_features = fitted_feature_count(model_obj)
+    if (
+        feature_names is not None
+        and candidate_n_features is not None
+        and len(feature_names) != candidate_n_features
+    ):
+        raise ValueError(
+            f"{filename}: feature_names has {len(feature_names)} entries but the "
+            f"fitted model expects {candidate_n_features} — caller bug, refusing to "
+            "upload a candidate with an inconsistent schema declaration"
+        )
+
+    schema_metrics = dict(metrics)
+    schema_metrics["n_features"] = candidate_n_features
+    schema_metrics["feature_names"] = feature_names
+    schema_metrics["schema_source"] = "declared"
+
     local_path = MODEL_DIR / filename
     joblib.dump(model_obj, local_path)
 
-    upload_model(client, bucket, version_tag, filename, local_path, metrics)
+    upload_model(client, bucket, version_tag, filename, local_path, schema_metrics)
 
     current_production = download_metrics(client, bucket, "production", filename)
     current_holdout_mae = (
         float(current_production["holdout_mae"]) if current_production is not None else None
     )
     holdout_mae = float(metrics["holdout_mae"])
-    should_promote = current_holdout_mae is None or holdout_mae < current_holdout_mae
+
+    if current_production is None:
+        should_promote = True
+        reason = "no_production_model"
+    else:
+        incumbent_n_features: int | None = None
+        incumbent_unrecoverable = False
+        if candidate_n_features is not None:
+            incumbent_n_features, incumbent_unrecoverable = _resolve_incumbent_schema(
+                client, bucket, filename, current_production
+            )
+        schema_mismatch = candidate_n_features is not None and (
+            incumbent_unrecoverable or incumbent_n_features != candidate_n_features
+        )
+        if schema_mismatch:
+            should_promote = True
+            reason = "schema_mismatch"
+            logger.warning(
+                "%s: production incumbent's feature schema is incompatible "
+                "(incumbent=%s, candidate=%d%s) — force-promoting regardless of "
+                "holdout_mae (candidate=%.5f, incumbent=%s)",
+                filename,
+                incumbent_n_features,
+                candidate_n_features,
+                " [incumbent .pkl unrecoverable]" if incumbent_unrecoverable else "",
+                holdout_mae,
+                f"{current_holdout_mae:.5f}" if current_holdout_mae is not None else "none",
+            )
+        else:
+            # Read straight off current_production (not the separately-derived
+            # current_holdout_mae) so mypy's non-None narrowing of this branch's
+            # own if-condition variable applies directly, without a bare assert.
+            should_promote = holdout_mae < float(current_production["holdout_mae"])
+            reason = "holdout_mae_improved" if should_promote else "holdout_mae_not_improved"
+
     if should_promote:
-        upload_model(client, bucket, "production", filename, local_path, metrics)
+        upload_model(client, bucket, "production", filename, local_path, schema_metrics)
 
     logger.info(
-        "%s: holdout_mae=%.5f promoted=%s basis=%s (previous production holdout_mae=%s)",
+        "%s: holdout_mae=%.5f promoted=%s reason=%s basis=%s (previous production holdout_mae=%s)",
         filename,
         holdout_mae,
         should_promote,
+        reason,
         metrics.get("promotion_basis", "holdout"),
         f"{current_holdout_mae:.5f}" if current_holdout_mae is not None else "none",
     )
-    return should_promote
+    return PromotionOutcome(promoted=should_promote, reason=reason)
 
 
 def add_predicted_life_remaining(
@@ -424,6 +624,7 @@ async def train_all() -> None:
                 "n_samples": result.n_samples,
                 "promotion_basis": promotion_basis,
             },
+            feature_names=tire_deg_model.FEATURE_COLUMNS,
         )
         tire_deg_results[compound] = result
 
@@ -471,6 +672,7 @@ async def train_all() -> None:
             "positive_rate": pit_result.positive_rate,
             "n_samples": pit_result.n_samples,
         },
+        feature_names=pit_predictor.FEATURE_COLUMNS,
     )
 
     logger.info("Training complete. version_tag=%s", version_tag)

@@ -37,6 +37,7 @@ function buildGaps(count: number): DriverGap[] {
     position: i + 1,
     gap_to_ahead_seconds: i === 0 ? 0 : 1.234,
     gap_to_behind_seconds: 1.234,
+    laps_behind: 0,
   }))
 }
 
@@ -55,6 +56,7 @@ describe("LiveTimingTower", () => {
     vi.mocked(useLiveTelemetry).mockReturnValue({
       lapsByDriver: {},
       readyState: "closed",
+      staleConnection: false,
     })
   })
 

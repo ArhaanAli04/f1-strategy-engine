@@ -2,6 +2,7 @@ import { useMemo } from "react"
 import { useQueries } from "@tanstack/react-query"
 import { driverLapsQueryOptions } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { LoadingSkeleton } from "@/components/shared/LoadingSkeleton"
 import { cn } from "@/lib/utils"
@@ -70,6 +71,12 @@ function formatTimeValue(key: TimeKey, value: number | null): string {
 export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
   const { data: drivers } = useDrivers()
   const { data: gapsResponse } = useSessionGaps(sessionId)
+  // Same live-progression fix as telemetry/LapTimeChart.tsx: driverLapsQueryOptions
+  // fetches each driver's WHOLE session, already-ingested laps — lapsByDriver
+  // below is filtered down per-driver to this WS-reported current lap so the
+  // heatmap grows in sync with the lap chart during a live/replay session,
+  // instead of jumping straight to every driver's full data on load.
+  const { lapsByDriver: liveLapsByDriver } = useLiveTelemetry(sessionId)
   const selectedDriverId = useSessionStore((state) => state.selectedDriverId)
   const setSelectedDriver = useSessionStore((state) => state.setSelectedDriver)
 
@@ -107,13 +114,23 @@ export function SectorHeatmap({ sessionId }: SectorHeatmapProps) {
   const lapsByDriver = useMemo(() => {
     const map = new Map<string, LapDataResponse[]>()
     orderedDriverIds.forEach((driverId, index) => {
-      map.set(driverId, lapsQueries[index]?.data?.items ?? [])
+      const allLaps = lapsQueries[index]?.data?.items ?? []
+      const liveEvent = liveLapsByDriver[driverId]
+      // No WS lap-completion event has EVER arrived for this driver this page
+      // session — no live/replay session active, this is plain historical
+      // viewing, so show their full dataset (same rule as LapTimeChart.tsx).
+      // Only a driver WITH a live entry gets filtered to their current lap.
+      const filtered =
+        liveEvent === undefined
+          ? allLaps
+          : allLaps.filter((lap) => lap.lap_number <= liveEvent.lap_number)
+      map.set(driverId, filtered)
     })
     return map
-    // orderedDriverIds is the real change signal; lapsQueries is read for
-    // its current .data on every render regardless.
+    // orderedDriverIds is the real change signal; lapsQueries/liveLapsByDriver
+    // are read for their current values on every render regardless.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderedDriverIds, lapsQueries])
+  }, [orderedDriverIds, lapsQueries, liveLapsByDriver])
 
   const sessionBests = useMemo(() => {
     const bests: Record<TimeKey, number | null> = {

@@ -24,7 +24,7 @@ raw) vs. get_pit_window_with_explanation (uncached wrapper).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import redis.asyncio as aioredis
@@ -53,6 +53,7 @@ from backend.schemas.race_schema import (
 from backend.scripts._ingest_common import (
     RoundSkippedError,
     get_or_create_circuit,
+    get_or_create_race,
     get_or_create_session,
     resolve_scheduled_start,
 )
@@ -193,6 +194,62 @@ async def get_race(
         NotFoundError: If no race with this ID exists.
     """
     data = await _fetch_race(client, db, race_id)
+    return RaceResponse.model_validate(data)
+
+
+def _key_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> str:
+    return f"f1:race:by_session:{session_id}:detail"
+
+
+@cacheable(ttl=RACE_DETAIL_TTL_SECONDS, key_fn=_key_race_by_session)
+async def _fetch_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> dict[str, Any]:
+    query = (
+        select(Race)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .options(selectinload(Race.circuit), selectinload(Race.sessions))
+        .where(SessionModel.id == session_id)
+    )
+    race = (await db.execute(query)).scalar_one_or_none()
+    if race is None:
+        raise NotFoundError(f"No race found for session {session_id}")
+    return RaceResponse.model_validate(race).model_dump(mode="json")
+
+
+async def get_race_by_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+) -> RaceResponse:
+    """Fetch the race (+ circuit + sessions) that owns a given session_id.
+
+    Day 43's Circuit Map Panel fix: CircuitMapPanel previously resolved its
+    circuit outline/transform via GET /races/upcoming, which has nothing to
+    do with whichever session is actually being viewed — correct for the
+    "no session selected yet" landing state, wrong the moment a Demo Replay
+    or historical session is open (confirmed live: viewing British GP while
+    the real upcoming race was Monza rendered Monza's track shape and
+    transform against Silverstone's real coordinates). This is the
+    session-scoped lookup CircuitMapPanel's own code comment already
+    flagged as missing ("there's no session_id -> circuit_id endpoint").
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_race_by_session).
+        db: Async DB session.
+        session_id: Session whose owning race to fetch.
+    Returns:
+        The race (same shape as GET /races/{race_id}).
+    Raises:
+        NotFoundError: No session with this ID exists.
+    """
+    data = await _fetch_race_by_session(client, db, session_id)
     return RaceResponse.model_validate(data)
 
 
@@ -426,21 +483,77 @@ async def get_current_race(
 # external call every cold miss would otherwise pay.
 UPCOMING_RACE_TTL_SECONDS = 300
 UPCOMING_RACE_NOT_FOUND_TTL_SECONDS = 60
+# race_date alone is date-only, so a same-day comparison can't tell "hasn't
+# started yet" from "finished hours ago" — both satisfy race_date >= today.
+# Fallback only (see _fetch_upcoming_race_from_db): a race whose R session
+# started more than this long ago, with no f1:{season}:{round}:gaps:final
+# snapshot to consult (never live-ingested, e.g. a season far in the future),
+# is treated as concluded. F1's own regulatory cap is 3 hours elapsed from
+# the scheduled start (red flags included) before a race is called off, so
+# this is already generous without needing extra padding on top.
+RACE_CONCLUDED_BUFFER = timedelta(hours=3)
 
 
 def _key_upcoming_race() -> str:
     return f"f1:races:upcoming:{datetime.now(UTC).year}"
 
 
-async def _fetch_upcoming_race_from_db(db: AsyncSession, season: int, today: date) -> Race | None:
+async def _fetch_upcoming_race_from_db(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int,
+    now: datetime,
+) -> Race | None:
+    """First race, in date order, whose race weekend hasn't concluded yet.
+
+    race_date >= today keeps returning today's race all day, same as before
+    (needed so CircuitMapPanel's pre-race countdown mode still finds today's
+    race before it starts) — the fix is skipping PAST a same-day race once
+    it's confirmed concluded, rather than treating "today" as unconditionally
+    still-upcoming. Confirmed live (2026 Dutch GP): without this, /races/
+    upcoming kept returning the just-finished race indefinitely (all day,
+    not just "immediately after" as originally intended — see this file's
+    other callers' comments), which CircuitMapPanel's "finished" mode
+    displays as "Next: <that same race>".
+
+    "Concluded" is decided by, in order: (1) f1:{season}:{round}:gaps:final
+    existing — the authoritative signal ingest_live_session.py's live
+    ingestion snapshots once a session ends (see telemetry_service.py's
+    _compute_session_gaps docstring), definitive when available; (2) falling
+    back to RACE_CONCLUDED_BUFFER elapsed since the R session's scheduled
+    start, for a race this deployment never live-ingested (a future season,
+    or live ingestion simply wasn't run for it) and so has no such snapshot.
+
+    Args:
+        client: Redis client, to check each candidate's gaps:final key.
+        db: Async DB session.
+        season: Season year.
+        now: Current time (passed in rather than recomputed, so one "now" is
+            used across the whole lookup — see get_upcoming_race).
+    Returns:
+        The next not-yet-concluded race, or None if every race_date >= today
+        row this season has already concluded (or there are none at all).
+    """
     query = (
         select(Race)
         .options(selectinload(Race.circuit), selectinload(Race.sessions))
-        .where(Race.season == season, Race.race_date >= today)
+        .where(Race.season == season, Race.race_date >= now.date())
         .order_by(Race.race_date.asc())
-        .limit(1)
     )
-    return (await db.execute(query)).scalar_one_or_none()
+    races = (await db.execute(query)).scalars().all()
+    for race in races:
+        r_session_start = _race_session_scheduled_start(race, "R")
+        # No scheduled R-session time yet (e.g. a freshly FastF1-fallback-
+        # seeded race whose sessions haven't been resolved), or it's still
+        # in the future — nothing to conclude yet, so this is the one.
+        if r_session_start is None or r_session_start > now:
+            return race
+        final_key = f"f1:{season}:{race.round_number}:gaps:final"
+        if await cache_get(client, final_key) is not None:
+            continue  # authoritatively confirmed concluded — try the next race
+        if r_session_start + RACE_CONCLUDED_BUFFER > now:
+            return race  # started, no confirmation either way, buffer not elapsed
+    return None
 
 
 def _race_session_scheduled_start(race: Race, session_type: str) -> datetime | None:
@@ -463,32 +576,59 @@ def _to_upcoming_race_response(race: Race) -> dict[str, Any]:
 
 
 async def _fetch_upcoming_race_from_fastf1(
-    db: AsyncSession, season: int, today: date
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int,
+    now: datetime,
 ) -> dict[str, Any]:
     """Self-updating fallback: pull the season schedule directly from FastF1 and
     persist it, so a brand-new season needs no manual seed script before this
     endpoint works. scripts/seed_race_schedule.py (optional, manual) can still
     pre-populate a season's schedule ahead of time — see CLAUDE.md.
 
+    Only reached when _fetch_upcoming_race_from_db found nothing — but that
+    can mean either "no rows in the DB at all" or "every remaining DB row is
+    already confirmed concluded" (2026 Dutch GP: exactly this, once
+    _fetch_upcoming_race_from_db started correctly skipping it). Candidates
+    here get the same concluded-check for that second case — without it,
+    this immediately re-resolved the *same* just-finished race from FastF1's
+    own schedule (which has no concluded-state concept of its own) and
+    get_or_create_race's existing-row lookup returned that unchanged instead
+    of advancing to the real next round.
+
     Args:
+        client: Redis client, to check each candidate's gaps:final key.
         db: Async DB session.
-        season, today: Same as get_upcoming_race — passed through rather than
-            recomputed, so a single "now" is used across the whole lookup.
+        season: Season year.
+        now: Same "now" as get_upcoming_race's caller — passed through rather
+            than recomputed, so one value is used across the whole lookup.
     Returns:
         JSON-serialisable dict matching UpcomingRaceResponse.
     Raises:
-        NotFoundError: FastF1 has no remaining events for this season, or the
-            resolved event's circuit can't be resolved (unmapped/unseeded —
-            same "don't paper over a real data gap" precedent as
-            _fetch_current_race).
+        NotFoundError: FastF1 has no remaining not-yet-concluded events for
+            this season, or the resolved event's circuit can't be resolved
+            (unmapped/unseeded — same "don't paper over a real data gap"
+            precedent as _fetch_current_race).
     """
     from fastf1 import get_event_schedule
 
     schedule = get_event_schedule(season, include_testing=False)
-    upcoming = schedule[schedule["EventDate"].dt.date >= today].sort_values("EventDate")
-    if upcoming.empty:
+    candidates = schedule[schedule["EventDate"].dt.date >= now.date()].sort_values("EventDate")
+
+    event = None
+    for _, candidate in candidates.iterrows():
+        r_session_start = resolve_scheduled_start(candidate, "R")
+        if r_session_start is None or r_session_start > now:
+            event = candidate
+            break
+        final_key = f"f1:{season}:{int(candidate['RoundNumber'])}:gaps:final"
+        if await cache_get(client, final_key) is not None:
+            continue  # authoritatively confirmed concluded — try the next one
+        if r_session_start + RACE_CONCLUDED_BUFFER > now:
+            event = candidate
+            break
+    if event is None:
         raise NotFoundError(f"No upcoming race found for season {season}")
-    event = upcoming.iloc[0]
 
     try:
         circuit = await get_or_create_circuit(db, event["Location"])
@@ -498,17 +638,14 @@ async def _fetch_upcoming_race_from_fastf1(
             f"schedule but its circuit could not be resolved: {exc}"
         ) from exc
 
-    race = Race(
-        id=uuid.uuid4(),
+    race = await get_or_create_race(
+        db,
         season=season,
         round_number=int(event["RoundNumber"]),
         circuit_id=circuit.id,
         race_date=event["EventDate"].date(),
-        status="scheduled",
         event_name=event["EventName"],
     )
-    db.add(race)
-    await db.flush()
 
     for session_type in ("FP1", "FP2", "FP3", "Q", "R"):
         await get_or_create_session(
@@ -546,14 +683,15 @@ async def _fetch_and_cache_upcoming_race(
     db: AsyncSession,
     key: str,
 ) -> UpcomingRaceResponse:
-    today = datetime.now(UTC).date()
+    now = datetime.now(UTC)
+    today = now.date()
     season = today.year
     try:
-        race = await _fetch_upcoming_race_from_db(db, season, today)
+        race = await _fetch_upcoming_race_from_db(client, db, season, now)
         data = (
             _to_upcoming_race_response(race)
             if race is not None
-            else await _fetch_upcoming_race_from_fastf1(db, season, today)
+            else await _fetch_upcoming_race_from_fastf1(client, db, season, now)
         )
     except NotFoundError as exc:
         await cache_set(
@@ -574,10 +712,14 @@ async def get_upcoming_race(
 ) -> UpcomingRaceResponse:
     """Resolve the next race after today in the current year — DB first, FastF1-schedule fallback.
 
-    Checks the races table for the earliest race_date >= today in
-    datetime.now(UTC).year first (fast, no external call). If nothing is
+    Checks the races table for the earliest race_date >= today, in
+    datetime.now(UTC).year, whose race weekend hasn't concluded yet (see
+    _fetch_upcoming_race_from_db/RACE_CONCLUDED_BUFFER — a same-day race is
+    skipped once well past its scheduled finish, not treated as upcoming
+    for the rest of the day) first (fast, no external call). If nothing is
     ingested yet for the current year (e.g. a brand-new season before any
-    ingestion has run), falls back to FastF1's own event schedule
+    ingestion has run, or every remaining race_date >= today row has already
+    concluded), falls back to FastF1's own event schedule
     (fastf1.get_event_schedule) and persists what it finds — circuit,
     race, and all 5 sessions — so this is self-updating season over season
     with no manual seed script required (scripts/seed_race_schedule.py

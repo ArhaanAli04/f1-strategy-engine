@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -57,6 +57,32 @@ class StrategyOverviewResponse(BaseModel):
     drivers: list[CompetitorStrategyEntry]
 
 
+class StrategyPredictionHistoryEntry(BaseModel):
+    """One StrategyPrediction row in a driver's lap-by-lap progression history.
+
+    Supplementary to StrategyOverviewResponse (which stays live/current, one
+    row per driver) — this is the full history for a single driver, ordered
+    oldest-first. predicted_pit_lap maps from the StrategyPrediction model's
+    optimal_pit_lap column (renamed at the API boundary only — see
+    strategy_service.get_strategy_prediction_history).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    lap_number: int | None
+    predicted_pit_lap: int
+    pit_probability: float
+    undercut_score: float
+    overcut_score: float
+    created_at: datetime
+
+
+class StrategyPredictionHistoryResponse(BaseModel):
+    session_id: uuid.UUID
+    driver_id: uuid.UUID
+    predictions: list[StrategyPredictionHistoryEntry]
+
+
 class StrategyComparisonEntry(BaseModel):
     rank: int
     predicted_finishing_position: int
@@ -67,3 +93,22 @@ class StrategyComparisonResponse(BaseModel):
     session_id: uuid.UUID
     driver_id: uuid.UUID
     strategies: list[StrategyComparisonEntry]
+
+
+class LastIngestedSessionResponse(BaseModel):
+    """The R session with the newest race_date that has ingested lap data.
+
+    Backs GET /strategy/last-ingested-session — the Strategy Simulator's
+    session source when no race is live. event_name is NULL for rows ingested
+    before that column was populated (pre-2026); the frontend falls back to
+    circuit_name.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    session_id: uuid.UUID
+    season: int
+    round_number: int
+    event_name: str | None
+    circuit_name: str
+    race_date: date

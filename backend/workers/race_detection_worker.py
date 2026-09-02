@@ -17,7 +17,10 @@ See CLAUDE.md's Auto Race Detection section for the enable/disable switch,
 the dedup key, and the grace window.
 """
 
+import json
 import logging
+import os
+import signal
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -26,6 +29,7 @@ import redis
 
 from backend.core.config import get_live_timing_settings, get_redis_settings
 from backend.scripts._ingest_common import combine_ergast_date_time
+from backend.services.demo_service import DEMO_REPLAY_STATE_KEY
 from backend.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,39 @@ def _already_triggered(client: redis.Redis, season: int, round_number: int) -> b
     key = _trigger_key(season, round_number)
     claimed = client.set(key, "1", nx=True, ex=_TRIGGER_KEY_TTL_SECONDS)
     return not claimed
+
+
+def _force_stop_demo_replay(client: redis.Redis) -> None:  # type: ignore[type-arg]
+    """Terminate any running Demo Replay before launching real live ingestion.
+
+    A Demo Replay and a live ingestor both write f1:{season}:{round}:gaps and
+    f1:{season}:{round}:car:{n}:position — a real race always takes priority.
+    SIGTERM routes into replay_pipeline.py's graceful shutdown handler. A
+    bare NX-claim sentinel (a start still in progress) has no pid to signal;
+    clearing the key is enough. See CLAUDE.md's Auto Race Detection section.
+
+    Args:
+        client: The task's sync Redis client (decode_responses=True).
+    Returns:
+        None.
+    """
+    raw = client.get(DEMO_REPLAY_STATE_KEY)
+    if raw is None:
+        return
+
+    try:
+        pid = json.loads(raw).get("pid")
+    except (json.JSONDecodeError, AttributeError):
+        pid = None
+
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        logger.warning("Force-stopped demo replay (pid %s) to launch live ingestion", pid)
+
+    client.delete(DEMO_REPLAY_STATE_KEY)
 
 
 def _launch_ingestion_subprocess(season: int, round_number: int) -> None:
@@ -130,6 +167,10 @@ def check_for_live_session() -> None:
                 "Season %d round %d already auto-triggered, skipping", season, round_number
             )
             return
+        # The dedup claim is now held — a real race is launching. Stop any
+        # active demo replay first so it can't keep writing the shared
+        # timing/position keys the live ingestor is about to own.
+        _force_stop_demo_replay(client)
     finally:
         client.close()
 

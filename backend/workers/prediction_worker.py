@@ -29,7 +29,7 @@ from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
-from backend.services import strategy_service
+from backend.services import alert_service, strategy_service
 from backend.services.ml import pit_predictor, race_simulator, tire_deg_model
 from backend.services.ml.race_simulator import DriverRaceState, RaceSimulationInput
 from backend.workers.celery_app import app
@@ -123,6 +123,11 @@ def _load_models() -> dict[str, Any]:
     for filename in _MODEL_FILES:
         path = _download_from_s3(filename)
         _model_cache[filename] = joblib.load(path)
+    # Guards against a stale/schema-incompatible production model (e.g. the
+    # 8-feature tire_deg_wet.pkl leftover from the reverted weather
+    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # context.md) by aliasing it to a compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
     return _model_cache
 
 
@@ -586,11 +591,28 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
                 session_id=session_id,
                 driver_id=driver_id,
                 predicted_at=datetime.now(UTC),
+                lap_number=int(context.get("lap_number", 0)),
                 **prediction,
             )
             db.add(row)
             await db.commit()
             f1_strategy_predictions_total.inc()
+
+            # Real DB alerts (evaluate_threats writes Alert rows + publishes to
+            # f1:alerts:{session_id}) — deliberately separate from
+            # alert_worker.py's FCM-only pubsub path, see alert_service.py's
+            # module docstring. A failure here must not roll back or fail the
+            # StrategyPrediction persist above, which already succeeded.
+            try:
+                await alert_service.evaluate_threats(db, async_redis_client, session_id)
+            except Exception as exc:  # noqa: BLE001 — degrade gracefully, never crash the worker
+                sentry_sdk.capture_exception(exc)
+                logger.warning(
+                    "evaluate_threats failed for session %s after driver %s's prediction",
+                    session_id,
+                    driver_id,
+                    exc_info=True,
+                )
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]
 
@@ -621,10 +643,21 @@ def run_strategy_prediction(context: dict[str, Any]) -> None:
 async def _cumulative_race_time(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID, up_to_lap: int
 ) -> float:
-    """Sum of lap_time_seconds up to and including up_to_lap for one driver.
+    """Elapsed race time for one driver through up_to_lap.
 
     Duplicated from strategy_service._cumulative_race_time — same no-cross-
     service-import reason as _stable_code/_resolve_weather above.
+
+    Prefers LapData.session_elapsed_seconds (a real absolute elapsed time
+    from the driver's latest ingested lap at or before up_to_lap — populated
+    for a backfilled historical session, comparable across drivers
+    regardless of differing NULL-lap-time counts; see CLAUDE.md Deferred
+    Wiring item A and backfill_lap_session_time.py). Falls back to the
+    original SUM(lap_time_seconds) reconstruction when no such row exists —
+    a live-ingested session (never backfilled) or a driver with no laps yet
+    through up_to_lap; either case collapses to the same `elapsed is None`
+    check, and the SUM fallback already returns 0.0 in the latter case, so
+    no separate branch is needed to tell them apart.
 
     Args:
         db: Async DB session.
@@ -634,13 +667,27 @@ async def _cumulative_race_time(
     Returns:
         Cumulative elapsed race time in seconds; 0.0 if no laps recorded yet.
     """
-    query = select(func.sum(LapData.lap_time_seconds)).where(
+    latest_row_query = (
+        select(LapData.session_elapsed_seconds)
+        .where(
+            LapData.session_id == session_id,
+            LapData.driver_id == driver_id,
+            LapData.lap_number <= up_to_lap,
+        )
+        .order_by(LapData.lap_number.desc())
+        .limit(1)
+    )
+    elapsed = (await db.execute(latest_row_query)).scalar_one_or_none()
+    if elapsed is not None:
+        return float(elapsed)
+
+    sum_query = select(func.sum(LapData.lap_time_seconds)).where(
         LapData.session_id == session_id,
         LapData.driver_id == driver_id,
         LapData.lap_number <= up_to_lap,
         LapData.lap_time_seconds.is_not(None),
     )
-    return float((await db.execute(query)).scalar_one() or 0.0)
+    return float((await db.execute(sum_query)).scalar_one() or 0.0)
 
 
 async def _build_race_state(
@@ -716,23 +763,36 @@ async def _build_race_state(
     position_join = (LapData.driver_id == position_subq.c.driver_id) & (
         LapData.lap_number == position_subq.c.ref_lap
     )
+    # Also selects session_elapsed_seconds off the SAME reference row this
+    # join already resolves ("latest row <= current_lap per driver") — a
+    # real absolute elapsed time for a backfilled historical session,
+    # comparable across drivers regardless of differing NULL-lap-time
+    # counts (see CLAUDE.md Deferred Wiring item A and backfill_lap_
+    # session_time.py). Reusing this join instead of a separate query
+    # avoids adding a third DB round trip alongside cumulative_time_query
+    # below, which stays as the fallback source for a live-ingested
+    # (never-backfilled) session.
     position_query = (
-        select(LapData.driver_id, LapData.position)
+        select(LapData.driver_id, LapData.position, LapData.session_elapsed_seconds)
         .join(position_subq, position_join)
         .where(LapData.session_id == session_id)
     )
     position_rows = (await db.execute(position_query)).all()
     position_by_driver: dict[uuid.UUID, int | None] = {row[0]: row[1] for row in position_rows}
+    elapsed_by_driver: dict[uuid.UUID, float | None] = {row[0]: row[2] for row in position_rows}
 
-    # Batched replacement for what was previously one _cumulative_race_time()
-    # call per driver inside the loop below (an N+1: ~20 separate DB round
-    # trips for a 20-driver field, the confirmed dominant cost behind this
-    # task's 65-88s end-to-end runtime — see CLAUDE.md's Deferred Wiring
-    # "Single --pool=solo Celery worker" entry). Same filter shape as
-    # _cumulative_race_time (session_id, lap_number <= current_lap,
-    # lap_time_seconds IS NOT NULL), just grouped by driver_id instead of
-    # scoped to one — every driver in this loop shares the same up_to_lap
-    # (current_lap), so one GROUP BY query covers all of them.
+    # Fallback source for cumulative_race_time_seconds when elapsed_by_driver
+    # has no value for a driver (a live-ingested session, never backfilled —
+    # see backfill_lap_session_time.py). Batched replacement for what was
+    # previously one _cumulative_race_time() call per driver inside the loop
+    # below (an N+1: ~20 separate DB round trips for a 20-driver field, the
+    # confirmed dominant cost behind this task's 65-88s end-to-end runtime —
+    # see CLAUDE.md's Deferred Wiring "Single --pool=solo Celery worker"
+    # entry). Same filter shape as _cumulative_race_time's own SUM fallback
+    # (session_id, lap_number <= current_lap, lap_time_seconds IS NOT NULL),
+    # just grouped by driver_id instead of scoped to one — every driver in
+    # this loop shares the same up_to_lap (current_lap), so one GROUP BY
+    # query covers all of them.
     cumulative_time_query = (
         select(LapData.driver_id, func.sum(LapData.lap_time_seconds))
         .where(
@@ -763,7 +823,16 @@ async def _build_race_state(
         # bakes a fake multi-lap time gap into cumulative_race_time_seconds
         # that swamps real on-track gaps of a few seconds, since simulate_race
         # advances every driver in lockstep from current_lap + 1 onward.
-        cumulative_time = cumulative_time_by_driver.get(lap.driver_id, 0.0)
+        # Prefers elapsed_by_driver (real absolute elapsed time, from the
+        # same current_lap-anchored row as starting_position below) over the
+        # cumulative_time_by_driver SUM fallback — same session_elapsed_
+        # seconds-first pattern as _cumulative_race_time above.
+        driver_elapsed = elapsed_by_driver.get(lap.driver_id)
+        cumulative_time = (
+            driver_elapsed
+            if driver_elapsed is not None
+            else cumulative_time_by_driver.get(lap.driver_id, 0.0)
+        )
         starting_position = (
             position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
         )
@@ -886,6 +955,19 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             compound-validated by SimulateStrategyRequest's model_validator).
     Returns:
         SimulateStrategyResponse-shaped dict (JSON-serialisable).
+    Raises:
+        NotFoundError: No session with this ID exists.
+        ValidationError: current_lap exceeds this session's real progress by
+            more than one lap — see strategy_service.validate_current_lap's
+            own docstring. Checked here too (defense in depth), not just in
+            apis/v1/strategy.py's simulate_strategy route: this task can be
+            enqueued directly (run_race_simulation.delay/.run), bypassing the
+            route entirely, and must not be able to skip the check that way.
+            Raising here degrades to a Celery task FAILURE (logged, no
+            result stored) rather than silently running phantom laps beyond
+            the session's actual race distance — see
+            docs/simulator-issues-wet-model-and-position-context.md's
+            Checkpoint-6 follow-up finding.
     """
     models = _load_models()
     tire_deg_pipelines = {
@@ -910,6 +992,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
     session_factory = _get_session_factory()
     try:
         async with session_factory() as db:
+            await strategy_service.validate_current_lap(db, session_id, current_lap)
             race_state = await _build_race_state(
                 db,
                 async_redis_client,
@@ -922,9 +1005,15 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             )
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]
-
-    # See telemetry_worker._persist_lap for why this dispose is required.
-    await get_engine().dispose()
+        # See telemetry_worker._persist_lap for why this dispose is required.
+        # In its own finally (not just after the try/finally above, as this
+        # was before validate_current_lap existed): validate_current_lap
+        # raising here is now the expected, common rejection path for a bad
+        # current_lap, not a rare failure — skipping dispose on that path
+        # would leak the pooled connection into a later, different-loop
+        # asyncio.run() far more often than the original rare-NoResultFound
+        # case this comment already accounted for.
+        await get_engine().dispose()
 
     forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None
     if pit_laps:

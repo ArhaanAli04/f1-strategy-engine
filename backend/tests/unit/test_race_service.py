@@ -433,13 +433,13 @@ def test_to_upcoming_race_response_maps_race_fields() -> None:
 
 @pytest.mark.unit
 async def test_fetch_upcoming_race_from_db_returns_race_when_found(
-    mock_db_session: AsyncMock,
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
 ) -> None:
     race = _fake_race(uuid.uuid4())
-    mock_db_session.execute.return_value = _scalar_one_or_none_result(race)
+    mock_db_session.execute.return_value = _scalars_all_result([race])
 
     result = await race_service._fetch_upcoming_race_from_db(
-        mock_db_session, 2026, date(2026, 8, 1)
+        fakeredis, mock_db_session, 2026, datetime(2026, 8, 1, tzinfo=UTC)
     )
 
     assert result is race
@@ -447,20 +447,47 @@ async def test_fetch_upcoming_race_from_db_returns_race_when_found(
 
 @pytest.mark.unit
 async def test_fetch_upcoming_race_from_db_returns_none_when_nothing_found(
-    mock_db_session: AsyncMock,
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
 ) -> None:
-    mock_db_session.execute.return_value = _scalar_one_or_none_result(None)
+    mock_db_session.execute.return_value = _scalars_all_result([])
 
     result = await race_service._fetch_upcoming_race_from_db(
-        mock_db_session, 2026, date(2026, 8, 1)
+        fakeredis, mock_db_session, 2026, datetime(2026, 8, 1, tzinfo=UTC)
     )
 
     assert result is None
 
 
 @pytest.mark.unit
+async def test_fetch_upcoming_race_from_db_skips_concluded_same_day_race(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """A same-day race with a gaps:final snapshot is skipped in favor of the
+    next race_date >= today row — reproduces the 2026 Dutch GP bug this
+    guards against (finished race kept being returned as "upcoming" all day).
+    """
+    concluded_race = _fake_race(uuid.uuid4())
+    concluded_race.round_number = 12
+    concluded_race.sessions = [
+        type(
+            "S", (), {"session_type": "R", "scheduled_start": datetime(2026, 8, 23, 13, tzinfo=UTC)}
+        )()
+    ]
+    next_race = _fake_race(uuid.uuid4())
+    next_race.round_number = 13
+    mock_db_session.execute.return_value = _scalars_all_result([concluded_race, next_race])
+    await fakeredis.set("f1:2026:12:gaps:final", "{}")
+
+    result = await race_service._fetch_upcoming_race_from_db(
+        fakeredis, mock_db_session, 2026, datetime(2026, 8, 23, 16, tzinfo=UTC)
+    )
+
+    assert result is next_race
+
+
+@pytest.mark.unit
 async def test_fetch_upcoming_race_from_fastf1_raises_when_schedule_has_no_future_events(
-    mock_db_session: AsyncMock,
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
 ) -> None:
     past_event = pd.DataFrame(
         {
@@ -474,13 +501,15 @@ async def test_fetch_upcoming_race_from_fastf1_raises_when_schedule_has_no_futur
     with patch("fastf1.get_event_schedule", return_value=past_event):
         with pytest.raises(NotFoundError):
             await race_service._fetch_upcoming_race_from_fastf1(
-                mock_db_session, 2026, date(2026, 8, 1)
+                fakeredis, mock_db_session, 2026, datetime(2026, 8, 1, tzinfo=UTC)
             )
 
 
 @pytest.mark.unit
 async def test_fetch_upcoming_race_from_fastf1_raises_when_circuit_unresolvable(
-    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from backend.scripts._ingest_common import RoundSkippedError
 
@@ -498,7 +527,7 @@ async def test_fetch_upcoming_race_from_fastf1_raises_when_circuit_unresolvable(
     with patch("fastf1.get_event_schedule", return_value=future_event):
         with pytest.raises(NotFoundError):
             await race_service._fetch_upcoming_race_from_fastf1(
-                mock_db_session, 2026, date(2026, 8, 1)
+                fakeredis, mock_db_session, 2026, datetime(2026, 8, 1, tzinfo=UTC)
             )
 
 

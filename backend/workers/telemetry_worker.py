@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_redis_settings
 from backend.core.database import get_engine
-from backend.models.telemetry import LapData
-from backend.schemas.telemetry_schema import LapDataCreate
+from backend.models.telemetry import LapData, TireStint
+from backend.schemas.telemetry_schema import LapDataCreate, TireStintCreate
 from backend.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
@@ -68,20 +68,33 @@ async def _persist_lap(lap: LapDataCreate) -> None:
         None.
     """
     session_factory = _get_session_factory()
-    async with session_factory() as db:
-        stmt = (
-            pg_insert(LapData)
-            .values(id=uuid.uuid4(), **lap.model_dump())
-            .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "lap_number"])
-        )
-        await db.execute(stmt)
-        await db.commit()
-
-    # Each task invocation gets its own asyncio.run() (a fresh event loop),
-    # but get_engine()'s pooled asyncpg connections are bound to the loop
-    # that created them. Dispose here so no connection survives into a
-    # later, different-loop task — same convention ingest_historical.py uses.
-    await get_engine().dispose()
+    try:
+        async with session_factory() as db:
+            stmt = (
+                pg_insert(LapData)
+                .values(id=uuid.uuid4(), **lap.model_dump())
+                .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "lap_number"])
+            )
+            await db.execute(stmt)
+            await db.commit()
+    finally:
+        # Each task invocation gets its own asyncio.run() (a fresh event
+        # loop), but get_engine()'s pooled asyncpg connections are bound to
+        # the loop that created them. Dispose here so no connection survives
+        # into a later, different-loop task — same convention
+        # ingest_historical.py uses. In a finally (not just after the `async
+        # with` block, as this was before this fix): a bare
+        # `await get_engine().dispose()` placed after the block is silently
+        # SKIPPED whenever the block raises (a DB constraint violation,
+        # anything LapDataCreate.model_validate didn't already catch) —
+        # identical shape to, and fixed the same way as,
+        # prediction_worker._run_simulation's dispose bug (CLAUDE.md's
+        # Notes, item 1d), which is how this sibling gap was originally
+        # found. Left unguarded, a failed persist leaks a pooled asyncpg
+        # connection into whatever asyncio.run() call happens next in this
+        # worker process (slow pool exhaustion over many failures, not an
+        # immediate crash).
+        await get_engine().dispose()
 
     _publish_lap_completed(lap)
 
@@ -97,3 +110,43 @@ def process_lap(raw_lap: dict[str, object]) -> None:
     """
     lap = LapDataCreate.model_validate(raw_lap)
     asyncio.run(_persist_lap(lap))
+
+
+async def _persist_tire_stint(stint: TireStintCreate) -> None:
+    """Insert a new tire stint row, ignoring duplicates.
+
+    Args:
+        stint: Validated stint payload from the live ingestor's TimingAppData handler.
+    Returns:
+        None.
+    """
+    session_factory = _get_session_factory()
+    try:
+        async with session_factory() as db:
+            stmt = (
+                pg_insert(TireStint)
+                .values(id=uuid.uuid4(), **stint.model_dump())
+                .on_conflict_do_nothing(index_elements=["session_id", "driver_id", "stint_number"])
+            )
+            await db.execute(stmt)
+            await db.commit()
+    finally:
+        # Same dispose-on-exception fix as _persist_lap above — see that
+        # function's own comment for the full explanation. Identical shape,
+        # found in the same file while fixing that one (not part of item
+        # 11's original scope, fixed alongside on request since it's the
+        # same proven fix pattern).
+        await get_engine().dispose()
+
+
+@app.task(name="record_tire_stint")  # type: ignore[untyped-decorator]
+def record_tire_stint(raw_stint: dict[str, object]) -> None:
+    """Validate and persist a new tire stint dispatched by the live ingestor.
+
+    Args:
+        raw_stint: Raw stint fields matching TireStintCreate's schema.
+    Returns:
+        None.
+    """
+    stint = TireStintCreate.model_validate(raw_stint)
+    asyncio.run(_persist_tire_stint(stint))

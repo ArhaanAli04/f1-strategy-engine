@@ -84,6 +84,7 @@ async def test_undercut_threat_fires_alert_above_threshold(
     mock_db_session.execute.side_effect = [
         _scalars_all_result(positions),
         _rows_result([score_row]),
+        _rows_result([]),  # driver_codes — message text not asserted here
         _rows_result([subscriber_row]),
     ]
 
@@ -92,6 +93,65 @@ async def test_undercut_threat_fires_alert_above_threshold(
     assert len(dispatched) == 1
     assert dispatched[0]["driver_id"] == str(trailing_id)
     mock_db_session.add.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_undercut_threat_message_uses_driver_codes_not_uuids(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """The dispatched alert message reads like a timing screen (codes), not raw UUIDs."""
+    session_id = uuid.uuid4()
+    leader_id = uuid.uuid4()
+    trailing_id = uuid.uuid4()
+    subscriber_id = uuid.uuid4()
+
+    positions = [_fake_position(leader_id, 1), _fake_position(trailing_id, 2)]
+    score_row = MagicMock(driver_id=trailing_id, undercut_score=0.75)
+    subscriber_row = MagicMock(user_id=subscriber_id)
+    code_rows = [
+        MagicMock(id=leader_id, code="RUS"),
+        MagicMock(id=trailing_id, code="HUL"),
+    ]
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result(code_rows),
+        _rows_result([subscriber_row]),
+    ]
+
+    dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
+
+    assert len(dispatched) == 1
+    assert dispatched[0]["message"] == "Undercut threat: HUL on RUS (75%)"
+    assert str(trailing_id) not in dispatched[0]["message"]
+    assert str(leader_id) not in dispatched[0]["message"]
+
+
+@pytest.mark.unit
+async def test_undercut_threat_message_falls_back_to_uuid_when_code_missing(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """A driver_id with no resolvable code degrades to the raw id, not a crash."""
+    session_id = uuid.uuid4()
+    leader_id = uuid.uuid4()
+    trailing_id = uuid.uuid4()
+    subscriber_id = uuid.uuid4()
+
+    positions = [_fake_position(leader_id, 1), _fake_position(trailing_id, 2)]
+    score_row = MagicMock(driver_id=trailing_id, undercut_score=0.75)
+    subscriber_row = MagicMock(user_id=subscriber_id)
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result([]),  # neither driver's code resolves
+        _rows_result([subscriber_row]),
+    ]
+
+    dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
+
+    assert dispatched[0]["message"] == f"Undercut threat: {trailing_id} on {leader_id} (75%)"
 
 
 @pytest.mark.unit
@@ -108,6 +168,7 @@ async def test_no_alert_below_threshold(
     mock_db_session.execute.side_effect = [
         _scalars_all_result(positions),
         _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
     ]
 
     dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
@@ -174,6 +235,83 @@ async def test_alert_published_to_redis_pubsub(
 
 
 @pytest.mark.unit
+async def test_undercut_threat_second_call_deduped(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """A second evaluate_threats call for the same pair within the dedup TTL fires nothing.
+
+    Mirrors what actually happens live: prediction_worker calls evaluate_threats
+    once per driver's StrategyPrediction commit, so the same trailing/ahead pair
+    gets re-evaluated many times per lap round — only the first crossing within
+    UNDERCUT_ALERT_DEDUP_TTL_SECONDS should dispatch.
+    """
+    session_id = uuid.uuid4()
+    leader_id = uuid.uuid4()
+    trailing_id = uuid.uuid4()
+    subscriber_id = uuid.uuid4()
+
+    positions = [_fake_position(leader_id, 1), _fake_position(trailing_id, 2)]
+    score_row = MagicMock(driver_id=trailing_id, undercut_score=0.75)
+    subscriber_row = MagicMock(user_id=subscriber_id)
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
+        _rows_result([subscriber_row]),
+    ]
+    first = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
+    assert len(first) == 1
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
+        _rows_result([subscriber_row]),
+    ]
+    second = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
+
+    assert second == []
+    mock_db_session.add.assert_called_once()  # still just the first call's Alert row
+
+
+@pytest.mark.unit
+async def test_undercut_threat_different_pairing_not_deduped(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """A different session re-firing the same trailing driver is a distinct dedup key."""
+    session_id_a = uuid.uuid4()
+    session_id_b = uuid.uuid4()
+    leader_id = uuid.uuid4()
+    trailing_id = uuid.uuid4()
+    subscriber_id = uuid.uuid4()
+
+    positions = [_fake_position(leader_id, 1), _fake_position(trailing_id, 2)]
+    score_row = MagicMock(driver_id=trailing_id, undercut_score=0.75)
+    subscriber_row = MagicMock(user_id=subscriber_id)
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
+        _rows_result([subscriber_row]),
+    ]
+    first = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id_a)
+    assert len(first) == 1
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(positions),
+        _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
+        _rows_result([subscriber_row]),
+    ]
+    second = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id_b)
+
+    assert len(second) == 1
+    assert mock_db_session.add.call_count == 2
+
+
+@pytest.mark.unit
 async def test_undercut_threat_no_subscribers_skips_alert(
     mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
 ) -> None:
@@ -187,6 +325,7 @@ async def test_undercut_threat_no_subscribers_skips_alert(
     mock_db_session.execute.side_effect = [
         _scalars_all_result(positions),
         _rows_result([score_row]),
+        _rows_result([]),  # driver_codes
         _rows_result([]),  # no subscribers
     ]
 

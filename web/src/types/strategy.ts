@@ -61,3 +61,36 @@ export interface StrategyComparisonResponse {
   driver_id: string
   strategies: StrategyComparisonEntry[]
 }
+
+// One StrategyPrediction row in a driver's lap-by-lap progression history —
+// supplementary to StrategyOverviewResponse/UndercutThreatResponse (always
+// live/current), used to reconstruct "the prediction valid at lap N" during
+// replay. lap_number is null for pre-Day-42 rows (see backend docstring).
+export interface StrategyPredictionHistoryEntry {
+  lap_number: number | null
+  predicted_pit_lap: number
+  pit_probability: number
+  undercut_score: number
+  overcut_score: number
+  created_at: string
+}
+
+export interface StrategyPredictionHistoryResponse {
+  session_id: string
+  driver_id: string
+  predictions: StrategyPredictionHistoryEntry[]
+}
+
+// GET /strategy/last-ingested-session — the R session with the newest
+// race_date that has ingested lap data. The Strategy Simulator's session
+// source when no race is live; resolved per-environment. event_name is null
+// for rows ingested before that column existed (pre-2026) — fall back to
+// circuit_name.
+export interface LastIngestedSessionResponse {
+  session_id: string
+  season: number
+  round_number: number
+  event_name: string | null
+  circuit_name: string
+  race_date: string
+}

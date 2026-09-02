@@ -88,11 +88,12 @@ _LAP_HISTORY_DATE_TRUNC_QUERY = text(
 _GAPS_QUERY = text(
     """
     SELECT driver_id, lap_number, position,
+           session_elapsed_seconds,
            SUM(lap_time_seconds) OVER (
                PARTITION BY driver_id ORDER BY lap_number
-           ) AS cumulative_seconds
+           ) AS fallback_cumulative_seconds
     FROM lap_data
-    WHERE session_id = :session_id AND lap_time_seconds IS NOT NULL
+    WHERE session_id = :session_id
     ORDER BY driver_id, lap_number
     """
 )
@@ -441,11 +442,38 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
     rows = result.mappings().all()
 
     # Rows are ordered by (driver_id, lap_number) ascending, so the last row seen
-    # per driver_id carries that driver's running total — i.e. their full
-    # elapsed race time so far.
+    # per driver_id carries that driver's latest lap and running total — i.e.
+    # their full elapsed race time so far. Unlike before session_elapsed_
+    # seconds existed, this loop is no longer restricted to rows with a
+    # non-NULL lap_time_seconds — the old `WHERE lap_time_seconds IS NOT
+    # NULL` filter silently dropped a driver's most recent lap from
+    # consideration entirely whenever that lap had no recorded time (an
+    # out-lap/in-lap/SC lap), understating their real current lap_number
+    # here too, not just their cumulative time (see CLAUDE.md Deferred
+    # Wiring item A). Every row is now visible; cumulative_seconds prefers
+    # the ingested-historical session_elapsed_seconds (a real absolute
+    # elapsed time, comparable across drivers regardless of NULL-lap
+    # counts) and falls back to the pre-existing SUM(lap_time_seconds)
+    # reconstruction only for a session that was never backfilled (a live-
+    # ingested session — see backfill_lap_session_time.py) or a still-NULL
+    # lap_time_seconds row within it.
     latest_per_driver: dict[str, Any] = {}
     for row in rows:
-        latest_per_driver[str(row["driver_id"])] = row
+        elapsed = row["session_elapsed_seconds"]
+        fallback = row["fallback_cumulative_seconds"]
+        # fallback can itself be NULL — SUM() over a window containing zero
+        # non-NULL lap_time_seconds rows so far (e.g. this row IS the
+        # driver's first lap and it has no recorded time) returns NULL, not
+        # 0. Previously impossible to hit: the old query's WHERE clause
+        # guaranteed every row it returned had contributed at least one
+        # non-NULL value to its own running sum. 0.0 matches
+        # _cumulative_race_time's equivalent "no cumulative time yet"
+        # default elsewhere in this codebase.
+        latest_per_driver[str(row["driver_id"])] = {
+            "driver_id": row["driver_id"],
+            "lap_number": row["lap_number"],
+            "cumulative_seconds": elapsed if elapsed is not None else (fallback or 0.0),
+        }
 
     # Laps completed first (descending), cumulative time only as a tiebreaker
     # among drivers on the same lap. cumulative_seconds alone inverts a lapped
@@ -460,17 +488,46 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
     gaps: list[dict[str, Any]] = []
     for i, row in enumerate(ordered):
         cumulative = row["cumulative_seconds"]
-        gap_ahead = cumulative - ordered[i - 1]["cumulative_seconds"] if i > 0 else 0.0
-        gap_behind = (
-            ordered[i + 1]["cumulative_seconds"] - cumulative if i < len(ordered) - 1 else 0.0
-        )
+        lap_number = row["lap_number"]
+
+        # A raw cumulative_seconds subtraction is only meaningful between
+        # drivers on the SAME lap — comparing across a lap boundary compares
+        # different amounts of race distance and produces a nonsensical
+        # (often negative) value. Confirmed live (2026 Dutch GP dry run):
+        # position 7 (lap 30) showed gap_to_ahead_seconds = -54.17s relative
+        # to position 6 (lap 31). laps_behind carries the lap deficit to the
+        # car immediately ahead instead, for the frontend to render "+N LAP".
+        gap_ahead: float | None
+        laps_behind = 0
+        if i == 0:
+            gap_ahead = 0.0
+        else:
+            prev_row = ordered[i - 1]
+            if prev_row["lap_number"] != lap_number:
+                gap_ahead = None
+                laps_behind = prev_row["lap_number"] - lap_number
+            else:
+                gap_ahead = cumulative - prev_row["cumulative_seconds"]
+
+        gap_behind: float | None
+        if i == len(ordered) - 1:
+            gap_behind = 0.0
+        else:
+            next_row = ordered[i + 1]
+            gap_behind = (
+                None
+                if next_row["lap_number"] != lap_number
+                else next_row["cumulative_seconds"] - cumulative
+            )
+
         gaps.append(
             {
                 "driver_id": str(row["driver_id"]),
-                "lap_number": row["lap_number"],
+                "lap_number": lap_number,
                 "position": i + 1,
-                "gap_to_ahead_seconds": float(gap_ahead),
-                "gap_to_behind_seconds": float(gap_behind),
+                "gap_to_ahead_seconds": float(gap_ahead) if gap_ahead is not None else None,
+                "gap_to_behind_seconds": float(gap_behind) if gap_behind is not None else None,
+                "laps_behind": laps_behind,
             }
         )
     return {"session_id": str(session_id), "gaps": gaps}
@@ -497,9 +554,28 @@ async def get_session_gaps(
     """Current lap, track position, and gap to car ahead/behind for every driver.
 
     Backs the f1:{season}:{round}:gaps cache key already documented in
-    CLAUDE.md's Redis Cache Key Schema (TTL 8s). Position is derived from
-    cumulative elapsed race time (lower = further ahead), not LapData.position,
-    since the latter can lag a lap behind live standings.
+    CLAUDE.md's Redis Cache Key Schema (TTL 8s). @cacheable's own cache_get
+    on that key is check #1 (live ingestion, refreshed by ingest_live_session.
+    py's _publish_live_gaps) — a hit there returns before this function body
+    ever runs. This body is only reached on a miss, so it is check #2:
+    f1:{season}:{round}:gaps:final (30-day TTL) — the last known-good live
+    standings, written once a live session ends (currently a manual snapshot;
+    see CLAUDE.md's Deferred Wiring for the automatic version). Only when
+    neither exists does this fall back to _compute_session_gaps (check #3),
+    which prefers a backfilled historical session's real
+    LapData.session_elapsed_seconds (comparable across drivers regardless of
+    differing NULL-lap-time counts — see CLAUDE.md Deferred Wiring item A;
+    verified live against British GP and Belgian GP 2026's real classification,
+    exact position-order match, gaps accurate to <0.2s) and falls back to the
+    original SUM(lap_time_seconds) reconstruction only for a session that was
+    never backfilled (a live-ingested session — see backfill_lap_session_
+    time.py) or a driver whose own lap_time_seconds is still NULL within one.
+    That fallback reconstruction remains confirmed unreliable for a session
+    with entirely MISSING lap rows, a different problem this does not fix
+    (2026 Dutch GP: laps 1-8 were never live-ingested at all, corrupting even
+    the final podium order) — so check #3 should still only ever be reached
+    for a session that was never live-ingested in the first place (a
+    historical replay), same as before.
 
     Args:
         client: Redis client (cache-aside).
@@ -510,6 +586,9 @@ async def get_session_gaps(
         Dict with session_id and a gaps list ordered by track position: driver_id,
         lap_number, position, gap_to_ahead_seconds, gap_to_behind_seconds.
     """
+    final = await cache_get(client, f"f1:{season}:{round_number}:gaps:final")
+    if final is not None:
+        return final  # type: ignore[no-any-return]
     return await _compute_session_gaps(db, session_id)
 
 

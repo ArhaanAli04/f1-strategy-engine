@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -31,6 +32,84 @@ FEATURE_COLUMNS = [
     "driver_id_encoded",
 ]
 TARGET_COLUMN = "lap_time_delta"
+
+# Model-registry filename -> fallback filename to substitute at load time if
+# the primary model's fitted feature count doesn't match len(FEATURE_COLUMNS)
+# — see apply_incompatible_model_fallbacks below. Currently one entry:
+# tire_deg_wet.pkl is a stale 8-feature artifact from the reverted 2026-07-10
+# weather experiment (see CLAUDE.md's simulator-issues doc); tire_deg_inter.pkl
+# is the closest available proxy (both wet-weather compounds, INTER has far
+# more training data and a much better holdout MAE than the stale WET model).
+INCOMPATIBLE_TYRE_MODEL_FALLBACKS = {"tire_deg_wet.pkl": "tire_deg_inter.pkl"}
+
+
+def pipeline_feature_count(pipeline: Any) -> int | None:
+    """Fitted input feature count for a tire_deg Pipeline, if determinable.
+
+    Args:
+        pipeline: A fitted Pipeline (StandardScaler -> XGBRegressor), or any
+            other object (defensive — a model registry entry could in
+            principle be missing/wrong-typed).
+    Returns:
+        The scaler's n_features_in_ as an int, or None if the pipeline isn't
+        a fitted sklearn Pipeline with that attribute (unfitted, mock, or
+        unexpected object) — callers must treat None as "can't tell", not as
+        a mismatch.
+    """
+    try:
+        n_features = pipeline.named_steps["scaler"].n_features_in_
+    except (AttributeError, KeyError, TypeError):
+        return None
+    return int(n_features) if isinstance(n_features, int | np.integer) else None
+
+
+def apply_incompatible_model_fallbacks(models: dict[str, Any]) -> None:
+    """Replace any registry model whose feature count doesn't match FEATURE_COLUMNS.
+
+    Guards against exactly the failure class documented in
+    docs/simulator-issues-wet-model-and-position-context.md: the MAE-only
+    promotion guard in scripts/train_models.py can keep a schema-incompatible
+    model in production (a candidate that can't beat a stale incumbent's MAE
+    is never promoted, even when the incumbent's feature schema no longer
+    matches current inference code). Called once at the end of each
+    _load_models() (strategy_service.py and prediction_worker.py both have
+    their own copy — same no-cross-service-import convention as their other
+    duplicated helpers).
+
+    Args:
+        models: The model registry cache, mutated in place — filename to
+            deserialized model object.
+    Returns:
+        None (in-place mutation).
+    """
+    expected = len(FEATURE_COLUMNS)
+    for filename, fallback_filename in INCOMPATIBLE_TYRE_MODEL_FALLBACKS.items():
+        pipeline = models.get(filename)
+        if pipeline is None:
+            continue
+        n_features = pipeline_feature_count(pipeline)
+        if n_features is None or n_features == expected:
+            continue
+        fallback = models.get(fallback_filename)
+        if fallback is None:
+            logger.error(
+                "%s has %d features (expected %d) and no fallback %s is loaded — "
+                "leaving it in place, inference will likely crash or degrade",
+                filename,
+                n_features,
+                expected,
+                fallback_filename,
+            )
+            continue
+        logger.warning(
+            "%s has %d features (expected %d) — aliasing to %s for this process",
+            filename,
+            n_features,
+            expected,
+            fallback_filename,
+        )
+        models[filename] = fallback
+
 
 # track_temp/air_temp were removed from FEATURE_COLUMNS on 2026-07-16: adding
 # them regressed holdout MAE 30-40% (see CLAUDE.md Data Quality Notes) and the

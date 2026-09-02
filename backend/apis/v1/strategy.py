@@ -19,6 +19,7 @@ task UUID, not a computation itself.
 """
 
 import asyncio
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
@@ -29,6 +30,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.database import get_db
+from backend.core.exceptions import F1StrategyError
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import get_current_user
@@ -39,13 +41,17 @@ from backend.schemas.simulate_schema import (
     SimulateTaskStatusResponse,
 )
 from backend.schemas.strategy_schema import (
+    LastIngestedSessionResponse,
     PitWindowResponse,
     StrategyOverviewResponse,
+    StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
 from backend.services import strategy_service
 from backend.workers.celery_app import app as celery_app
 from backend.workers.prediction_worker import run_race_simulation
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 
@@ -73,7 +79,11 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
     description=(
         "Polls the Celery result backend for a task_id returned by POST "
         "/{session_id}/simulate. status is PENDING/STARTED while running; "
-        "result is populated only once status is SUCCESS."
+        "result is populated only once status is SUCCESS. error is populated "
+        "only once status is FAILURE — a user-facing message when the task "
+        "raised a known F1StrategyError (e.g. current_lap validation), or a "
+        "generic message otherwise (the real exception is logged server-side, "
+        "never echoed here — this route is unauthenticated)."
     ),
     openapi_extra={
         "responses": {
@@ -123,7 +133,51 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
     parsed_result = (
         SimulateStrategyResponse.model_validate(result.result) if result.successful() else None
     )
-    return SimulateTaskStatusResponse(task_id=task_id, status=result.status, result=parsed_result)
+    # On FAILURE, Celery's result backend reconstructs the real exception
+    # instance (confirmed against a real celery.backends.redis.RedisBackend,
+    # not assumed — task_serializer="json" still round-trips a known,
+    # importable exception class faithfully, including F1StrategyError
+    # subclasses' .message). Only F1StrategyError's own .message is ever
+    # surfaced here — this route is unauthenticated (see module docstring),
+    # so an arbitrary internal exception's text must never leak the way
+    # unhandled_error_handler already refuses to for every other route.
+    error = None
+    if result.failed():
+        exc = result.result
+        if isinstance(exc, F1StrategyError):
+            error = exc.message
+        else:
+            logger.error("Simulation task %s failed: %r", task_id, exc)
+            error = "Simulation failed due to an unexpected error."
+    return SimulateTaskStatusResponse(
+        task_id=task_id, status=result.status, result=parsed_result, error=error
+    )
+
+
+# Static-prefix route, registered ahead of the /{session_id}/... routes below
+# — same convention as /simulate/{task_id} above.
+@router.get(
+    "/last-ingested-session",
+    response_model=LastIngestedSessionResponse,
+    summary="Most recently ingested completed race session (by race date)",
+    description=(
+        "The COMPLETED R session with the newest race_date among sessions "
+        "that have ingested lap data. Used by the Strategy Simulator as its "
+        "session source when no race is live — resolved per-environment "
+        "from that environment's own DB. Excludes scheduled/in-progress "
+        "sessions (e.g. a partial live-ingestion dry run) whose lap_data "
+        "may have NULL position or missing laps. 404 only when no completed "
+        "R session with lap data exists yet."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_last_ingested_session(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> LastIngestedSessionResponse:
+    return await strategy_service.get_last_ingested_session(redis_client, db)
 
 
 @router.post(
@@ -136,7 +190,9 @@ async def get_simulation_result(request: Request, task_id: str) -> SimulateTaskS
         "at their current race state. Leave pit_laps empty to let the simulation "
         "decide pit timing autonomously, or set pit_laps + compounds to force a "
         "specific what-if pit plan. Returns immediately with a task_id — poll "
-        "GET /simulate/{task_id} for the result."
+        "GET /simulate/{task_id} for the result. current_lap must be at most one "
+        "lap past this session's real ingested progress (404 if the session "
+        "doesn't exist, 422 if current_lap is implausibly far ahead)."
     ),
     openapi_extra={
         "requestBody": {
@@ -178,8 +234,20 @@ async def simulate_strategy(
     request: Request,
     session_id: uuid.UUID,
     payload: SimulateStrategyRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
     current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> SimulateTaskAccepted:
+    # Reject before enqueueing anything — a bad current_lap should never
+    # cost a Celery round trip, and the caller gets a synchronous 404/422
+    # instead of having to poll a task to FAILURE to find out. See
+    # docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+    # follow-up finding and strategy_service.validate_current_lap's own
+    # docstring for what this actually checks and why. Also enforced
+    # independently inside prediction_worker._run_simulation (defense in
+    # depth) — a caller that dispatches run_race_simulation directly,
+    # bypassing this route, must not be able to skip it.
+    await strategy_service.validate_current_lap(db, session_id, payload.current_lap)
+
     task_payload = {"session_id": str(session_id), **payload.model_dump(mode="json")}
     # .delay() is a quick synchronous Redis broker call, not the simulation
     # itself (that runs in a separate Celery worker process) — but it's still
@@ -270,6 +338,29 @@ async def get_undercut(
 ) -> UndercutThreatResponse:
     return await strategy_service.get_undercut_for_session(
         redis_client, db, session_id, driver_id, target
+    )
+
+
+@router.get(
+    "/{session_id}/{driver_id}/history",
+    response_model=StrategyPredictionHistoryResponse,
+    summary="Get a driver's full StrategyPrediction history for a session",
+    description=(
+        "Returns every persisted prediction for one driver in this session, "
+        "ordered by lap ascending — the progression over time, as opposed to "
+        "/overview which is always the live/current state for the whole field."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_strategy_prediction_history(
+    request: Request,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> StrategyPredictionHistoryResponse:
+    return await strategy_service.get_strategy_prediction_history_for_session(
+        db, session_id, driver_id
     )
 
 

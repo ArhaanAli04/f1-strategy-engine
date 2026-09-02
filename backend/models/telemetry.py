@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,6 +43,23 @@ class LapData(Base):
     )
     lap_number: Mapped[int] = mapped_column(Integer, nullable=False)
     lap_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Elapsed session time (seconds since the session's own first recorded
+    # LapStartTime) at the moment this lap was completed — FastF1's `Time`
+    # column, captured directly rather than reconstructed from LapTime deltas.
+    # Unlike lap_time_seconds (a per-lap delta, NULL on any out-lap/in-lap/SC
+    # lap with no recorded time), this is populated on every historically-
+    # ingested lap row regardless of NULL lap_time_seconds — see CLAUDE.md's
+    # Deferred Wiring item A ("NULL-lap cumulative-sum gap/race-time
+    # reconstruction") for why SUM(lap_time_seconds) across drivers with
+    # differing NULL-lap counts produces non-comparable totals, which this
+    # column exists to fix. NULL for a live-ingested session (ingest_live_
+    # session.py's TimingData stream carries no absolute session clock) —
+    # those sessions fall back to the SUM(lap_time_seconds) reconstruction,
+    # same as before this column existed. Only ever populated by
+    # ingest_historical.py; backfilled for pre-existing rows by
+    # backfill_lap_session_time.py (R sessions only — see that script's own
+    # docstring for scope).
+    session_elapsed_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     compound: Mapped[str] = mapped_column(String(20), nullable=False)
     tyre_age_laps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
@@ -99,3 +126,50 @@ class SectorTime(Base):
     mini_sector_speeds: Mapped[Any] = mapped_column(JSONB, nullable=True)
 
     lap_data: Mapped["LapData"] = relationship(back_populates="sector_times")
+
+
+class DriverPosition(Base):
+    """1Hz-downsampled X/Y track position for Demo Replay's Circuit Map dots.
+
+    Populated once, offline, by scripts/ingest_position_data.py for the 3
+    curated Demo Replay sessions' fixed lap ranges only (see CLAUDE.md's
+    Planned Feature: Live Circuit Map / Day 43) — unlike lap_data, this is
+    NOT populated for every historical session, since raw position telemetry
+    at scale is exactly the volume TimescaleDB was deferred over (see
+    CLAUDE.md's Deferred Telemetry Features). replay_pipeline.py reads these
+    rows back out at replay time and republishes them to the same
+    f1:{season}:{round}:car:{car_number}:position Redis keys the live
+    Position.z-authenticated path writes, so CircuitMapPanel needs no
+    replay-specific frontend code.
+    """
+
+    __tablename__ = "driver_positions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    driver_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False, index=True
+    )
+    lap_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Seconds elapsed since this lap's start, at 1Hz resolution — orders
+    # samples within a lap for replay_pipeline.py's within-lap pacing.
+    timestamp_in_lap: Mapped[float] = mapped_column(Float, nullable=False)
+    x: Mapped[float] = mapped_column(Float, nullable=False)
+    y: Mapped[float] = mapped_column(Float, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_driver_positions_session_lap",
+            "session_id",
+            "lap_number",
+            "timestamp_in_lap",
+        ),
+    )
+
+    session: Mapped["Session"] = relationship(back_populates="driver_positions")
+    driver: Mapped["Driver"] = relationship(back_populates="driver_positions")

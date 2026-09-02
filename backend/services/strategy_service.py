@@ -58,15 +58,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_aws_settings, get_ml_settings
-from backend.core.exceptions import ModelNotLoadedError, NotFoundError
-from backend.models.race import Race
+from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
+from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
+from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.schemas.strategy_schema import (
     CompetitorStrategyEntry,
     FeatureContributionResponse,
+    LastIngestedSessionResponse,
     PitWindowResponse,
     StrategyOverviewResponse,
+    StrategyPredictionHistoryEntry,
+    StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
 from backend.services.cache_service import cacheable
@@ -101,6 +105,10 @@ _STINT2_CANDIDATE_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
 UNDERCUT_PROJECTION_LAPS = 5
 UNDERCUT_MONTE_CARLO_SIMS = 200
 COMPETITOR_STRATEGY_HORIZON_LAPS = 15
+# Historical ingested data is immutable, so a long TTL is fine — the only
+# thing that changes this result is a new ingest, which touches no Redis, so
+# a newer race surfaces after this expires (or a manual cache_service delete).
+LAST_INGESTED_SESSION_TTL_SECONDS = 86400
 
 _model_cache: dict[str, Any] = {}
 
@@ -146,6 +154,11 @@ def _load_models() -> dict[str, Any]:
         return _model_cache
     for filename in _MODEL_FILES:
         _model_cache[filename] = joblib.load(_download_from_s3(filename))
+    # Guards against a stale/schema-incompatible production model (e.g. the
+    # 8-feature tire_deg_wet.pkl leftover from the reverted weather
+    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # context.md) by aliasing it to a compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
     return _model_cache
 
 
@@ -199,6 +212,64 @@ async def resolve_season_round(db: AsyncSession, session_id: uuid.UUID) -> tuple
     return int(row[0]), int(row[1])
 
 
+async def validate_current_lap(db: AsyncSession, session_id: uuid.UUID, current_lap: int) -> None:
+    """Reject a Strategy Simulator request whose current_lap is impossible for this session.
+
+    Two checks, in order:
+    1. session_id must resolve to a real session — otherwise the request's
+       current_lap is meaningless, and the failure should be a clear 404
+       raised here, not a raw NoResultFound surfacing later out of
+       prediction_worker._build_race_state's own unrelated context query.
+    2. current_lap must be at most one lap past this session's real
+       progress: MAX(LapData.lap_number) across the whole session, or 0 if
+       no lap_data exists yet for it at all (a genuine pre-race what-if —
+       see tests/integration/test_strategy_endpoint.py's
+       test_simulate_returns_task_id, which seeds zero LapData rows and
+       expects current_lap=1 to succeed). "One past" allows claiming to be
+       currently completing the very next lap after the last one anyone in
+       the field has finished; current_lap any further ahead is either
+       stale client state or a fabricated race length the session never
+       had — see docs/simulator-issues-wet-model-and-position-context.md's
+       Checkpoint-6 follow-up finding (a current_lap=68 what-if was
+       silently accepted for a session whose real race was 44 laps).
+
+    Public (no leading underscore): called from both
+    apis/v1/strategy.py's simulate_strategy (before enqueueing the Celery
+    task) and prediction_worker._run_simulation (defense in depth — a
+    caller that enqueues run_race_simulation directly, bypassing the route
+    entirely, e.g. a future replay/backfill script, must not be able to
+    skip this check just by not going through the API).
+
+    Args:
+        db: Async DB session.
+        session_id: Session the what-if is for.
+        current_lap: The request's claimed current lap.
+    Returns:
+        None.
+    Raises:
+        NotFoundError: No session with this ID exists.
+        ValidationError: current_lap exceeds this session's real progress + 1.
+    """
+    session_exists = (
+        await db.execute(select(SessionModel.id).where(SessionModel.id == session_id))
+    ).scalar_one_or_none()
+    if session_exists is None:
+        raise NotFoundError(f"Session {session_id} not found")
+
+    max_ingested_lap = (
+        await db.execute(
+            select(func.max(LapData.lap_number)).where(LapData.session_id == session_id)
+        )
+    ).scalar_one_or_none()
+    ceiling = (max_ingested_lap or 0) + 1
+    if current_lap > ceiling:
+        latest = max_ingested_lap if max_ingested_lap is not None else "none"
+        raise ValidationError(
+            f"current_lap ({current_lap}) exceeds session {session_id}'s real progress "
+            f"(latest ingested lap: {latest}, max valid current_lap: {ceiling})"
+        )
+
+
 async def _current_state(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
 ) -> dict[str, Any]:
@@ -246,13 +317,48 @@ async def _current_state(
 async def _cumulative_race_time(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID, up_to_lap: int
 ) -> float:
-    query = select(func.sum(LapData.lap_time_seconds)).where(
+    """Elapsed race time for one driver through up_to_lap.
+
+    Prefers LapData.session_elapsed_seconds (a real absolute elapsed time
+    from the driver's latest ingested lap at or before up_to_lap — populated
+    for a backfilled historical session, comparable across drivers
+    regardless of differing NULL-lap-time counts; see CLAUDE.md Deferred
+    Wiring item A and backfill_lap_session_time.py). Falls back to the
+    original SUM(lap_time_seconds) reconstruction when no such row exists —
+    a live-ingested session (never backfilled) or a driver with no laps yet
+    through up_to_lap; either case collapses to the same `elapsed is None`
+    check, and the SUM fallback already returns 0.0 in the latter case, so
+    no separate branch is needed to tell them apart.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to query.
+        driver_id: Driver to query.
+        up_to_lap: Last lap number (inclusive) to sum.
+    Returns:
+        Cumulative elapsed race time in seconds; 0.0 if no laps recorded yet.
+    """
+    latest_row_query = (
+        select(LapData.session_elapsed_seconds)
+        .where(
+            LapData.session_id == session_id,
+            LapData.driver_id == driver_id,
+            LapData.lap_number <= up_to_lap,
+        )
+        .order_by(LapData.lap_number.desc())
+        .limit(1)
+    )
+    elapsed = (await db.execute(latest_row_query)).scalar_one_or_none()
+    if elapsed is not None:
+        return float(elapsed)
+
+    sum_query = select(func.sum(LapData.lap_time_seconds)).where(
         LapData.session_id == session_id,
         LapData.driver_id == driver_id,
         LapData.lap_number <= up_to_lap,
         LapData.lap_time_seconds.is_not(None),
     )
-    return float((await db.execute(query)).scalar_one() or 0.0)
+    return float((await db.execute(sum_query)).scalar_one() or 0.0)
 
 
 def _weather_key(season: int, round_number: int) -> str:
@@ -355,42 +461,25 @@ def _project_stint_delta(
     return result
 
 
-def _sampled_stint_delta(
-    rng: np.random.Generator,
-    pipeline: Any,
-    compound_encoded: int,
-    driver_code: int,
-    circuit_code: int,
-    start_lap: int,
-    n_laps: int,
-    start_tyre_age: int,
-    total_laps: int,
-) -> float:
-    """One Monte Carlo draw of a stint's total time delta.
+def _sampled_noise(rng: np.random.Generator, n_laps: int, n_samples: int) -> np.ndarray:
+    """n_samples independent Monte Carlo noise draws for one stint segment.
 
-    Deterministic tire_deg prediction plus Gaussian noise whose variance scales
-    with n_laps (the sum of n_laps iid per-lap noise terms), reusing
-    race_simulator.LAP_TIME_NOISE_STD_SECONDS for consistency with the Day 8
-    simulator's noise assumption.
+    Variance scales with n_laps (the sum of n_laps iid per-lap noise terms),
+    reusing race_simulator.LAP_TIME_NOISE_STD_SECONDS for consistency with the
+    Day 8 simulator's noise assumption — same distribution _sampled_stint_delta
+    used to draw one value at a time.
 
-    Args: see _project_stint_delta; rng is the caller's shared Generator.
+    Args:
+        rng: Shared numpy Generator.
+        n_laps: Stint length in laps.
+        n_samples: Number of Monte Carlo draws (UNDERCUT_MONTE_CARLO_SIMS).
     Returns:
-        Sampled total delta in seconds; 0.0 if n_laps <= 0.
+        Array of n_samples noise values; all zero if n_laps <= 0 (matches the
+        old per-draw helper's "empty stint, no noise" behavior).
     """
     if n_laps <= 0:
-        return 0.0
-    deterministic = _project_stint_delta(
-        pipeline,
-        compound_encoded,
-        driver_code,
-        circuit_code,
-        start_lap,
-        n_laps,
-        start_tyre_age,
-        total_laps,
-    )
-    noise = float(rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps)))
-    return deterministic + noise
+        return np.zeros(n_samples)
+    return rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps), size=n_samples)
 
 
 # --- get_optimal_pit_window ---
@@ -649,48 +738,66 @@ async def _undercut_overcut_probability(
     next_compound_encoded = _COMPOUND_ENCODING.get(next_state["compound"], default_compound_code)
 
     rng = np.random.default_rng()
-    wins = 0
-    gap_samples = np.empty(UNDERCUT_MONTE_CARLO_SIMS)
-    for i in range(UNDERCUT_MONTE_CARLO_SIMS):
-        now_delta = PIT_STOP_SECONDS + _sampled_stint_delta(
-            rng,
-            now_pipeline,
-            now_compound_encoded,
-            now_code,
-            now_circuit_code,
-            now_state["lap_number"] + 1,
-            UNDERCUT_PROJECTION_LAPS,
-            0,
-            now_state["total_laps"],
-        )
-        stay_out_delta = _sampled_stint_delta(
-            rng,
-            next_pipeline,
-            next_compound_encoded,
-            next_code,
-            next_circuit_code,
-            next_state["lap_number"] + 1,
-            1,
-            next_state["tyre_age_laps"],
-            next_state["total_laps"],
-        )
-        fresh_delta = PIT_STOP_SECONDS + _sampled_stint_delta(
-            rng,
-            next_pipeline,
-            next_compound_encoded,
-            next_code,
-            next_circuit_code,
-            next_state["lap_number"] + 2,
-            UNDERCUT_PROJECTION_LAPS - 1,
-            0,
-            next_state["total_laps"],
-        )
-        next_delta = stay_out_delta + fresh_delta
 
-        new_deficit = deficit + now_delta - next_delta
-        gap_samples[i] = -new_deficit
-        if new_deficit < 0:
-            wins += 1
+    # The deterministic tire_deg projection for each of the three stint
+    # segments (now/stay_out/fresh) is the SAME on every one of the
+    # UNDERCUT_MONTE_CARLO_SIMS draws — none of _project_stint_delta's inputs
+    # vary with the simulation index, only the noise term does (see
+    # _sampled_noise). The original implementation called pipeline.predict()
+    # inside the loop (3 calls/iteration x 200 iterations = 600 calls/
+    # invocation, ~36s measured) recomputing an identical single-row
+    # prediction every time. Projecting each segment once (3 total predict()
+    # calls) and vectorizing only the noise draws across all 200 simulations
+    # is mathematically equivalent — same deterministic term, same noise
+    # distribution per sample, just not needlessly recomputed — and measured
+    # at <1s. See CLAUDE.md's Deferred Wiring entry for before/after timing.
+    now_deterministic = _project_stint_delta(
+        now_pipeline,
+        now_compound_encoded,
+        now_code,
+        now_circuit_code,
+        now_state["lap_number"] + 1,
+        UNDERCUT_PROJECTION_LAPS,
+        0,
+        now_state["total_laps"],
+    )
+    stay_out_deterministic = _project_stint_delta(
+        next_pipeline,
+        next_compound_encoded,
+        next_code,
+        next_circuit_code,
+        next_state["lap_number"] + 1,
+        1,
+        next_state["tyre_age_laps"],
+        next_state["total_laps"],
+    )
+    fresh_deterministic = _project_stint_delta(
+        next_pipeline,
+        next_compound_encoded,
+        next_code,
+        next_circuit_code,
+        next_state["lap_number"] + 2,
+        UNDERCUT_PROJECTION_LAPS - 1,
+        0,
+        next_state["total_laps"],
+    )
+
+    now_delta = (
+        PIT_STOP_SECONDS
+        + now_deterministic
+        + _sampled_noise(rng, UNDERCUT_PROJECTION_LAPS, UNDERCUT_MONTE_CARLO_SIMS)
+    )
+    stay_out_delta = stay_out_deterministic + _sampled_noise(rng, 1, UNDERCUT_MONTE_CARLO_SIMS)
+    fresh_delta = (
+        PIT_STOP_SECONDS
+        + fresh_deterministic
+        + _sampled_noise(rng, UNDERCUT_PROJECTION_LAPS - 1, UNDERCUT_MONTE_CARLO_SIMS)
+    )
+    next_delta = stay_out_delta + fresh_delta
+
+    new_deficit = deficit + now_delta - next_delta
+    gap_samples = -new_deficit
+    wins = int(np.sum(new_deficit < 0))
 
     return {
         "probability_pit_now_gains_position": wins / UNDERCUT_MONTE_CARLO_SIMS,
@@ -981,6 +1088,153 @@ async def get_competitor_predicted_strategy(
     ]
 
 
+# --- get_strategy_prediction_history ---
+
+
+async def get_strategy_prediction_history(
+    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+) -> list[dict[str, Any]]:
+    """Full StrategyPrediction history for one driver in a session, oldest first.
+
+    Supplementary to get_strategy_overview_for_session (which stays live/
+    current, one row per driver, cached) — this is every persisted prediction
+    for a single driver, for viewing progression over time. Not cached: a
+    cache-aside TTL would show a stale (non-growing) list during exactly the
+    live-progression use case this endpoint exists for, and it's a plain
+    indexed read (ix_strategy_predictions_session_driver_lap_number), not an
+    ML computation like the endpoints that do use @cacheable.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver whose prediction history to return.
+    Returns:
+        One dict per StrategyPrediction row (lap_number, predicted_pit_lap,
+        pit_probability, undercut_score, overcut_score, created_at), ordered
+        by lap_number ascending with NULLS LAST (rows predicted before the
+        2026-08-26 lap_number migration have no lap_number and sort after
+        every row that does), predicted_at ascending as the tiebreak. Empty
+        list if this driver has no predictions yet in this session.
+    """
+    query = (
+        select(StrategyPrediction)
+        .where(
+            StrategyPrediction.session_id == session_id,
+            StrategyPrediction.driver_id == driver_id,
+        )
+        .order_by(
+            StrategyPrediction.lap_number.asc().nulls_last(),
+            StrategyPrediction.predicted_at.asc(),
+        )
+    )
+    rows = (await db.execute(query)).scalars().all()
+    return [
+        {
+            "lap_number": row.lap_number,
+            "predicted_pit_lap": row.optimal_pit_lap,
+            "pit_probability": row.pit_probability,
+            "undercut_score": row.undercut_score,
+            "overcut_score": row.overcut_score,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+# --- get_last_ingested_session ---
+
+
+def _key_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> str:
+    return "f1:strategy:last_ingested_session"
+
+
+@cacheable(ttl=LAST_INGESTED_SESSION_TTL_SECONDS, key_fn=_key_last_ingested_session)
+async def _fetch_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> dict[str, Any]:
+    """Newest-race_date COMPLETED R session that has ingested lap data.
+
+    Race.status == "completed" (quick mitigation for the B1 finding in
+    docs/simulator-issues-wet-model-and-position-context.md, not a fix for
+    the underlying CLAUDE.md Deferred Wiring item A): without this filter,
+    the picker could resolve to a partially live-ingested session whose
+    lap_data has NULL position and unevenly-missing laps (e.g. Dutch GP 2026
+    Round 12, ingested by a Day 36 live dry run, status="scheduled") — that
+    produces nonsensical Strategy Simulator output (garbage starting_position
+    fallback, non-comparable cumulative race times), not a real ingestion
+    fault. A real ingest_historical.py run always sets status="completed".
+
+    Args:
+        client: Redis client (cache-aside — first positional arg per cacheable's contract).
+        db: Async DB session.
+    Returns:
+        JSON-serialisable dict: session_id, season, round_number, event_name
+        (nullable), circuit_name, race_date (ISO string).
+    Raises:
+        NotFoundError: No completed R session with any lap_data exists — a
+            fresh DB, or one with only in-progress/scheduled ingestion so
+            far; @cacheable does not cache the raised result, so this
+            re-queries until data lands.
+    """
+    query = (
+        select(
+            SessionModel.id,
+            Race.season,
+            Race.round_number,
+            Race.event_name,
+            Circuit.name,
+            Race.race_date,
+        )
+        .join(Race, SessionModel.race_id == Race.id)
+        .join(Circuit, Race.circuit_id == Circuit.id)
+        .where(
+            SessionModel.session_type == "R",
+            Race.status == "completed",
+            select(LapData.id).where(LapData.session_id == SessionModel.id).exists(),
+        )
+        .order_by(Race.race_date.desc(), Race.season.desc(), Race.round_number.desc())
+        .limit(1)
+    )
+    row = (await db.execute(query)).one_or_none()
+    if row is None:
+        raise NotFoundError("No ingested race sessions available")
+    return {
+        "session_id": str(row[0]),
+        "season": int(row[1]),
+        "round_number": int(row[2]),
+        "event_name": row[3],
+        "circuit_name": row[4],
+        "race_date": row[5].isoformat(),
+    }
+
+
+async def get_last_ingested_session(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> LastIngestedSessionResponse:
+    """The R session with the newest race_date that has ingested lap data.
+
+    Backs GET /strategy/last-ingested-session — the Strategy Simulator's
+    session source when no race is live. Resolved per-environment from that
+    environment's own DB, so it always points at something valid regardless
+    of which DB the backend is running against.
+
+    Args:
+        client: Redis client (cache-aside, forwarded to _fetch_last_ingested_session).
+        db: Async DB session.
+    Returns:
+        LastIngestedSessionResponse.
+    Raises:
+        NotFoundError: No R session with any lap_data exists (fresh DB).
+    """
+    data = await _fetch_last_ingested_session(client, db)
+    return LastIngestedSessionResponse.model_validate(data)
+
+
 # --- Session-scoped wrappers (route-facing: resolve season/round, then delegate) ---
 
 
@@ -1051,4 +1305,31 @@ async def get_strategy_overview_for_session(
     return StrategyOverviewResponse(
         session_id=session_id,
         drivers=[CompetitorStrategyEntry.model_validate(d) for d in drivers],
+    )
+
+
+async def get_strategy_prediction_history_for_session(
+    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+) -> StrategyPredictionHistoryResponse:
+    """Shape get_strategy_prediction_history's rows into the route's response schema.
+
+    No season/round resolution needed here (unlike the other session-scoped
+    wrappers above) — get_strategy_prediction_history queries by session_id/
+    driver_id directly, it isn't cache-aside keyed by season/round.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver whose prediction history to return.
+    Returns:
+        StrategyPredictionHistoryResponse — empty predictions list if this
+        driver has no persisted predictions yet in this session (not a 404;
+        an empty history is a valid, expected state for a driver with no
+        laps processed yet).
+    """
+    history = await get_strategy_prediction_history(db, session_id, driver_id)
+    return StrategyPredictionHistoryResponse(
+        session_id=session_id,
+        driver_id=driver_id,
+        predictions=[StrategyPredictionHistoryEntry.model_validate(entry) for entry in history],
     )

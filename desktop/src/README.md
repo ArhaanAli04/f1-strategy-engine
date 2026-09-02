@@ -19,6 +19,7 @@ and must be checked by hand whenever their `web/` source changes.
 | `lib/utils.ts` | `web/src/lib/utils.ts` |
 | `components/ui/*.tsx` (11 files: button, card, checkbox, dialog, form, input, label, select, separator, sonner, switch) | `web/src/components/ui/*.tsx` |
 | `components/shared/ErrorBoundary.tsx` | `web/src/components/shared/ErrorBoundary.tsx` |
+| `components/circuit/AnimatedDriverDots.tsx` | `web/src/components/circuit/AnimatedDriverDots.tsx` (render-behind interpolation buffer for live dots; delay derives from `hooks/useDriverPositions.ts`'s `POSITIONS_POLL_INTERVAL_MS`, which is 2s on desktop vs 1s on web) |
 | `index.css` | `web/src/index.css` |
 | `../tailwind.config.js` | `web/tailwind.config.js` |
 | `../postcss.config.js` | `web/postcss.config.js` |

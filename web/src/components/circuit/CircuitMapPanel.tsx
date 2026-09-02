@@ -1,4 +1,5 @@
 import { useMemo } from "react"
+import { AnimatedDriverDots } from "./AnimatedDriverDots"
 import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
@@ -6,63 +7,52 @@ import { padCountdownValue, useCountdown } from "@/hooks/useCountdown"
 import { useDriverCarNumbers, useDriverPositions } from "@/hooks/useDriverPositions"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
+import { useRaceBySession } from "@/hooks/useRaceBySession"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 import { useSessionStore } from "@/stores/sessionStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
-import type { CircuitOutlineTransform } from "@/types"
 
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
-const DOT_RADIUS = 12
-const SELECTED_DOT_RADIUS = 18
-const DOT_STROKE_WIDTH = 1.5
-const SELECTED_DOT_STROKE_WIDTH = 3
-// transform (not cx/cy) so the browser can composite this on the GPU
-// instead of recalculating layout on every one of up to 22 simultaneously
-// moving dots. --duration-dot-glide is slightly under useDriverPositions's
-// 2s poll interval so a dot finishes easing into place before the next
-// update arrives; --ease-in-out-strong reads as a moving object rather
-// than the constant-velocity feel of linear.
-const DOT_TRANSITION = "transform var(--duration-dot-glide) var(--ease-in-out-strong)"
 
-type Mode = "live" | "non-race" | "finished" | "unknown"
-
-// Mirrors extract_circuit_outlines.py's _build_geometry — applies the same
-// X-mirror-correction/rotation/center/scale to a raw live Position.z X/Y
-// sample that was applied to the outline's own points, so both land in the
-// same viewBox frame. See backend/schemas/circuit_schema.py's
-// CircuitOutlineTransform docstring for why the X negation happens first.
-function applyTransform(x: number, y: number, transform: CircuitOutlineTransform) {
-  const correctedX = -x
-  const angle = (transform.rotation_degrees * Math.PI) / 180
-  const cos = Math.cos(angle)
-  const sin = Math.sin(angle)
-  const rotatedX = correctedX * cos - y * sin
-  const rotatedY = correctedX * sin + y * cos
-  return {
-    cx: (rotatedX - transform.center_x) * transform.scale + transform.viewbox_center,
-    cy: (rotatedY - transform.center_y) * transform.scale + transform.viewbox_center,
-  }
-}
+type Mode = "live" | "historical" | "non-race" | "finished" | "unknown"
 
 interface CircuitMapPanelProps {
   sessionId: string
+  // True when this session came from an explicit :sessionId URL param
+  // (a deliberate deep link — e.g. a Demo Replay's own session, or any
+  // other specific historical session), false when RacePage fell back to
+  // resolving one itself (useResolvedSession's "no live race → most recent
+  // completed race" fallback). Distinguishes "the user asked to see THIS
+  // race" (its own circuit is always correct, live or not) from "nothing
+  // else to show, defaulting to something" (where the generic upcoming-race
+  // countdown is the more useful thing to display) — see the mode/outline
+  // logic below for why these need different circuit sources.
+  isExplicitSession: boolean
 }
 
-// Circuit_id/race_name/scheduled_start all come from useUpcomingRace rather
-// than a per-session lookup: there's no session_id -> circuit_id endpoint,
-// and GET /races/upcoming's race_date >= today query keeps it pinned to the
-// same race all day (before, during, and immediately after it runs), so it
-// doubles correctly as "this session's race" for a currently-relevant
-// session. Historical browsing of an old/unrelated session is not yet a
-// real navigation path in this app (DashboardPage is still a stub) — revisit
-// if that changes.
-export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
+// Day 43 fix: circuit_id/outline/transform come from useRaceBySession
+// (sessionId's OWN race) whenever sessionId means something specific —
+// live/replay dots (mode "live") or an explicit deep link (mode
+// "historical") — not useUpcomingRace, which answers a different question
+// ("what's next on the calendar") that has nothing to do with sessionId.
+// Confirmed live, two distinct regressions during Day 43 verification: (1)
+// replaying British GP while the real upcoming race was Monza rendered
+// Monza's outline/transform against Silverstone's real coordinates — fixed
+// by sourcing "live" mode from raceBySession; (2) that fix then broke the
+// OPPOSITE case — visiting /race/{british-gp-session-id} directly (no live
+// data, since no replay is currently running) fell through to "non-race"
+// and showed Monza's outline again, this time under a countdown to a race
+// nobody asked to see. useUpcomingRace is still used below, but only for
+// its own genuinely distinct purpose — the idle "nothing else to show"
+// dashboard state ("non-race"/"finished"), which only applies when
+// sessionId is itself a fallback, not an explicit ask.
+export function CircuitMapPanel({ sessionId, isExplicitSession }: CircuitMapPanelProps) {
+  const { data: raceBySession } = useRaceBySession(sessionId)
   const {
     data: upcomingRace,
     isLoading: upcomingLoading,
     isError: upcomingErrored,
   } = useUpcomingRace()
-  const { data: outline } = useCircuitOutline(upcomingRace?.circuit_id ?? null)
   const { data: positions } = useDriverPositions(sessionId)
   const { data: carNumbers } = useDriverCarNumbers(sessionId)
   const { data: drivers } = useDrivers()
@@ -75,11 +65,19 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
 
   const mode: Mode = isLive
     ? "live"
-    : upcomingLoading || upcomingErrored || !scheduledStart
-      ? "unknown"
-      : new Date(scheduledStart).getTime() > Date.now()
-        ? "non-race"
-        : "finished"
+    : isExplicitSession
+      ? "historical"
+      : upcomingLoading || upcomingErrored || !scheduledStart
+        ? "unknown"
+        : new Date(scheduledStart).getTime() > Date.now()
+          ? "non-race"
+          : "finished"
+
+  const outlineCircuitId =
+    mode === "live" || mode === "historical"
+      ? (raceBySession?.circuit_id ?? null)
+      : (upcomingRace?.circuit_id ?? null)
+  const { data: outline } = useCircuitOutline(outlineCircuitId)
 
   const countdown = useCountdown(mode === "non-race" ? scheduledStart : null)
 
@@ -113,26 +111,15 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
         className="absolute inset-0 h-full w-full"
         aria-hidden="true"
       >
-        {mode === "live" &&
-          transform &&
-          (positions ?? []).map((position) => {
-            const meta = driverByCarNumber.get(position.driver_number)
-            const isSelected = meta !== undefined && meta.driverId === selectedDriverId
-            const { cx, cy } = applyTransform(position.x, position.y, transform)
-            return (
-              <circle
-                key={position.driver_number}
-                r={isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS}
-                fill={meta?.color ?? FALLBACK_TEAM_COLOR}
-                stroke="#fff"
-                strokeWidth={isSelected ? SELECTED_DOT_STROKE_WIDTH : DOT_STROKE_WIDTH}
-                style={{
-                  transform: `translate(${cx}px, ${cy}px)`,
-                  transition: prefersReducedMotion ? "none" : DOT_TRANSITION,
-                }}
-              />
-            )
-          })}
+        {mode === "live" && transform && (
+          <AnimatedDriverDots
+            positions={positions ?? []}
+            transform={transform}
+            driverByCarNumber={driverByCarNumber}
+            selectedDriverId={selectedDriverId}
+            prefersReducedMotion={prefersReducedMotion}
+          />
+        )}
       </svg>
 
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
@@ -143,7 +130,22 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
                 Live Now
               </div>
               <div className="text-2xl font-bold text-foreground">
-                {upcomingRace?.race_name ?? "Race"}
+                {raceBySession?.event_name ?? raceBySession?.circuit?.name ?? "Race"}
+              </div>
+              {!transform && (
+                <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
+                  Track outline unavailable
+                </div>
+              )}
+            </div>
+          )}
+          {mode === "historical" && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Circuit
+              </div>
+              <div className="text-2xl font-bold text-foreground">
+                {raceBySession?.event_name ?? raceBySession?.circuit?.name ?? "Race"}
               </div>
               {!transform && (
                 <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">

@@ -110,8 +110,14 @@ export interface DriverGap {
   driver_id: string
   lap_number: number
   position: number
-  gap_to_ahead_seconds: number
-  gap_to_behind_seconds: number
+  // null when the adjacent driver (ahead/behind respectively) is on a
+  // different lap_number — see laps_behind instead in that case.
+  gap_to_ahead_seconds: number | null
+  gap_to_behind_seconds: number | null
+  laps_behind: number
+  // Only populated by the live-ingestion path (direct from F1's own
+  // TimingData.GapToLeader) — not yet consumed by the UI.
+  gap_to_leader_seconds?: number | null
 }
 
 export interface SessionGapsResponse {

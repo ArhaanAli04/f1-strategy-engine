@@ -58,4 +58,9 @@ export interface SimulateTaskStatusResponse {
   task_id: string
   status: string
   result: SimulateStrategyResponse | null
+  // Populated only when status === "FAILURE" — a user-facing message (a
+  // known validation rejection reaching the worker, or a generic fallback
+  // for anything else; the real exception is never echoed, see
+  // backend/apis/v1/strategy.py's get_simulation_result).
+  error: string | null
 }

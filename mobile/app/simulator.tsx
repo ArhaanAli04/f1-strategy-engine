@@ -18,6 +18,7 @@ import { useDrivers } from "@/hooks/useDrivers"
 import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
 import { isActiveDriver } from "@/utils/drivers"
+import { getApiErrorMessage } from "@/utils/errors"
 import type { SimulateStrategyRequest } from "@/types"
 
 type Step = 1 | 2 | 3 | 4
@@ -163,14 +164,26 @@ export default function SimulatorScreen() {
       pit_laps: pitStops.map((row) => row.lap),
       compounds: pitStops.map((row) => row.compound),
     }
-    setStep(3)
-    const accepted = await simulateMutation.mutateAsync(payload)
-    setTaskId(accepted.task_id)
+    // A bad current_lap (validate_current_lap, see CLAUDE.md's Deferred
+    // Wiring) rejects synchronously here with a 404/422 — stay on step 2 and
+    // surface it via simulateMutation.error below instead of advancing to
+    // step 3's spinner, which would otherwise strand the user with no task
+    // ever created and no FAILURE condition to show a "Try Again". Mirrors
+    // web/src/pages/SimulatorPage.tsx and desktop's copy.
+    try {
+      const accepted = await simulateMutation.mutateAsync(payload)
+      setTaskId(accepted.task_id)
+      setStep(3)
+    } catch {
+      // Rendered from simulateMutation.error in step 2's JSX — nothing more
+      // to do here.
+    }
   }
 
   function handleReset() {
     setStep(1)
     setTaskId(null)
+    simulateMutation.reset()
   }
 
   const step1Valid = sessionId.trim() !== "" && driverId !== "" && Number(remainingLaps) > 0
@@ -312,6 +325,11 @@ export default function SimulatorScreen() {
           >
             <Text className="text-sm font-medium text-foreground">+ Add Pit Stop</Text>
           </Pressable>
+          {simulateMutation.isError && (
+            <Text role="alert" className="text-sm font-medium text-destructive">
+              {getApiErrorMessage(simulateMutation.error, "Failed to start simulation")}
+            </Text>
+          )}
           <View className="flex-row gap-3">
             <Pressable
               onPress={() => setStep(1)}
@@ -334,7 +352,7 @@ export default function SimulatorScreen() {
           <ActivityIndicator size="large" color="#fafafa" />
           <Text className="text-sm text-muted">
             {simulationResult.data?.status === "FAILURE"
-              ? "Simulation failed."
+              ? (simulationResult.data.error ?? "Simulation failed.")
               : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
           </Text>
           {simulationResult.data?.status === "FAILURE" && (

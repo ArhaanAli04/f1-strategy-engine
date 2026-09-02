@@ -32,6 +32,7 @@ from backend.scripts._ingest_common import (
     or_default,
     resolve_scheduled_start,
 )
+from backend.scripts.backfill_tire_data import _regression_slope
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,14 +68,30 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-def load_session(season: int, round_number: int, session_type: str) -> fastf1.core.Session:
+def load_session(
+    season: int, round_number: int, session_type: str, telemetry: bool = False
+) -> fastf1.core.Session:
+    """Load a FastF1 session, caching to disk.
+
+    Args:
+        season: Season year.
+        round_number: Round number within the season.
+        session_type: FastF1 session type code (R, Q, FP1, FP2, FP3).
+        telemetry: Also load position/car telemetry — off by default (this
+            project's lap/stint ingestion never needs it); ingest_position_data.py
+            passes True for its X/Y position backfill.
+    Returns:
+        The loaded FastF1 session.
+    Raises:
+        RoundSkippedError: The session could not be loaded for any reason.
+    """
     settings = get_ml_settings()
     os.makedirs(settings.fastf1_cache_dir, exist_ok=True)
     fastf1.Cache.enable_cache(settings.fastf1_cache_dir)
 
     try:
         session = fastf1.get_session(season, round_number, session_type)
-        session.load(laps=True, telemetry=False, weather=False, messages=False)
+        session.load(laps=True, telemetry=telemetry, weather=False, messages=False)
     except Exception as exc:
         raise RoundSkippedError(
             f"Season {season} round {round_number} ({session_type}) could not be loaded: {exc}"
@@ -89,6 +106,53 @@ def lap_time_to_seconds(value: pd.Timedelta) -> float | None:
     return float(value.total_seconds())
 
 
+def resolve_session_start(laps: pd.DataFrame) -> pd.Timedelta:
+    """Anchor for session_elapsed_seconds: the earliest LapStartTime across the
+    whole session (lap 1's start, effectively race start), not each driver's
+    own first lap — every driver's LapStartTime for lap 1 is identical in
+    practice (confirmed live: 3339.562s for all 22 drivers, British GP 2026
+    R9), and a single session-wide anchor is what makes session_elapsed_
+    seconds directly comparable across drivers, which is the entire point of
+    that column (see CLAUDE.md Deferred Wiring item A). FastF1's `Time` is
+    already session-clock-relative and internally consistent across drivers
+    on its own — this subtraction only reshapes it into a more legible
+    "seconds since race start" number, it isn't load-bearing for correctness.
+
+    Shared by _upsert_lap_data (fresh ingest) and backfill_lap_session_
+    time.py (backfilling pre-existing rows) so both compute the identical
+    anchor for the same session — do not duplicate this logic inline.
+
+    Args:
+        laps: A loaded FastF1 session's `.laps` DataFrame.
+    Returns:
+        The session-wide anchor Timedelta, or Timedelta(0) (no anchor, raw
+        Time used as-is) if LapStartTime is entirely missing for this session.
+    """
+    if "LapStartTime" not in laps:
+        return pd.Timedelta(0)
+    start = laps["LapStartTime"].dropna().min()
+    return start if pd.notna(start) else pd.Timedelta(0)
+
+
+def compute_session_elapsed_seconds(
+    raw_time: pd.Timedelta | None, session_start: pd.Timedelta
+) -> float | None:
+    """LapData.session_elapsed_seconds for one lap: raw_time anchored to session_start.
+
+    Args:
+        raw_time: A lap row's FastF1 `Time` value (session clock at lap end).
+        session_start: This session's anchor, from resolve_session_start.
+    Returns:
+        Elapsed seconds since session_start, or None if raw_time itself is
+        missing (not observed in practice — FastF1's Time is populated on
+        every lap row, including ones with a NULL LapTime — but handled
+        defensively rather than assumed).
+    """
+    if raw_time is None or pd.isna(raw_time):
+        return None
+    return lap_time_to_seconds(raw_time - session_start)
+
+
 async def _upsert_lap_data(
     db: AsyncSession,
     session_id: uuid.UUID,
@@ -97,6 +161,7 @@ async def _upsert_lap_data(
     driver_code_to_id: dict[str, uuid.UUID],
 ) -> int:
     rows: list[dict[str, object]] = []
+    session_start = resolve_session_start(laps)
 
     for _, lap in tqdm(laps.iterrows(), total=len(laps), desc=f"laps ({session_type})"):
         try:
@@ -108,6 +173,10 @@ async def _upsert_lap_data(
                 logger.warning("Skipping lap with missing LapNumber for driver '%s'", lap["Driver"])
                 continue
 
+            session_elapsed_seconds = compute_session_elapsed_seconds(
+                lap.get("Time"), session_start
+            )
+
             rows.append(
                 {
                     "id": uuid.uuid4(),
@@ -115,6 +184,7 @@ async def _upsert_lap_data(
                     "driver_id": driver_id,
                     "lap_number": int(lap["LapNumber"]),
                     "lap_time_seconds": lap_time_to_seconds(lap["LapTime"]),
+                    "session_elapsed_seconds": session_elapsed_seconds,
                     "compound": or_default(lap["Compound"], "UNKNOWN"),
                     "tyre_age_laps": (int(lap["TyreLife"]) if not pd.isna(lap["TyreLife"]) else 0),
                     "is_valid": (
@@ -165,6 +235,22 @@ async def _upsert_tire_stints(
         if compounds.empty:
             continue
 
+        # Slope (seconds/lap) of a linear fit over this stint's valid lap
+        # times — positive means the tyre is degrading. Same definition and
+        # IsAccurate / non-null-time filter as backfill_tire_data.py, computed
+        # inline so a fresh ingest is self-sufficient; backfill_tire_data.py
+        # stays the repair tool for stints ingested before this. None for a
+        # stint with fewer than 2 valid timed laps (_regression_slope's own
+        # guard), matching the previous always-None behaviour for those.
+        valid = stint_laps[stint_laps["IsAccurate"].fillna(False).astype(bool)].copy()
+        valid = valid.dropna(subset=["LapNumber"])
+        valid["lap_time_seconds"] = valid["LapTime"].map(lap_time_to_seconds)
+        valid = valid.dropna(subset=["lap_time_seconds"])
+        avg_deg_per_lap = _regression_slope(
+            [int(n) for n in valid["LapNumber"]],
+            [float(t) for t in valid["lap_time_seconds"]],
+        )
+
         rows.append(
             {
                 "id": uuid.uuid4(),
@@ -174,7 +260,7 @@ async def _upsert_tire_stints(
                 "compound": compounds.iloc[0],
                 "start_lap": int(stint_laps["LapNumber"].min()),
                 "end_lap": int(stint_laps["LapNumber"].max()),
-                "avg_deg_per_lap": None,
+                "avg_deg_per_lap": avg_deg_per_lap,
             }
         )
 

@@ -10,7 +10,7 @@ from backend.core.database import Base
 
 if TYPE_CHECKING:
     from backend.models.strategy import PitEvent, StrategyPrediction
-    from backend.models.telemetry import LapData, TireStint
+    from backend.models.telemetry import DriverPosition, LapData, TireStint
     from backend.models.user import Alert
 
 
@@ -29,6 +29,7 @@ class Driver(Base):
     strategy_predictions: Mapped[list["StrategyPrediction"]] = relationship(back_populates="driver")
     pit_events: Mapped[list["PitEvent"]] = relationship(back_populates="driver")
     alerts: Mapped[list["Alert"]] = relationship(back_populates="driver")
+    driver_positions: Mapped[list["DriverPosition"]] = relationship(back_populates="driver")
 
 
 class Team(Base):
