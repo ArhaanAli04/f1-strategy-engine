@@ -26,6 +26,7 @@ below, not a 1:1 mapping of the Kubernetes commands.
 
 - [Race day checklist](#race-day-checklist)
 - [Post-race weekend: keeping Supabase current](#post-race-weekend-keeping-supabase-current)
+- [One-time: backfill session_elapsed_seconds on Supabase](#one-time-backfill-session_elapsed_seconds-on-supabase)
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
 - [Fly.io deployment](#flyio-deployment)
@@ -97,6 +98,49 @@ or live-pipeline involvement. Set `season`/`round`/`session_type` (default
 Once ingested, consider manually triggering `train-models.yml` afterward so
 the weekly retrain picks up the new round sooner than its Monday 02:00 UTC
 schedule — see that workflow's own docstring.
+
+---
+
+## One-time: backfill session_elapsed_seconds on Supabase
+
+Item 7 (CLAUDE.md Deferred Wiring item A, the NULL-lap cumulative-sum bug —
+✅ fixed 2026-09-02, see CLAUDE.md's own Notes entry) added
+`LapData.session_elapsed_seconds` (migration
+`20260902_add_session_elapsed_seconds_to_lap_data`) and backfilled it for
+every local R session, but **production Supabase has not been touched
+yet** — this is a manual, one-time post-merge step, not something to run
+ahead of the merge.
+
+**Correct sequence, in order — do not run step 2 before step 1 has
+actually landed on Supabase:**
+
+1. **Merge this branch to `main`.** `cd.yml`'s `migrate` job runs `alembic
+   upgrade head` against Supabase (`SUPABASE_DIRECT_URL`) automatically on
+   merge — this adds the `session_elapsed_seconds` column, NULL for every
+   existing row (identical to what happened locally in
+   `backend/migrations/versions/20260902_add_session_elapsed_seconds_to_lap_data.py`
+   before the local backfill ran). Confirm the job succeeded (Actions tab
+   → `cd.yml` → the `migrate` job) before proceeding — do not run step 2
+   against a Supabase DB that hasn't actually picked up the column yet.
+2. **Then, manually run the backfill** against Supabase, same pattern as
+   the tyre-degradation backfill (`backend/scripts/backfill_tire_data.py`)
+   documented in CLAUDE.md's own Notes:
+   ```bash
+   DATABASE_URL=$SUPABASE_DIRECT_URL \
+     .venv/Scripts/python.exe backend/scripts/backfill_lap_session_time.py
+   ```
+   (`postgresql://` → `postgresql+asyncpg://` conversion applied the same
+   way `cd.yml`'s migrate job does, if `SUPABASE_DIRECT_URL` doesn't
+   already carry the `+asyncpg` driver suffix.) No `--season`/`--round`
+   flags needed — Supabase only has the 3 curated 2026 races
+   (`ingest_historical.py`), so this backfills all of them in one run,
+   R-only per the script's own scope decision (see CLAUDE.md's item A
+   Notes entry).
+3. Verify the same way CLAUDE.md's tyre-degradation-backfill entry did:
+   re-query Supabase directly afterward and confirm `session_elapsed_seconds`
+   is populated (`SELECT COUNT(*), COUNT(session_elapsed_seconds) FROM
+   lap_data` for each of the 3 sessions, or reuse this same query pattern
+   from the local verification in CLAUDE.md's Notes entry).
 
 ---
 

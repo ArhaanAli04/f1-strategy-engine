@@ -9,15 +9,22 @@
 >   a real 6-feature WET retrain (Option 1), and the promotion-guard
 >   schema-compatibility check — both now tracked in CLAUDE.md Deferred
 >   Wiring.
-> - **Part B1 (garbage position/cumulative-time inputs) — mitigated, not
->   fixed.** Added `Race.status == "completed"` to `strategy_service
->   ._fetch_last_ingested_session`'s query, per the doc's own "cheap
->   targeted mitigation" suggestion below. The underlying cause (CLAUDE.md
->   Deferred Wiring item A, the NULL-lap cumulative-sum bug) remains open —
->   this only stops the Simulator's auto-picker from *landing on* a
->   partially-live-ingested session like Zandvoort R12; a genuinely
->   completed session with its own missing-lap gaps could still surface the
->   same class of bug.
+> - **Part B1 (garbage position/cumulative-time inputs) — ✅ underlying cause
+>   now fixed 2026-09-02.** The `Race.status == "completed"` mitigation
+>   below (added `strategy_service._fetch_last_ingested_session`'s query
+>   filter) still stands, but the real root cause — CLAUDE.md Deferred
+>   Wiring item A, the NULL-lap cumulative-sum bug — is now fixed too: a new
+>   `LapData.session_elapsed_seconds` column (FastF1's absolute `Lap.Time`,
+>   captured at ingestion and backfilled for existing sessions via
+>   `backend/scripts/backfill_lap_session_time.py`) replaces the
+>   non-comparable `SUM(lap_time_seconds)` reconstruction at all 4 call
+>   sites, falling back to the old behavior only for a live-ingested/
+>   never-backfilled session. See CLAUDE.md's own Notes entry ("Item A —
+>   NULL-lap cumulative-sum gap/race-time reconstruction fixed...") and
+>   `docs/day-deferred-fixes-session2-handoff.md`'s item 7 section for the
+>   full write-up, live verification against real final classifications,
+>   and a genuinely new, distinct, pre-existing limitation it surfaced (no
+>   F1 penalty/post-race-classification data is ingested anywhere).
 > - **Part B2 (no track-condition awareness) — still fully deferred.**
 >   Deliberately left as documentation-only per an explicit scope decision
 >   made during the 2026-08-30 session (neither the heuristic penalty nor

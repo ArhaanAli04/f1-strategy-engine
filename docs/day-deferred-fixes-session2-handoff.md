@@ -24,7 +24,7 @@
 | 4 | `predicted_finish_time` isn't a real elapsed time, just relative deltas | 🔴 deferred | `race_simulator.py` |
 | 5 | `driver_id_encoded` has no real skill signal (hash only) | 🔴 deferred | `race_simulator.py`, `tire_deg_model.py`, `pit_predictor.py` |
 | 6 | No cross-driver reactive/strategic adaptation in the Monte Carlo | 🔴 deferred, long-term | `race_simulator.py` |
-| 7 | NULL-lap cumulative-sum bug (4 call sites) | 🔴 deferred (pre-existing, CLAUDE.md item A) | `telemetry_service.py`, `strategy_service.py`, `prediction_worker.py` (x2) |
+| 7 | NULL-lap cumulative-sum bug (4 call sites) | ✅ fixed 2026-09-02 | `telemetry_service.py`, `strategy_service.py`, `prediction_worker.py` (x2), new migration + `backfill_lap_session_time.py` |
 | 8 | `tire_deg_wet.pkl` needs a real 6-feature retrain | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
 | 9 | Promotion guard has no feature-schema compatibility check | ✅ fixed 2026-09-02 | `scripts/train_models.py`, `scripts/retrain_incremental.py`, `.github/workflows/train-models.yml` |
 | 10 | Tyre models have no track-condition input (dry-INTER/WET modelled as wet) | 🔴 deferred (pre-existing) | `tire_deg_model.py`, `race_simulator.py` |
@@ -345,24 +345,55 @@ own research project, not a normal feature-build day. Long-term "nice to
 have." Full detail: CLAUDE.md Deferred Wiring, entry titled "The Monte Carlo
 simulator has no strategic/reactive adaptation."
 
-### 7. NULL-lap cumulative-sum bug (4 call sites) — pre-existing, still open
+### 7. NULL-lap cumulative-sum bug (4 call sites) — ✅ fixed 2026-09-02
 
-Not new today — this is **CLAUDE.md's existing Deferred Wiring item A**.
-Re-flagging here only because item 1b (the B1 mitigation) directly depends on
-understanding it: `SUM(lap_time_seconds) ... WHERE lap_time_seconds IS NOT
-NULL` silently drops out-lap/in-lap/SC laps with no recorded time, so
-different drivers' cumulative sums become non-comparable whenever they have
-different NULL-lap counts. Four call sites: `telemetry_service
-._compute_session_gaps`'s `_GAPS_QUERY`, `strategy_service
-._cumulative_race_time`, `prediction_worker._cumulative_race_time`, and
-`prediction_worker._build_race_state`'s batched query (the one that matters
-for the Strategy Simulator specifically). No easy fix — needs either an
-ingestion-time absolute `Lap.Time` capture (FastF1 exposes this separately
-from the per-lap delta `LapTime` this codebase currently stores) or
-query-time interpolation. **Read CLAUDE.md's own item A in full before
-touching this** — it has much more detail (exact numbers from a real
-British GP investigation, the four call sites' exact line context) than is
-worth duplicating here.
+Was **CLAUDE.md's existing Deferred Wiring item A**. Picked up 2026-09-02;
+see CLAUDE.md's own Notes entry ("Item A — NULL-lap cumulative-sum
+gap/race-time reconstruction fixed via `LapData.session_elapsed_seconds`")
+for the full write-up — summarized here for this doc's own completeness:
+
+- **Fixed via the ingestion-time change this item's own analysis
+  anticipated:** new `LapData.session_elapsed_seconds` column (migration
+  `20260902_add_session_elapsed_seconds_to_lap_data`) captures FastF1's
+  absolute `Lap.Time` directly at ingestion, anchored per-session to the
+  earliest `LapStartTime` — confirmed populated on 100% of lap rows across
+  a 2020-2026 sample, including every row with a NULL `lap_time_seconds`.
+- **Backfilled** for all existing local data via new `backend/scripts/
+  backfill_lap_session_time.py` (`make backfill-lap-session-time`),
+  R-sessions-only: 169,709 rows updated across 155 of 158 sessions.
+- **All four call sites** now prefer `session_elapsed_seconds`, falling
+  back to the original `SUM(lap_time_seconds)` reconstruction only for a
+  live-ingested/never-backfilled session. `_compute_session_gaps`'s
+  `_GAPS_QUERY` also dropped its `WHERE lap_time_seconds IS NOT NULL`
+  filter — a related bug that understated a driver's reported current lap
+  number, not just their cumulative time.
+- **Verified against real FastF1 final classifications** for British GP
+  2026 R9 and Belgian GP 2026 R10 (not just unit tests) — exact
+  position-order match for the top 12 in both, gaps accurate to ≤0.18s
+  versus the original bug's 343s error. Confirmed end-to-end through the
+  real running backend container's actual `GET /telemetry/{session_id}
+  /gaps` route.
+- **A genuine, distinct, pre-existing limitation surfaced during this
+  verification, not a defect in this fix** — logged as a new CLAUDE.md
+  Deferred Wiring entry ("No F1 penalty/post-race-classification data is
+  ingested anywhere"): British GP's computed order diverged from the true
+  official classification starting at position 9 because a driver (ANT)
+  received a post-race time penalty no data source in this codebase
+  captures. Confirmed the old `SUM(lap_time_seconds)` code would have
+  produced the identical mis-ranking for the same pair — not introduced by
+  this fix.
+- New tests: 9 unit tests (prefers-elapsed / falls-back-to-sum /
+  defaults-to-zero, per call site). Full `pytest backend/tests/unit/ -m
+  unit`: 231 passed. Full `pytest backend/tests/integration/ -m
+  integration` (real testcontainers): 45 passed. `ruff`/`ruff format
+  --check`/`mypy --strict` clean across the entire `backend/` tree.
+- **Not done:** Supabase (production) backfill — this session only ran
+  against the local Docker Postgres. **Cannot be run until after this
+  branch merges to `main`** — the new `session_elapsed_seconds` column
+  itself doesn't exist on Supabase yet; `cd.yml`'s `migrate` job only adds
+  it on merge. Correct sequence and exact commands: `docs/runbook.md`'s new
+  "One-time: backfill session_elapsed_seconds on Supabase" section — merge
+  first, confirm the migration job succeeded, then run the backfill.
 
 ### 8. `tire_deg_wet.pkl` needs a real 6-feature retrain — pre-existing, still deferred
 
@@ -551,6 +582,26 @@ completeness:
 
 ---
 
+## Key files touched — 2026-09-02 follow-up (item 7)
+
+| Path | What changed |
+|---|---|
+| `backend/models/telemetry.py` | New `LapData.session_elapsed_seconds` column (item 7) |
+| `backend/migrations/versions/20260902_add_session_elapsed_seconds_to_lap_data.py` | New migration (item 7) |
+| `backend/scripts/ingest_historical.py` | New `resolve_session_start`/`compute_session_elapsed_seconds` (shared, also used by the backfill script); `_upsert_lap_data` populates the new column (item 7) |
+| `backend/scripts/backfill_lap_session_time.py` | New file — R-sessions-only backfill script (item 7) |
+| `Makefile` | New `backfill-lap-session-time` target (item 7) |
+| `backend/services/telemetry_service.py` | `_GAPS_QUERY`/`_compute_session_gaps` prefer `session_elapsed_seconds`, dropped the `WHERE lap_time_seconds IS NOT NULL` filter, docstring updated (item 7) |
+| `backend/services/strategy_service.py` | `_cumulative_race_time` prefers `session_elapsed_seconds` (item 7) |
+| `backend/workers/prediction_worker.py` | `_cumulative_race_time` (same fix as strategy_service's copy) and `_build_race_state` (reuses its existing `position_subq`/`position_join` to also pull `session_elapsed_seconds`) (item 7) |
+| `backend/tests/unit/test_telemetry_service.py` | 3 new tests, 3 existing tests' fixtures updated to the new row shape (item 7) |
+| `backend/tests/unit/test_strategy_service.py` | 3 new tests (item 7) |
+| `backend/tests/unit/test_prediction_worker.py` | 3 new tests, 3 existing tests' fixtures updated (item 7) |
+| `CLAUDE.md` | Deferred Wiring item A → ✅ done, 1 new Notes entry, 1 new Deferred Wiring entry (post-race-penalty gap discovered during verification), Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | this file |
+
+---
+
 # ANCHOR PROMPT — paste into a new session
 
 ```
@@ -558,17 +609,22 @@ Read CLAUDE.md and docs/day-deferred-fixes-session2-handoff.md in full before do
 anything else — it documents a completed fix session (WET tyre model alias,
 current_lap validation, a connection-dispose bug fix), a set of distinct
 deferred items found while validating those fixes against real Belgian GP
-2026 R10 data, and three of those items (9, 11, 12) already closed in
+2026 R10 data, and four of those items (7, 9, 11, 12) already closed in
 follow-up sessions since — see the paragraph below for full current status.
 
 Items 11 (telemetry_worker dispose-on-exception bug, both _persist_lap and
 _persist_tire_stint) and 12 (frontend never surfaced validate_current_lap's
 rejection or a task FAILURE's reason, all three clients) are ✅ done as of a
-2026-09-01 follow-up session, and item 9 (promotion guard feature-schema
-check) is ✅ done as of a 2026-09-02 follow-up session — see this file's own
-item 9/11/12 sections and CLAUDE.md's Notes entries for what landed on each.
+2026-09-01 follow-up session; item 9 (promotion guard feature-schema check)
+and item 7 (NULL-lap cumulative-sum bug, CLAUDE.md's own Deferred Wiring
+item A) are both ✅ done as of 2026-09-02 follow-up sessions — see this
+file's own item 7/9/11/12 sections and CLAUDE.md's Notes entries for what
+landed on each. Item 7's fix also surfaced a new, distinct, pre-existing
+CLAUDE.md Deferred Wiring entry ("No F1 penalty/post-race-classification
+data is ingested anywhere") — read that if working anywhere near
+`_compute_session_gaps`/`lap_data.position`.
 
-6 items remain in the file's Part 3, independent of each other — pick ONE
+5 items remain in the file's Part 3, independent of each other — pick ONE
 to work on this session, don't try to fix several at once:
 
   4.  predicted_finish_time isn't a real elapsed time (units/naming gap)
@@ -577,9 +633,6 @@ to work on this session, don't try to fix several at once:
   6.  No strategic/reactive adaptation between drivers in the Monte Carlo
       (long-term, research-first — don't start here unless that's explicitly
       what's wanted)
-  7.  NULL-lap cumulative-sum bug, 4 call sites (this is CLAUDE.md's own
-      pre-existing Deferred Wiring item A — read that entry directly, it has
-      more detail than the handoff doc repeats)
   8.  tire_deg_wet.pkl needs a real 6-feature retrain (unblocked by item 9 —
       the old manual-sidecar-deletion workaround is obsolete, but the retrain
       itself hasn't happened; train-models.yml currently fetches zero 2026
@@ -587,6 +640,17 @@ to work on this session, don't try to fix several at once:
       or consciously accept the base-corpus-only outcome before triggering
       a real run)
   10. Tyre models have no track-condition input (dry vs wet)
+
+Also outstanding, not part of the numbered list above: item 7's Supabase
+(production) backfill was never run — this session's backfill only touched
+the local Docker Postgres, and it CANNOT be run yet regardless — the
+`session_elapsed_seconds` column doesn't exist on Supabase until this
+branch merges to `main` and `cd.yml`'s `migrate` job applies it. Correct
+sequence (a manual post-merge step, not something for a future session to
+attempt before the merge): `docs/runbook.md`'s "One-time: backfill
+session_elapsed_seconds on Supabase" section — (1) merge, confirm the
+migration job succeeded, (2) then run `backfill_lap_session_time.py`
+against `SUPABASE_DIRECT_URL`.
 
 If the user hasn't already told you which item to pick, ask before starting
 — several of these (5, 6 especially) are moderate-to-large scope changes

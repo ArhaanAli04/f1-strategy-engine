@@ -317,13 +317,48 @@ async def _current_state(
 async def _cumulative_race_time(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID, up_to_lap: int
 ) -> float:
-    query = select(func.sum(LapData.lap_time_seconds)).where(
+    """Elapsed race time for one driver through up_to_lap.
+
+    Prefers LapData.session_elapsed_seconds (a real absolute elapsed time
+    from the driver's latest ingested lap at or before up_to_lap — populated
+    for a backfilled historical session, comparable across drivers
+    regardless of differing NULL-lap-time counts; see CLAUDE.md Deferred
+    Wiring item A and backfill_lap_session_time.py). Falls back to the
+    original SUM(lap_time_seconds) reconstruction when no such row exists —
+    a live-ingested session (never backfilled) or a driver with no laps yet
+    through up_to_lap; either case collapses to the same `elapsed is None`
+    check, and the SUM fallback already returns 0.0 in the latter case, so
+    no separate branch is needed to tell them apart.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to query.
+        driver_id: Driver to query.
+        up_to_lap: Last lap number (inclusive) to sum.
+    Returns:
+        Cumulative elapsed race time in seconds; 0.0 if no laps recorded yet.
+    """
+    latest_row_query = (
+        select(LapData.session_elapsed_seconds)
+        .where(
+            LapData.session_id == session_id,
+            LapData.driver_id == driver_id,
+            LapData.lap_number <= up_to_lap,
+        )
+        .order_by(LapData.lap_number.desc())
+        .limit(1)
+    )
+    elapsed = (await db.execute(latest_row_query)).scalar_one_or_none()
+    if elapsed is not None:
+        return float(elapsed)
+
+    sum_query = select(func.sum(LapData.lap_time_seconds)).where(
         LapData.session_id == session_id,
         LapData.driver_id == driver_id,
         LapData.lap_number <= up_to_lap,
         LapData.lap_time_seconds.is_not(None),
     )
-    return float((await db.execute(query)).scalar_one() or 0.0)
+    return float((await db.execute(sum_query)).scalar_one() or 0.0)
 
 
 def _weather_key(season: int, round_number: int) -> str:

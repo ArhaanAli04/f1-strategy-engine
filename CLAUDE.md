@@ -507,40 +507,52 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Deferred items — batch 3 (item 9)
-Status:   Item 9 done: model promotion guard 
-          (train_models.py's serialize_evaluate_and_upload) 
-          now checks feature-schema compatibility, not 
-          just holdout_mae — a confirmed schema mismatch 
-          (or an unloadable incumbent .pkl) force-promotes 
-          the candidate regardless of MAE, closing the 
-          root cause behind the original WET incident. 
-          Every sidecar now carries n_features/
-          feature_names/schema_source; a legacy incumbent's 
-          .pkl is only ever introspected once (backfilled 
-          into its sidecar after). retrain_incremental.py 
-          and train_all() both wire real FEATURE_COLUMNS 
-          through. This also removes item 8's old 
-          "manually delete the sidecar first" workaround — 
-          item 8 (WET retrain) is now unblocked, not done.
-          6 items remain in docs/day-deferred-fixes-
-          session2-handoff.md: 4 (predicted_finish_time 
-          naming), 5 (driver skill signal — now easier to 
-          retrain safely thanks to item 9), 6 (strategic 
-          adaptation — research-first), 7 (NULL-lap 
-          cumulative-sum, high blast radius), 8 (WET 
-          model retrain, low value, now unblocked), 
-          10 (track-condition input).
-Next:     Continue down the remaining 6 deferred items — 
-          no single one is recommended next; pick per 
-          session based on priority/scope, same as this 
-          session's approach. Fly.io deployment (Day 40 
-          A4) after deferred items are addressed. Note: 
-          train-models.yml currently fetches zero 2026 
-          laps (see the escalated GitHub-Actions/FastF1 
-          deferred item) — resolve or consciously accept 
-          the base-corpus-only outcome before triggering 
-          a real run that would exercise item 9's guard 
+Day:      Deferred items — batch 3 (item 7)
+Status:   Item 7 done: NULL-lap cumulative-sum gap/race-time
+          reconstruction fixed via a new LapData.
+          session_elapsed_seconds column (migration
+          20260902_add_session_elapsed_seconds_to_lap_data),
+          captured from FastF1's absolute Lap.Time at
+          ingestion (ingest_historical.py) and backfilled
+          for all existing local R sessions (backend/scripts/
+          backfill_lap_session_time.py — 169,709 rows across
+          155/158 sessions). All 4 affected call sites
+          (telemetry_service._compute_session_gaps,
+          strategy_service/prediction_worker's
+          _cumulative_race_time, prediction_worker
+          ._build_race_state) now prefer it, falling back to
+          the original SUM(lap_time_seconds) reconstruction
+          only for a live-ingested/never-backfilled session.
+          Verified against real FastF1 final classifications
+          for British GP 2026 R9 and Belgian GP 2026 R10 (not
+          just unit tests) — exact position-order match,
+          gaps accurate to ≤0.18s vs. the original bug's 343s
+          error. Live verification surfaced one genuine,
+          distinct, pre-existing gap (not introduced by this
+          fix): no F1 penalty/post-race-classification data
+          is ingested anywhere, so a penalized driver's
+          on-track order can disagree with the official
+          result — logged as its own new Deferred Wiring
+          entry, not fixed today. 5 items remain in docs/day-
+          deferred-fixes-session2-handoff.md: 4 (predicted_
+          finish_time naming), 5 (driver skill signal), 6
+          (strategic adaptation — research-first), 8 (WET
+          model retrain, low value, unblocked since item 9),
+          10 (track-condition input). Item 7's Supabase
+          backfill is a manual post-merge step (see docs/
+          runbook.md's new "One-time: backfill session_
+          elapsed_seconds on Supabase" section) — cannot run
+          until this branch merges and cd.yml's migrate job
+          adds the column to Supabase.
+Next:     Continue down the remaining 5 deferred items — no
+          single one is recommended next; pick per session
+          based on priority/scope. Fly.io deployment (Day 40
+          A4) after deferred items are addressed. Note:
+          train-models.yml currently fetches zero 2026
+          laps (see the escalated GitHub-Actions/FastF1
+          deferred item) — resolve or consciously accept
+          the base-corpus-only outcome before triggering
+          a real run that would exercise item 9's guard
           for the first time in production.
 Blockers: No physical device for testing — Android emulator 
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
@@ -750,8 +762,8 @@ each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
 
-- **[deferred] Cumulative-sum gap/race-time reconstruction (`SUM(lap_time_
-  seconds) ... WHERE lap_time_seconds IS NOT NULL`) silently produces
+- **[✅ done 2026-09-02] Cumulative-sum gap/race-time reconstruction (`SUM(lap_time_
+  seconds) ... WHERE lap_time_seconds IS NOT NULL`) silently produced
   non-comparable totals across drivers, corrupting the timing tower's gaps
   for any session ingested via `ingest_historical.py`.** Discovered Day 42
   investigating a user report on British GP 2026 Round 9: `GET /telemetry/
@@ -800,24 +812,72 @@ happen), or was found already fixed and moved into ### Notes below instead.
     for a session with any gap in its recorded lap history... should only
     ever be reached for a session that was never live-ingested") — this
     investigation found the precise mechanism, not a new class of gap.
-  - **No easy fix exists.** `LapData` has no absolute/cumulative
-    session-elapsed-time column — only the per-lap `lap_time_seconds`
-    delta, which is exactly what breaks when NULL. A real fix needs either
-    an ingestion-time change (FastF1 exposes an absolute `Lap.Time`
-    timestamp per lap, distinct from the per-lap delta `LapTime`, that
-    `ingest_historical.py` doesn't currently capture) or NULL-lap
-    interpolation at query time (an approximation, not a real fix). Either
-    is real ingestion/schema work, not a query-level patch.
-  - **`f1:{season}:{round}:gaps:last_good`** (the `@cacheable` resilience
-    fallback, no expiry — see Redis Cache Key Schema) is now poisoned with
-    these same wrong values for this session, since the broken computation
-    "succeeded" (didn't raise) and got written there like any other
-    successful compute. It will NOT self-correct — it only gets
-    overwritten on a future successful compute, so fixing the underlying
-    query alone won't clear an already-poisoned `last_good` key; that
-    would need an explicit cache invalidation too.
-  - Not fixed today — deferred pending a decision on the ingestion-time vs.
-    interpolation approach.
+  - **Fixed via the ingestion-time change** this entry's own "no easy fix"
+    note anticipated: `LapData.session_elapsed_seconds` (migration
+    `20260902_add_session_elapsed_seconds_to_lap_data`) captures FastF1's
+    absolute `Lap.Time` directly, anchored to the session's earliest
+    `LapStartTime` (`ingest_historical.py`'s `resolve_session_start`/
+    `compute_session_elapsed_seconds`) — confirmed populated on 100% of lap
+    rows across a 2020-2026 sample, including every row with a NULL
+    `lap_time_seconds`. `backend/scripts/backfill_lap_session_time.py`
+    (`make backfill-lap-session-time`) backfilled all 158 local R sessions
+    (169,709 rows updated across 155 sessions; the other 3 were either
+    already done or genuinely empty). All 4 call sites now prefer
+    `session_elapsed_seconds` and fall back to the original
+    `SUM(lap_time_seconds)` reconstruction only for a session that was
+    never backfilled (a live-ingested session — deliberately left NULL
+    there, see below) — see the Notes entry below for the full write-up and
+    live verification against real final classifications.
+  - **`f1:{season}:{round}:gaps:last_good`** was checked directly against
+    the local Redis before this fix landed — empty, nothing poisoned to
+    invalidate at the time (no request had hit the broken path recently
+    enough for a `:last_good` value to still be cached). A genuinely
+    poisoned key from before this fix would still need a manual delete —
+    this fix does not retroactively correct an existing cached value, only
+    every compute going forward.
+  - **Deliberately NOT extended to live ingestion:** `ingest_live_session.py`
+    never populates `session_elapsed_seconds` — its TimingData stream
+    carries no absolute session clock, and a live session already has its
+    own authoritative Redis gaps via `_publish_live_gaps`, so this path is
+    rarely reached for a live session anyway. Live-ingested sessions
+    continue to use the original `SUM(lap_time_seconds)` fallback,
+    unchanged from before this fix.
+
+- **[deferred] No F1 penalty/post-race-classification data is ingested
+  anywhere — `lap_data.position` (and everything derived from it:
+  `_compute_session_gaps`'s ranking, `race_simulator`'s `starting_position`)
+  reflects LIVE on-track order, not the final penalized classification, and
+  can disagree with it for any driver who receives a post-race time
+  penalty.** Discovered 2026-09-02 verifying item A's fix
+  (`session_elapsed_seconds`, see the ✅-fixed item A entry above) end-to-end
+  against British GP 2026 Round 9's real final classification: the computed
+  field order matched FastF1's own `session.results` exactly for positions
+  1-8, then diverged at position 9 — the reconstruction (and the DB's own
+  `lap_data.position`, sourced from FastF1's raw per-lap `Position`
+  telemetry) shows ANT running P9 for their entire final stint with a
+  ~3.4s gap to COL, while `session.results` classifies ANT P15 with an
+  8.005s gap. **Confirmed pre-existing, not introduced by item A's fix:**
+  computed directly what the OLD `SUM(lap_time_seconds)` code would have
+  produced for this exact pair — ANT's old-style cumulative sum (5070.97s)
+  is also less than COL's (5071.94s), so the same mis-ranking existed
+  before today's fix too, for the same underlying reason. **Root cause:**
+  `ingest_historical.py`'s `Lap.Position`/`Lap.Time` come from FastF1's
+  live/raw timing feed, which has no concept of a penalty applied after the
+  checkered flag; there is no `penalties` table or any ingestion path for
+  this anywhere in the codebase. **No easy fix** — would need a new
+  ingestion path for FastF1's `session.results`/`Status`/penalty data
+  (confirmed available via `session.results` directly, not currently read
+  by any script) and a decision on how "current gaps" should reconcile live
+  position against a not-yet-applied pending penalty for an in-progress
+  session (a penalty is typically decided/announced after the race, so even
+  a "final" classification pull mid-session wouldn't have it yet). Affects
+  `_compute_session_gaps` (timing tower) for any completed session with a
+  penalized driver, and by extension anything using `lap_data.position` as
+  a position proxy (`race_simulator`'s `starting_position`,
+  `prediction_worker._build_race_state`). Low urgency: only matters for the
+  exact drivers/positions affected by a penalty, on an already-completed
+  session's timing tower — mid-race live gaps are unaffected since a
+  penalty isn't yet known at that point.
 
 - **[deferred] `evaluate_threats`/`_latest_undercut_scores` reads each
   driver's most-recent `StrategyPrediction.undercut_score` with no
@@ -1376,6 +1436,98 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Item A — NULL-lap cumulative-sum gap/race-time reconstruction fixed via
+`LapData.session_elapsed_seconds` (✅ fixed 2026-09-02):** Full session
+across 5 checkpoints (plan → schema/ingestion → backfill script → wire the
+4 call sites → docs), verified against real Belgian GP and British GP 2026
+data at every step, not just unit tests. See item A's own Deferred Wiring
+entry above for the original bug; this Notes entry covers the fix.
+
+- **Root cause confirmed directly, not assumed:** FastF1's `Laps.Time`
+  (session clock at lap completion) is populated on 100% of lap rows across
+  a 2020–2026 sample, including every row where `LapTime` (this codebase's
+  `lap_time_seconds`) is NULL — `ingest_historical.py` was simply never
+  capturing it. Reproduced the exact reported bug with real numbers before
+  touching any code: British GP 2026 R9's `Time`-based gap between LEC and
+  NOR is 1.2s (matching reality); the old `SUM(lap_time_seconds)` query
+  reports 343s.
+- **Schema:** migration `20260902_add_session_elapsed_seconds_to_lap_data`
+  adds nullable `LapData.session_elapsed_seconds` (Float). `ingest_
+  historical.py` gained `resolve_session_start` (anchors to the session's
+  earliest `LapStartTime` — confirmed identical across all 22 drivers for a
+  given session) and `compute_session_elapsed_seconds`, both shared,
+  documented functions — `_upsert_lap_data` and the new backfill script
+  call the exact same code, not duplicated logic.
+- **Backfill:** `backend/scripts/backfill_lap_session_time.py`
+  (`make backfill-lap-session-time`), R-sessions-only (the only sessions
+  the gaps/simulator endpoints serve — FP/Q deliberately left for later),
+  idempotent (skips a session with zero remaining NULL rows without even
+  hitting FastF1), matches existing rows by `(driver code, lap number)`
+  without creating new `Driver`/`LapData` rows. Hit and fixed a real
+  SQLAlchemy 2.0 quirk along the way: a bulk `UPDATE` via bound params
+  against an ORM-mapped class triggers its "bulk update by primary key"
+  path and rejects a custom bindparam name — fixed by targeting
+  `LapData.__table__` (Core-level) instead of the ORM entity. Ran against
+  the full local corpus: **169,709 rows updated across 155 of 158 R
+  sessions** (the other 3: one done manually during dev, two genuinely
+  empty — `2018 R14`/`2026 R13` have zero `lap_data` rows). Verified in DB
+  directly afterward: zero remaining NULL `session_elapsed_seconds` across
+  all 170,822 R-session lap rows.
+- **The four call sites** (`telemetry_service._compute_session_gaps`,
+  `strategy_service._cumulative_race_time`, `prediction_worker
+  ._cumulative_race_time`, `prediction_worker._build_race_state`) now
+  prefer `session_elapsed_seconds`, falling back to the original
+  `SUM(lap_time_seconds)` reconstruction only when it's NULL (a
+  live-ingested/never-backfilled session, or a driver with no laps yet) —
+  both cases collapse to the same `is None` check, no separate per-session
+  mode flag needed. `_build_race_state` reuses its existing `position_subq`/
+  `position_join` (already resolving "latest row ≤ current_lap per driver"
+  for position) to also pull `session_elapsed_seconds` off the same row,
+  rather than adding a third query. `_compute_session_gaps`'s `_GAPS_QUERY`
+  also **dropped the `WHERE lap_time_seconds IS NOT NULL` filter entirely**
+  — that filter was a second, related bug: it silently excluded a driver's
+  most recent lap from consideration whenever that lap had no recorded
+  time, understating their reported *current lap number*, not just their
+  cumulative time.
+- **Live-data verification, not just unit tests:** compared the fix's
+  output against FastF1's own authoritative `session.results` for the full
+  top-12 finishers of both British GP 2026 R9 and Belgian GP 2026 R10 —
+  exact position-order match on both, gaps accurate to within ≤0.18s
+  (versus the original bug's 343s error). Confirmed end-to-end through the
+  real running `docker-backend-1` container's actual `GET /telemetry/
+  {session_id}/gaps` route (not just direct Python calls) — verified the
+  Redis cache write proved a fresh compute, not a stale hit.
+- **A genuine, distinct limitation surfaced during this verification, not
+  a defect in this fix** — see the new "No F1 penalty/post-race-
+  classification data is ingested anywhere" Deferred Wiring entry above:
+  `_compute_session_gaps`'s field order diverged from the true official
+  classification starting at position 9 for British GP, because ANT
+  received a post-race time penalty that no data source in this codebase
+  captures. Confirmed the identical old `SUM(lap_time_seconds)` code would
+  have produced the same mis-ranking for the same pair (computed directly:
+  ANT 5070.97s vs COL 5071.94s) — not something this fix introduced.
+- Verified: 9 new unit tests (prefers-elapsed / falls-back-to-sum /
+  defaults-to-zero-on-double-null, per call site — chosen because the
+  *existing* tests for these functions only asserted counts/membership,
+  never actual gap values), 6 existing tests' mock fixtures updated to the
+  new row shapes. Full `pytest backend/tests/unit/ -m unit`: **231 passed**.
+  Full `pytest backend/tests/integration/ -m integration` (real
+  testcontainers Postgres/Redis, including `test_alembic_migrations.py`
+  exercising the new migration from base→head and downgrade/upgrade
+  idempotency): **45 passed**. `ruff check`/`ruff format --check`/
+  `mypy --strict` clean across the entire `backend/` tree.
+- **Not done, and cannot be done yet:** Supabase (production) backfill —
+  this session only ran against the local Docker Postgres.
+  `session_elapsed_seconds` doesn't exist on Supabase until this branch
+  merges to `main` and `cd.yml`'s `migrate` job applies the migration —
+  running the backfill before that merges is not possible (the column
+  isn't there to write to), not just premature. Correct sequence, a manual
+  post-merge step: see `docs/runbook.md`'s "One-time: backfill
+  session_elapsed_seconds on Supabase" section — (1) merge, confirm the
+  migration job succeeded, (2) then run `backfill_lap_session_time.py`
+  against `SUPABASE_DIRECT_URL` (same pattern as the tyre-degradation
+  backfill above).
 
 **Model promotion guard gained a feature-schema-compatibility check —
 item 9 (✅ fixed 2026-09-02):** Root cause of the WET tyre-model

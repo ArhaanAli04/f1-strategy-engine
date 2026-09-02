@@ -716,3 +716,72 @@ def test_load_models_aliases_schema_incompatible_wet_pipeline(
     assert models["tire_deg_wet.pkl"] is inter
     assert models["tire_deg_inter.pkl"] is inter
     assert set(models) == set(strategy_service._MODEL_FILES)
+
+
+@pytest.mark.unit
+async def test_cumulative_race_time_prefers_session_elapsed_seconds(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A backfilled historical session's real session_elapsed_seconds must be
+    returned directly — the SUM(lap_time_seconds) fallback query must never
+    even run (asserted via call count, not just the returned value).
+    """
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    latest_row_result = MagicMock()
+    latest_row_result.scalar_one_or_none.return_value = 5231.627
+    mock_db_session.execute.return_value = latest_row_result
+
+    result = await strategy_service._cumulative_race_time(
+        mock_db_session, session_id, driver_id, 52
+    )
+
+    assert result == pytest.approx(5231.627)
+    mock_db_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_cumulative_race_time_falls_back_to_sum_when_session_elapsed_seconds_null(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A live-ingested session (session_elapsed_seconds never backfilled) or a
+    driver with no laps yet through up_to_lap must fall back to the original
+    SUM(lap_time_seconds) reconstruction, unchanged.
+    """
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    latest_row_result = MagicMock()
+    latest_row_result.scalar_one_or_none.return_value = None
+    sum_result = MagicMock()
+    sum_result.scalar_one.return_value = 4310.0
+    mock_db_session.execute.side_effect = [latest_row_result, sum_result]
+
+    result = await strategy_service._cumulative_race_time(
+        mock_db_session, session_id, driver_id, 40
+    )
+
+    assert result == pytest.approx(4310.0)
+    assert mock_db_session.execute.call_count == 2
+
+
+@pytest.mark.unit
+async def test_cumulative_race_time_defaults_to_zero_when_no_laps(
+    mock_db_session: AsyncMock,
+) -> None:
+    """Neither source has a value at all (driver has no laps yet) — must
+    default to 0.0, matching the pre-existing "no cumulative time yet" contract.
+    """
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    latest_row_result = MagicMock()
+    latest_row_result.scalar_one_or_none.return_value = None
+    sum_result = MagicMock()
+    sum_result.scalar_one.return_value = None
+    mock_db_session.execute.side_effect = [latest_row_result, sum_result]
+
+    result = await strategy_service._cumulative_race_time(mock_db_session, session_id, driver_id, 1)
+
+    assert result == 0.0
