@@ -41,6 +41,7 @@ import json
 import logging
 import zlib
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -542,7 +543,12 @@ def evaluate_pit_predictor(
         model.fit(train_frame[pit_features].to_numpy(dtype=float), target)
 
         holdout_target = holdout_frame[pit_predictor.TARGET_COLUMN].to_numpy(dtype=float)
-        probabilities = model.predict_proba(holdout_frame[pit_features].to_numpy(dtype=float))[:, 1]
+        holdout_features = holdout_frame[pit_features].to_numpy(dtype=float)
+        # cast(): same LGBMClassifier.predict_proba() typing gap pit_predictor.py's own
+        # evaluate_holdout/train_pit_predictor already work around — predict_proba()'s
+        # declared stub return type isn't always inferred as ndarray, so the 2D slice
+        # below doesn't type-check without it.
+        probabilities = cast(np.ndarray, model.predict_proba(holdout_features))[:, 1]
         results[variant] = {
             "holdout_mae": float(np.mean(np.abs(probabilities - holdout_target))),
             "holdout_auc": float(roc_auc_score(holdout_target, probabilities)),
