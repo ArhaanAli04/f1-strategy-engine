@@ -6,6 +6,7 @@ mechanics (the .predict() contract, shape validation), not real tyre-degradation
 behavior — that's covered by integration tests against the actual promoted models.
 """
 
+import zlib
 from typing import Any
 
 import numpy as np
@@ -16,11 +17,16 @@ from sklearn.pipeline import Pipeline
 from backend.services.ml.tire_deg_model import (
     FEATURE_COLUMNS,
     MAX_LOOKAHEAD_LAPS,
+    CategoricalEncodingMaps,
     _build_pipeline,
     add_engineered_features,
     apply_incompatible_model_fallbacks,
+    build_categorical_encoding_maps,
+    encoding_maps_from_metrics,
     pipeline_feature_count,
     predict_life_remaining_batch,
+    resolve_circuit_code,
+    resolve_driver_code,
     train_tire_degradation_model,
 )
 
@@ -257,3 +263,135 @@ def test_apply_incompatible_model_fallbacks_noop_when_model_absent() -> None:
     models: dict[str, Any] = {"tire_deg_inter.pkl": _fit_pipeline_with_n_features(6, seed=16)}
     apply_incompatible_model_fallbacks(models)  # must not raise / must not add tire_deg_wet.pkl
     assert "tire_deg_wet.pkl" not in models
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_aliases_parallel_cache() -> None:
+    """WET/INTER model alias also aliases a parallel filename-keyed cache (e.g. encoding maps)."""
+    stale_wet = _fit_pipeline_with_n_features(8, seed=17)
+    inter = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=18)
+    models = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+    inter_maps = CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 0}, circuit_name_to_code={"c1": 0}
+    )
+    maps_cache: dict[str, Any] = {
+        "tire_deg_wet.pkl": "stale-own-maps",
+        "tire_deg_inter.pkl": inter_maps,
+    }
+
+    apply_incompatible_model_fallbacks(models, maps_cache)
+
+    assert maps_cache["tire_deg_wet.pkl"] is inter_maps
+
+
+@pytest.mark.unit
+def test_apply_incompatible_model_fallbacks_leaves_parallel_cache_when_fallback_absent() -> None:
+    """A parallel cache with no entry for the fallback filename is left untouched for it."""
+    stale_wet = _fit_pipeline_with_n_features(8, seed=19)
+    inter = _fit_pipeline_with_n_features(len(FEATURE_COLUMNS), seed=20)
+    models = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+    maps_cache: dict[str, Any] = {"tire_deg_wet.pkl": "stale-own-maps"}
+
+    apply_incompatible_model_fallbacks(models, maps_cache)
+
+    assert maps_cache == {"tire_deg_wet.pkl": "stale-own-maps"}
+
+
+# --- build_categorical_encoding_maps / encoding_maps_from_metrics /
+# --- resolve_driver_code / resolve_circuit_code ---
+# Covers the training-vs-inference encoding mismatch quantified by
+# scripts/evaluate_driver_features.py (see CLAUDE.md's Deferred Wiring entry).
+
+
+@pytest.mark.unit
+def test_build_categorical_encoding_maps_recovers_unique_codes() -> None:
+    df = pd.DataFrame(
+        {
+            "driver_id": ["d1", "d1", "d2", "d3"],
+            "driver_id_encoded": [0, 0, 1, 2],
+            "circuit_name": ["Silverstone", "Silverstone", "Monza", "Monza"],
+            "circuit_id_encoded": [5, 5, 9, 9],
+        }
+    )
+
+    maps = build_categorical_encoding_maps(df)
+
+    assert maps == {
+        "driver_id_to_code": {"d1": 0, "d2": 1, "d3": 2},
+        "circuit_name_to_code": {"Silverstone": 5, "Monza": 9},
+    }
+
+
+@pytest.mark.unit
+def test_build_categorical_encoding_maps_values_are_plain_python_ints() -> None:
+    """numpy scalar codes must not leak into the map — json.dumps would reject them."""
+    df = pd.DataFrame(
+        {
+            "driver_id": ["d1"],
+            "driver_id_encoded": pd.array([0], dtype="int8"),
+            "circuit_name": ["Silverstone"],
+            "circuit_id_encoded": pd.array([5], dtype="int8"),
+        }
+    )
+
+    maps = build_categorical_encoding_maps(df)
+
+    assert type(maps["driver_id_to_code"]["d1"]) is int
+    assert type(maps["circuit_name_to_code"]["Silverstone"]) is int
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_recovers_dataclass() -> None:
+    metrics = {
+        "holdout_mae": 0.5,
+        "driver_id_to_code": {"d1": 0},
+        "circuit_name_to_code": {"c1": 0},
+    }
+
+    maps = encoding_maps_from_metrics(metrics)
+
+    assert maps == CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 0}, circuit_name_to_code={"c1": 0}
+    )
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_none_when_metrics_none() -> None:
+    assert encoding_maps_from_metrics(None) is None
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_none_for_legacy_sidecar_missing_maps() -> None:
+    """A pre-fix sidecar (or a non-tire_deg model's sidecar) has no encoding-map keys at all."""
+    assert encoding_maps_from_metrics({"holdout_mae": 0.5}) is None
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_uses_real_map_when_present() -> None:
+    maps = CategoricalEncodingMaps(driver_id_to_code={"d1": 7}, circuit_name_to_code={})
+    assert resolve_driver_code(maps, "d1") == 7
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_falls_back_when_maps_none() -> None:
+    """Identical to the pre-fix crc32 formula, so behavior only ever improves, never regresses."""
+    assert resolve_driver_code(None, "unknown-driver") == zlib.crc32(b"unknown-driver") % 1000
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_falls_back_when_driver_missing_from_map() -> None:
+    maps = CategoricalEncodingMaps(driver_id_to_code={"d1": 7}, circuit_name_to_code={})
+    assert resolve_driver_code(maps, "d2") == zlib.crc32(b"d2") % 1000
+
+
+@pytest.mark.unit
+def test_resolve_circuit_code_uses_real_map_when_present() -> None:
+    maps = CategoricalEncodingMaps(driver_id_to_code={}, circuit_name_to_code={"Monza": 9})
+    assert resolve_circuit_code(maps, "Monza") == 9
+
+
+@pytest.mark.unit
+def test_resolve_circuit_code_falls_back_when_circuit_missing_from_map() -> None:
+    maps = CategoricalEncodingMaps(driver_id_to_code={}, circuit_name_to_code={"Monza": 9})
+    expected = zlib.crc32(b"Unknown Circuit") % 1000
+    assert resolve_circuit_code(maps, "Unknown Circuit") == expected

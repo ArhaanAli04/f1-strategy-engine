@@ -10,17 +10,26 @@ docstring for the same convention already established for services/ml.
 Several modelling gaps had to be worked around, all documented at the point
 they're used rather than silently papered over:
 
-- circuit_id_encoded/driver_id_encoded: train_models.py's _encode_categoricals
-  fits these via pd.Categorical(...).codes fresh per training run and never
-  persists the resulting category list (prediction_worker.py has the same
-  unresolved gap). There is no way to recover the exact integer code a
-  loaded pipeline was actually trained with. _stable_code() below is a
-  deterministic, self-consistent stand-in (same id always maps to the same
-  code across calls) — not a claim that it matches the training-time
-  encoding. compound_encoded uses a hardcoded alphabetical-order mapping
-  instead, since {HARD, INTERMEDIATE, MEDIUM, SOFT, WET} is a small, fixed,
-  near-certainly-fully-observed set — pd.Categorical's inferred code order
-  for it is far more predictable than for circuit/driver IDs.
+- circuit_id_encoded/driver_id_encoded: train_models.py's encode_categoricals
+  fits these via pd.Categorical(...).codes fresh per training run. Previously
+  never persisted (prediction_worker.py had the same gap) — every inference
+  call substituted a crc32 hash instead of the real training-time code,
+  confirmed to inflate tire_deg holdout MAE by 50-265% depending on compound
+  (scripts/evaluate_driver_features.py, see CLAUDE.md's Deferred Wiring
+  entry). Fixed: each tire_deg model's own sidecar now carries its real
+  driver_id/circuit_name -> code map (tire_deg_model.build_categorical_
+  encoding_maps, embedded per-model since item 9 promotes each compound
+  independently), loaded by _load_encoding_maps() and resolved via
+  tire_deg_model.resolve_driver_code/resolve_circuit_code — every call site
+  below picks the map matching whichever pipeline it's about to call, never
+  one map applied across compounds. A missing map (legacy sidecar, or an id
+  that debuted after a model's last training run) falls back to the same
+  crc32 formula as before, per id — non-regressive by construction.
+  compound_encoded uses a hardcoded alphabetical-order mapping instead, since
+  {HARD, INTERMEDIATE, MEDIUM, SOFT, WET} is a small, fixed, near-certainly-
+  fully-observed set — pd.Categorical's inferred code order for it is far
+  more predictable than for circuit/driver IDs, and was never part of this
+  gap.
 - total_laps: neither Race nor Session persists race distance. It's
   approximated as MAX(lap_number) observed so far in the session, which
   under-estimates mid-race and converges to the true value near the finish.
@@ -46,7 +55,6 @@ import json
 import logging
 import math
 import uuid
-import zlib
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +62,7 @@ import boto3
 import joblib
 import numpy as np
 import redis.asyncio as aioredis
+from botocore.exceptions import ClientError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -111,6 +120,12 @@ COMPETITOR_STRATEGY_HORIZON_LAPS = 15
 LAST_INGESTED_SESSION_TTL_SECONDS = 86400
 
 _model_cache: dict[str, Any] = {}
+# Per tire_deg model filename, its own CategoricalEncodingMaps (or None if that
+# model's sidecar is missing/legacy — predates the encoding-persistence fix).
+# Populated as a side effect of _load_models(), same process lifetime as
+# _model_cache — see _load_encoding_maps() and tire_deg_model.py's "Training-
+# time categorical encoding" section.
+_encoding_maps_cache: dict[str, Any] = {}
 
 
 def _local_model_path(filename: str) -> Path:
@@ -142,8 +157,61 @@ def _download_from_s3(filename: str) -> Path:
     return path
 
 
+def _local_metrics_path(filename: str) -> Path:
+    model_dir = Path(get_ml_settings().model_cache_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return model_dir / f"{filename}.metrics.json"
+
+
+def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
+    """Download a tire_deg model's own sidecar metrics.json from S3, unless cached locally.
+
+    Same local-disk-cache-then-fetch lifecycle as _download_from_s3 (never re-fetches
+    once cached, so — like every other model in this process — a worker restart is
+    what picks up a newly-promoted model's fresh sidecar, not a background refresh).
+
+    Args:
+        filename: Model file name, e.g. "tire_deg_medium.pkl" — fetches its
+            {_MODEL_VERSION_TAG}/{filename}.metrics.json sidecar, not the model itself.
+    Returns:
+        The sidecar's parsed JSON contents, or None if no sidecar exists for this
+        filename yet (a production model that predates train_models.py writing one at
+        all, or the item-9 schema-check fix specifically) — callers must treat None as
+        "no recoverable encoding map," not as an error.
+    """
+    path = _local_metrics_path(filename)
+    if path.exists():
+        return dict(json.loads(path.read_text()))
+
+    settings = get_aws_settings()
+    client = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    try:
+        obj = client.get_object(
+            Bucket=settings.aws_bucket_name, Key=f"{_MODEL_VERSION_TAG}/{filename}.metrics.json"
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise
+    body = obj["Body"].read()
+    path.write_bytes(body)
+    return dict(json.loads(body))
+
+
 def _load_models() -> dict[str, Any]:
     """Load all registry models into an in-process cache, downloading from S3 on first use.
+
+    Also populates _encoding_maps_cache with each tire_deg model's own recovered
+    training-time driver/circuit code map (see tire_deg_model.py's "Training-time
+    categorical encoding" section) — same once-per-process lifecycle as the models
+    themselves, so this function is the single place both caches get populated
+    together, which is what lets apply_incompatible_model_fallbacks alias both in
+    lockstep below.
 
     Args:
         None.
@@ -154,12 +222,31 @@ def _load_models() -> dict[str, Any]:
         return _model_cache
     for filename in _MODEL_FILES:
         _model_cache[filename] = joblib.load(_download_from_s3(filename))
+    for filename in _MODEL_FILES:
+        if filename.startswith("tire_deg_"):
+            metrics = _download_metrics_from_s3(filename)
+            _encoding_maps_cache[filename] = tire_deg_model.encoding_maps_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
     # experiment — see docs/simulator-issues-wet-model-and-position-
-    # context.md) by aliasing it to a compatible fallback for this process.
-    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
+    # context.md) by aliasing it (and its encoding maps) to a compatible
+    # fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache, _encoding_maps_cache)
     return _model_cache
+
+
+def _load_encoding_maps() -> dict[str, tire_deg_model.CategoricalEncodingMaps | None]:
+    """This process's tire_deg encoding-maps cache, populated as a side effect of _load_models().
+
+    Args:
+        None.
+    Returns:
+        Mapping of tire_deg model filename to its CategoricalEncodingMaps, or None for a
+        filename whose sidecar is missing/legacy — see resolve_driver_code/
+        resolve_circuit_code (tire_deg_model.py) for how a None entry is handled.
+    """
+    _load_models()
+    return _encoding_maps_cache
 
 
 def _pipeline_for_compound(models: dict[str, Any], compound: str) -> Any | None:
@@ -168,17 +255,26 @@ def _pipeline_for_compound(models: dict[str, Any], compound: str) -> Any | None:
     return models.get(f"tire_deg_{suffix}.pkl")
 
 
-def _stable_code(value: str, modulus: int = 1000) -> int:
-    """Deterministic proxy for an unrecoverable training-time pd.Categorical code.
+def _encoding_maps_for_compound(
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None], compound: str
+) -> tire_deg_model.CategoricalEncodingMaps | None:
+    """Look up the tire_deg encoding maps for a compound, defaulting to MEDIUM's suffix.
+
+    Mirrors _pipeline_for_compound's exact suffix lookup/default — a driver/circuit
+    code must always be resolved against the SAME model's own map as the pipeline
+    it's about to be fed into (see tire_deg_model.py's "Training-time categorical
+    encoding" section for why one shared map can't be used across compounds).
 
     Args:
-        value: The id (circuit_id or driver_id, stringified) to encode.
-        modulus: Range to fold the hash into.
+        maps_cache: Output of _load_encoding_maps().
+        compound: Tyre compound name.
     Returns:
-        A stable integer in [0, modulus) — see module docstring for why this
-        exists instead of the true training-time code.
+        That compound's CategoricalEncodingMaps, or None if unavailable — callers pass
+        this straight to resolve_driver_code/resolve_circuit_code, which already treat
+        None as "use the crc32 fallback."
     """
-    return zlib.crc32(value.encode()) % modulus
+    suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
+    return maps_cache.get(f"tire_deg_{suffix}.pkl")
 
 
 # --- Shared DB helpers ---
@@ -280,7 +376,10 @@ async def _current_state(
         session_id: Session to read.
         driver_id: Driver to read.
     Returns:
-        Dict with lap_number, compound, tyre_age_laps, position, total_laps, circuit_id.
+        Dict with lap_number, compound, tyre_age_laps, position, total_laps, circuit_id,
+        circuit_name (the latter needed to resolve this driver/circuit's real
+        training-time tire_deg encoding — see tire_deg_model.resolve_driver_code/
+        resolve_circuit_code).
     Raises:
         NotFoundError: No lap_data row exists yet for this driver/session.
     """
@@ -298,11 +397,12 @@ async def _current_state(
     total_laps = (await db.execute(total_laps_query)).scalar_one() or lap.lap_number
 
     circuit_query = (
-        select(Race.circuit_id)
+        select(Race.circuit_id, Circuit.name)
         .join(SessionModel, SessionModel.race_id == Race.id)
+        .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    circuit_id = (await db.execute(circuit_query)).scalar_one()
+    circuit_id, circuit_name = (await db.execute(circuit_query)).one()
 
     return {
         "lap_number": lap.lap_number,
@@ -311,6 +411,7 @@ async def _current_state(
         "position": lap.position,
         "total_laps": int(total_laps),
         "circuit_id": circuit_id,
+        "circuit_name": circuit_name,
     }
 
 
@@ -530,9 +631,11 @@ async def get_optimal_pit_window(
             driver's current compound.
     """
     models = _load_models()
+    maps_cache = _load_encoding_maps()
     state = await _current_state(db, session_id, driver_id)
-    driver_code = _stable_code(str(driver_id))
-    circuit_code = _stable_code(str(state["circuit_id"]))
+    current_maps = _encoding_maps_for_compound(maps_cache, state["compound"])
+    driver_code = tire_deg_model.resolve_driver_code(current_maps, str(driver_id))
+    circuit_code = tire_deg_model.resolve_circuit_code(current_maps, state["circuit_name"])
     current_compound_encoded = _COMPOUND_ENCODING.get(
         state["compound"], _COMPOUND_ENCODING["MEDIUM"]
     )
@@ -540,6 +643,20 @@ async def get_optimal_pit_window(
     if current_pipeline is None:
         raise ModelNotLoadedError(
             f"No tire degradation model loaded for compound {state['compound']}"
+        )
+
+    # Resolved once per candidate compound, against THAT compound's own map —
+    # not the current compound's — since a candidate stint runs on a
+    # different tire_deg pipeline, which may have been promoted from a
+    # different training run with a different driver/circuit code universe.
+    # Invariant across the pit_lap loop below (driver_id/circuit don't change
+    # per candidate lap), so resolved once here rather than on every iteration.
+    candidate_codes: dict[str, tuple[int, int]] = {}
+    for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS:
+        candidate_maps = _encoding_maps_for_compound(maps_cache, candidate_compound)
+        candidate_codes[candidate_compound] = (
+            tire_deg_model.resolve_driver_code(candidate_maps, str(driver_id)),
+            tire_deg_model.resolve_circuit_code(candidate_maps, state["circuit_name"]),
         )
 
     candidates: list[dict[str, Any]] = []
@@ -562,12 +679,13 @@ async def get_optimal_pit_window(
             pipeline = _pipeline_for_compound(models, candidate_compound)
             if pipeline is None:
                 continue
+            candidate_driver_code, candidate_circuit_code = candidate_codes[candidate_compound]
             laps_remaining = state["total_laps"] - pit_lap
             delta = _project_stint_delta(
                 pipeline,
                 _COMPOUND_ENCODING[candidate_compound],
-                driver_code,
-                circuit_code,
+                candidate_driver_code,
+                candidate_circuit_code,
                 pit_lap + 1,
                 laps_remaining,
                 0,
@@ -638,8 +756,9 @@ async def get_pit_window_with_explanation(
 
     top_pit_lap = candidates[0]["pit_lap"]
     compound_encoded = _COMPOUND_ENCODING.get(state["compound"], _COMPOUND_ENCODING["MEDIUM"])
-    driver_code = _stable_code(str(driver_id))
-    circuit_code = _stable_code(str(state["circuit_id"]))
+    current_maps = _encoding_maps_for_compound(_load_encoding_maps(), state["compound"])
+    driver_code = tire_deg_model.resolve_driver_code(current_maps, str(driver_id))
+    circuit_code = tire_deg_model.resolve_circuit_code(current_maps, state["circuit_name"])
     fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
         1 - top_pit_lap / max(state["total_laps"], 1)
     )
@@ -712,6 +831,7 @@ async def _undercut_overcut_probability(
         over sims; positive = pitting_now_driver_id ends up ahead), n_laps_projected.
     """
     models = _load_models()
+    maps_cache = _load_encoding_maps()
     now_state = await _current_state(db, session_id, pitting_now_driver_id)
     next_state = await _current_state(db, session_id, pitting_next_lap_driver_id)
 
@@ -729,10 +849,20 @@ async def _undercut_overcut_probability(
     if now_pipeline is None or next_pipeline is None:
         raise ModelNotLoadedError("Required tire degradation model not loaded")
 
-    now_code = _stable_code(str(pitting_now_driver_id))
-    next_code = _stable_code(str(pitting_next_lap_driver_id))
-    now_circuit_code = _stable_code(str(now_state["circuit_id"]))
-    next_circuit_code = _stable_code(str(next_state["circuit_id"]))
+    # Resolved per-driver against THEIR OWN compound's map — now_pipeline and
+    # next_pipeline can be different models entirely (different compound, and
+    # possibly a different training run's code universe under item 9's
+    # per-compound promotion), so now_code/now_circuit_code must never be fed
+    # into next_pipeline or vice versa. next_code/next_circuit_code are reused
+    # for both the stay_out AND fresh segments below, since both run on
+    # next_pipeline (compound unchanged after a pit stop, per this function's
+    # own docstring) — one resolution covers both.
+    now_maps = _encoding_maps_for_compound(maps_cache, now_state["compound"])
+    next_maps = _encoding_maps_for_compound(maps_cache, next_state["compound"])
+    now_code = tire_deg_model.resolve_driver_code(now_maps, str(pitting_now_driver_id))
+    next_code = tire_deg_model.resolve_driver_code(next_maps, str(pitting_next_lap_driver_id))
+    now_circuit_code = tire_deg_model.resolve_circuit_code(now_maps, now_state["circuit_name"])
+    next_circuit_code = tire_deg_model.resolve_circuit_code(next_maps, next_state["circuit_name"])
     default_compound_code = _COMPOUND_ENCODING["MEDIUM"]
     now_compound_encoded = _COMPOUND_ENCODING.get(now_state["compound"], default_compound_code)
     next_compound_encoded = _COMPOUND_ENCODING.get(next_state["compound"], default_compound_code)
@@ -906,9 +1036,10 @@ async def get_overcut_score(
 def _first_pit_laps_over_threshold_batch(
     pit_model: Any,
     models: dict[str, Any],
-    driver_codes: np.ndarray,
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    driver_ids: list[str],
     compounds: list[str],
-    circuit_code: int,
+    circuit_name: str,
     current_laps: np.ndarray,
     tyre_ages: np.ndarray,
     positions: np.ndarray,
@@ -934,12 +1065,21 @@ def _first_pit_laps_over_threshold_batch(
     those can't be merged across compounds the way pit_model's single unified
     model can be.
 
+    driver_ids/circuit_name (rather than pre-resolved codes) are taken raw and
+    resolved to codes INSIDE the per-compound-group loop below, against that
+    group's own compound's encoding maps — different drivers in the same
+    session can be on different compounds whose tire_deg models were promoted
+    from different training runs (item 9's per-compound promotion), so there
+    is no single "the" driver/circuit code for the whole batch; it depends on
+    which pipeline a given group's life-remaining call is about to use.
+
     gap_to_ahead/behind and safety_car_probability are held constant at the
     caller-supplied values — see module docstring for why no forward gap/SC
     model is available here.
 
     Args: one entry per driver (arrays/list all the same length n, in the
-        same order); see pit_predictor.FEATURE_COLUMNS for feature semantics.
+        same order) except maps_cache/circuit_name (shared context); see
+        pit_predictor.FEATURE_COLUMNS for feature semantics.
     Returns:
         (predicted_pit_lap, pit_probability_at_that_lap) arrays, one entry
         per driver. For any driver who never crosses the threshold within
@@ -974,14 +1114,19 @@ def _first_pit_laps_over_threshold_batch(
                 continue
             group_mask = np.array([compounds[i] == compound for i in idx])
             group_idx = idx[group_mask]
+            group_maps = _encoding_maps_for_compound(maps_cache, compound)
+            group_driver_codes = np.array(
+                [tire_deg_model.resolve_driver_code(group_maps, driver_ids[i]) for i in group_idx]
+            )
+            group_circuit_code = tire_deg_model.resolve_circuit_code(group_maps, circuit_name)
             life_remaining[group_mask] = tire_deg_model.predict_life_remaining_batch(
                 pipeline,
                 current_laps[group_idx] + offset,
                 compound_encoded[group_idx],
                 tyre_ages[group_idx] + offset,
                 np.zeros(len(group_idx)),
-                np.full(len(group_idx), circuit_code),
-                driver_codes[group_idx],
+                np.full(len(group_idx), group_circuit_code),
+                group_driver_codes,
             )
 
         features = np.column_stack(
@@ -1034,6 +1179,7 @@ async def get_competitor_predicted_strategy(
         One dict per driver: driver_id, predicted_pit_lap, pit_probability.
     """
     models = _load_models()
+    maps_cache = _load_encoding_maps()
     pit_model = models.get("pit_predictor.pkl")
     if pit_model is None:
         raise ModelNotLoadedError("pit_predictor model not loaded")
@@ -1054,12 +1200,12 @@ async def get_competitor_predicted_strategy(
 
     total_laps = max(lap.lap_number for lap in latest_laps)
     circuit_query = (
-        select(Race.circuit_id)
+        select(Race.circuit_id, Circuit.name)
         .join(SessionModel, SessionModel.race_id == Race.id)
+        .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    circuit_id = (await db.execute(circuit_query)).scalar_one()
-    circuit_code = _stable_code(str(circuit_id))
+    _circuit_id, circuit_name = (await db.execute(circuit_query)).one()
 
     driver_ids = [str(lap.driver_id) for lap in latest_laps]
     compounds = [lap.compound for lap in latest_laps]
@@ -1067,9 +1213,10 @@ async def get_competitor_predicted_strategy(
     predicted_laps, probabilities = _first_pit_laps_over_threshold_batch(
         pit_model,
         models,
-        np.array([_stable_code(d) for d in driver_ids]),
+        maps_cache,
+        driver_ids,
         compounds,
-        circuit_code,
+        circuit_name,
         np.array([lap.lap_number for lap in latest_laps]),
         np.array([lap.tyre_age_laps for lap in latest_laps]),
         np.array([lap.position or n for lap in latest_laps]),

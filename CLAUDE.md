@@ -507,28 +507,43 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Deferred items — batch 3 (item 4)
-Status:   Item 4 done: predicted_finish_time made a real absolute
-          elapsed time (race_simulator.py's new
-          baseline_lap_time_seconds, see this file's own ✅ Notes
-          entry) — validated by replaying VER's real Belgian GP
-          2026 R10 pit stop, landing within 21.5s (0.4%) of his
-          real finish time. web/desktop render it via a new
-          formatRaceTime. Item 7 (NULL-lap cumulative-sum bug)
-          also fully closed, local and production — see its own
-          ✅ Notes entry. 4 items remain in
-          docs/day-deferred-fixes-session2-handoff.md: 5 (driver
-          skill signal), 6 (strategic adaptation — research-first),
-          8 (WET model retrain, low value, unblocked since item 9),
-          10 (track-condition input).
-Next:     Continue down the remaining 4 deferred items, pick per
+Day:      Deferred items — batch 3 (item 5)
+Status:   Item 5 investigated and closed with a corrected scope: the
+          driver-skill-feature ask itself was evaluated offline
+          (scripts/evaluate_driver_features.py) and found NOT a
+          clean win (helps HARD/INTER tire_deg, hurts SOFT/MEDIUM,
+          small win for pit_predictor only) — deliberately not
+          added. The investigation surfaced a much bigger, separate
+          bug along the way: driver_id_encoded/circuit_id_encoded
+          at inference never matched the real training-time code
+          (a crc32 stand-in was used instead), inflating tire_deg
+          holdout MAE by 50-265%. That IS fixed — each tire_deg
+          model's sidecar now carries its real training-time code
+          map, resolved per-pipeline-call, graceful crc32 fallback
+          for any missing map/id. Validated via a real local retrain
+          (4 of 5 tire_deg models promoted with real maps; holdout
+          MAEs matched the offline evaluation to 4 decimal places)
+          — see this file's own ✅ Notes entry ("Driver/circuit
+          encoding persisted"). Also incidentally validated item 9's
+          promotion guard for the first time against a real run: it
+          correctly force-promoted working candidates over 3
+          corrupted incumbent .pkl files. Item 4 (predicted_finish_
+          time) and item 7 (NULL-lap cumulative-sum) remain closed
+          from prior sessions — see their own ✅ Notes entries.
+          3 items remain in
+          docs/day-deferred-fixes-session2-handoff.md: 6 (strategic
+          adaptation — research-first), 8 (WET model retrain, low
+          value, unblocked since item 9), 10 (track-condition
+          input).
+Next:     Continue down the remaining 3 deferred items, pick per
           session based on priority/scope. Fly.io deployment (Day
           40 A4) after deferred items are addressed. Note:
-          train-models.yml currently fetches zero 2026 laps (see
-          the escalated GitHub-Actions/FastF1 deferred item) —
-          resolve or consciously accept the base-corpus-only
-          outcome before triggering a real run that would exercise
-          item 9's guard for the first time in production.
+          train-models.yml (CI) still fetches zero 2026 laps (see
+          the escalated GitHub-Actions/FastF1 deferred item) — a
+          real LOCAL training run (item 5's fix) has now exercised
+          item 9's guard for the first time, but the CI path itself
+          remains untested; resolve or consciously accept the
+          base-corpus-only outcome before triggering a real CI run.
 Blockers: No physical device for testing — Android emulator
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
@@ -1316,20 +1331,26 @@ happen), or was found already fixed and moved into ### Notes below instead.
   fixed alongside on request, not left for a separate session. See the
   Notes entry below for the fix summary and verification.
 
-- **[deferred] `driver_id_encoded` (the tyre-degradation and pit-predictor
-  models' only per-driver signal) has no relationship to actual driving
-  ability — it's `zlib.crc32(str(driver_id).encode()) % 1000`
-  (`strategy_service._stable_code`, duplicated in `prediction_worker.py`
-  and used identically inside `race_simulator.py`), a deterministic hash
-  chosen only so the same driver gets the same code across calls. It
-  carries zero skill/pace signal, so no model can ever learn "this specific
-  driver is unusually fast/consistent" — confirmed as the likely explanation
-  for Test 2's 2026-08-30 validation finding (VER's real pit stop at Spa
-  2026 R10: simulator predicted `position_gain_loss=-4` over the remaining
-  27 laps, VER actually gained a position in the real race — see the
-  current_lap-validation ✅-fixed Notes entry below for the full trace of
-  why `position_gain_loss` itself is mechanically sound but still can't
-  see this).
+- **[deferred, corrected 2026-09-04] `driver_id_encoded` still carries no
+  real driving-skill signal — evaluated, found NOT a clean win, not added.**
+  The encoding-correctness half of this item is fixed (see the ✅ Notes
+  entry "Driver/circuit encoding persisted" above) — `driver_id_encoded`/
+  `circuit_id_encoded` now use the real training-time `pd.Categorical` code
+  where a model's sidecar carries one, not the `crc32` stand-in this entry
+  originally described. What remains open is the ORIGINAL ask: a genuine
+  per-driver skill feature alongside (not instead of) that identity code.
+  `scripts/evaluate_driver_features.py` (new, kept as a reusable dev tool)
+  ran an offline holdout comparison of two candidates — per-driver
+  tyre-degradation slope and lap-time consistency, both computed
+  prior-sessions-only (expanding mean over a driver's earlier races) so
+  neither leaks `lap_time_delta`, the training target, into itself — before
+  any retrain: tire_deg holdout MAE **improved on HARD/INTERMEDIATE (-2% to
+  -10.5%) but got WORSE on SOFT/MEDIUM (+2% to +6%)** — the two
+  highest-volume compounds. `pit_predictor` showed a small, consistent
+  improvement across all variants (-1% to -2.8% MAE, AUC 0.972→0.974).
+  Given the mixed/negative tire_deg result, this was NOT added — the
+  "moderate effort, real accuracy win" framing this entry previously carried
+  is superseded by this evidence.
   - **A real per-driver skill metric already exists, session-relative:**
     `driver_service._performance_vs_team_avg` (`services/driver_service.py`)
     computes each driver's mean valid lap time minus their season
@@ -1338,24 +1359,17 @@ happen), or was found already fixed and moved into ### Notes below instead.
     module's own docstring on why), so using it as a model feature would
     need aggregating it into a stable per-driver number first (e.g. a
     rolling/season-average across many sessions), not wiring in the raw
-    session-relative value directly.
-  - **Fix requires, in order:** (1) a real per-driver skill feature —
-    plausibly an aggregate of `_performance_vs_team_avg` across a driver's
-    recent sessions/seasons, computed at training-data-export time
-    (`scripts/export_training_data.py`/`scripts/train_models.py`'s
-    `fetch_laps_from_db`), since it isn't currently part of any laps
-    export; (2) adding that column to `tire_deg_model.FEATURE_COLUMNS` and
-    `pit_predictor.FEATURE_COLUMNS` alongside (not instead of)
-    `driver_id_encoded` — replacing the hash outright would remove even
-    the current "same driver, same code" consistency contributed alongside
-    a real feature; (3) a full retrain + promotion-guard pass for all 5
-    tyre_deg models and `pit_predictor.pkl` (this is a training-corpus and
-    feature-schema change, not a hot-swappable model like the WET alias
-    fixed today).
-  - **Effort: moderate.** Real accuracy improvement, and the underlying
-    session-relative computation already exists — the work is aggregation
-    + feature engineering + retrain, not inventing a new data signal from
-    scratch. Good candidate for a future dedicated day, not attempted today.
+    session-relative value directly. `evaluate_driver_features.py`'s own
+    candidates are a simpler, already-implemented alternative aggregate
+    (degradation slope / consistency), not this metric — a future attempt
+    could try `_performance_vs_team_avg` instead/as well.
+  - **If revisited: scope to `pit_predictor` only, or make tire_deg's
+    feature set per-compound-conditional** (add for HARD/INTERMEDIATE,
+    not SOFT/MEDIUM) rather than a blanket addition to all 5 tyre_deg
+    models — the blanket approach is what `evaluate_driver_features.py`
+    showed doesn't pay off. A per-compound-conditional `FEATURE_COLUMNS`
+    is itself added complexity (heterogeneous schemas across compounds)
+    worth weighing against the modest gain.
 
 - **[deferred — architectural, long-term] The Monte Carlo simulator has no
   strategic/reactive adaptation between drivers — every driver's simulated
@@ -1411,6 +1425,47 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Driver/circuit encoding persisted — item 5 investigation (✅ fixed
+2026-09-04):** `driver_id_encoded`/`circuit_id_encoded` at inference were
+always `crc32(id) % 1000` (`_stable_code`) — a self-consistent stand-in,
+never the real `pd.Categorical` code the model actually trained on (that
+mapping was never persisted). `scripts/evaluate_driver_features.py` (new,
+kept as a reusable offline-evaluation tool) measured the real cost: scoring
+the same fitted model on holdout with real vs. crc32 codes inflates tire_deg
+MAE by **+50% to +265%** depending on compound. Fixed: `train_models.py`/
+`retrain_incremental.py` now embed each tire_deg model's own
+`driver_id_to_code`/`circuit_name_to_code` map (`tire_deg_model.
+build_categorical_encoding_maps`) in its own sidecar — per-model, not
+shared, since item 9 promotes each compound independently.
+`strategy_service.py`/`prediction_worker.py`'s `_load_models()` download and
+cache each sidecar's map (`_load_encoding_maps()`), aliased alongside the
+WET→INTER model alias; every call site resolves via `resolve_driver_code`/
+`resolve_circuit_code`, matched to the exact pipeline it's about to call
+(e.g. `get_optimal_pit_window`'s stint-2 candidates each use their own
+compound's map). A missing map (legacy sidecar, or an id that debuted after
+a model's training) falls back to the old crc32 formula — non-regressive by
+construction. One documented limitation: `RaceSimulationInput.
+circuit_id_encoded` is a single value shared across all compound groups in
+`race_simulator.py`, so it's resolved against the requesting driver's own
+compound — correct when all compounds share one training run (the normal
+case), an approximation otherwise; a fully general fix needs a
+`race_simulator.py` data-model change, out of scope here. **Validated:** a
+real local retrain promoted 4 of 5 tire_deg models (MEDIUM/HARD/INTER/WET;
+SOFT's candidate didn't beat its incumbent, stays on crc32 fallback for
+now) with real maps (43 drivers/24 circuits); their holdout MAEs matched
+`evaluate_driver_features.py`'s offline predictions to 4 decimal places.
+Confirmed live: VER's real trained code (19) vs. the old crc32 stand-in
+(320) — genuinely different values, genuinely in use. Also validated item 9
+for the first time against a real run: MEDIUM/HARD/INTER's incumbent
+`.pkl`s were actually corrupted (`xgboost: input stream corrupted`) and the
+schema guard correctly force-promoted working candidates over them — a
+real-world confirmation of that fix, not something this session caused.
+248→252 unit tests passed (10 new), 45 integration tests passed. The
+underlying skill-signal ask (adding a real driving-skill feature, not just
+fixing the encoding) was evaluated and found NOT a clean win — see the
+Deferred Wiring entry below, corrected with this evidence — deliberately
+not done this session.
 
 **`predicted_finish_time` made a real elapsed time — item 4 (✅ fixed
 2026-09-03):** The Strategy Simulator's `predicted_finish_time` only

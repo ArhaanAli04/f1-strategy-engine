@@ -18,6 +18,14 @@ If a tire_deg compound has no holdout-season data (e.g. a dry 2025 means zero
 WET laps), promotion falls back to comparing cv_mae instead of a true holdout
 score — see promotion_basis in that model's metrics.json.
 
+Each tire_deg model's metrics.json also carries driver_id_to_code/
+circuit_name_to_code (tire_deg_model.build_categorical_encoding_maps) — the
+real pd.Categorical code map encode_categoricals fit for this run, embedded
+per-model rather than as one shared artifact since each compound is promoted
+independently (see tire_deg_model.py's own "Training-time categorical
+encoding" section for why this exists and CLAUDE.md's Deferred Wiring entry
+for the measured cost of the crc32 stand-in it replaces at inference).
+
 pit_predictor is trained on laps fetch_laps_from_db() returns regardless of is_valid,
 since the pit/in/out laps FastF1 marks invalid are exactly its positive-class
 target. tire_deg_model and safety_car_model still filter to is_valid laps only.
@@ -568,6 +576,13 @@ async def train_all() -> None:
     train_laps, holdout_laps = split_train_holdout(laps)
     logger.info("Train laps: %d, holdout laps: %d", len(train_laps), len(holdout_laps))
 
+    # Recovers the driver_id/circuit_name -> pd.Categorical code map encode_categoricals
+    # just fit, so inference can use the model's real training-time codes instead of the
+    # crc32 stand-in — see tire_deg_model.py's "Training-time categorical encoding"
+    # section. One shared map for this run: every tire_deg compound below is trained
+    # from this same encode_categoricals(laps) call, just filtered by compound after.
+    encoding_maps = tire_deg_model.build_categorical_encoding_maps(laps)
+
     # pit_predictor needs the pit/in/out laps is_valid excludes — they're its label.
     pit_laps = raw_laps.drop(columns=["is_valid"]).copy()
     pit_laps["laps_in_session"] = pit_laps.groupby("session_id")["lap_number"].transform("max")
@@ -623,6 +638,7 @@ async def train_all() -> None:
                 "holdout_mae": holdout_mae,
                 "n_samples": result.n_samples,
                 "promotion_basis": promotion_basis,
+                **encoding_maps,
             },
             feature_names=tire_deg_model.FEATURE_COLUMNS,
         )
