@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import uuid
-import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypedDict
@@ -15,6 +14,7 @@ import numpy as np
 import redis
 import redis.asyncio as aioredis
 import sentry_sdk
+from botocore.exceptions import ClientError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,6 +70,12 @@ _WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 _FRESH_TYRE_GAIN_PER_LAP_SECONDS = {"HARD": 0.3, "MEDIUM": 0.5, "SOFT": 0.8}
 
 _model_cache: dict[str, Any] = {}
+# Per tire_deg model filename, its own CategoricalEncodingMaps (or None if that
+# model's sidecar is missing/legacy — predates the encoding-persistence fix).
+# Populated as a side effect of _load_models(), same process lifetime as
+# _model_cache — see _load_encoding_maps() and tire_deg_model.py's "Training-
+# time categorical encoding" section.
+_encoding_maps_cache: dict[str, Any] = {}
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
@@ -110,8 +116,63 @@ def _download_from_s3(filename: str) -> Path:
     return path
 
 
+def _local_metrics_path(filename: str) -> Path:
+    model_dir = Path(get_ml_settings().model_cache_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return model_dir / f"{filename}.metrics.json"
+
+
+def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
+    """Download a tire_deg model's own sidecar metrics.json from S3, unless cached locally.
+
+    Duplicated from strategy_service.py's identical helper — same no-cross-service-
+    import convention as this module's other duplicated helpers (_resolve_weather,
+    _encoding_maps_for_compound). Same local-disk-cache-then-fetch lifecycle as _download_from_s3
+    (never re-fetches once cached — a worker restart is what picks up a newly-promoted
+    model's fresh sidecar, same as every other model in this process).
+
+    Args:
+        filename: Model file name, e.g. "tire_deg_medium.pkl" — fetches its
+            {_MODEL_VERSION_TAG}/{filename}.metrics.json sidecar, not the model itself.
+    Returns:
+        The sidecar's parsed JSON contents, or None if no sidecar exists for this
+        filename yet (a production model that predates train_models.py writing one at
+        all, or the item-9 schema-check fix specifically) — callers must treat None as
+        "no recoverable encoding map," not as an error.
+    """
+    path = _local_metrics_path(filename)
+    if path.exists():
+        return dict(json.loads(path.read_text()))
+
+    settings = get_aws_settings()
+    client = boto3.client(
+        "s3",
+        region_name=settings.aws_region,
+        aws_access_key_id=settings.aws_access_key_id,
+        aws_secret_access_key=settings.aws_secret_access_key,
+    )
+    try:
+        obj = client.get_object(
+            Bucket=settings.aws_bucket_name, Key=f"{_MODEL_VERSION_TAG}/{filename}.metrics.json"
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "404"):
+            return None
+        raise
+    body = obj["Body"].read()
+    path.write_bytes(body)
+    return dict(json.loads(body))
+
+
 def _load_models() -> dict[str, Any]:
     """Load all registry models into an in-process cache, downloading from S3 on first use.
+
+    Also populates _encoding_maps_cache with each tire_deg model's own recovered
+    training-time driver/circuit code map (see tire_deg_model.py's "Training-time
+    categorical encoding" section) — same once-per-process lifecycle as the models
+    themselves, so this function is the single place both caches get populated
+    together, which is what lets apply_incompatible_model_fallbacks alias both in
+    lockstep below.
 
     Args:
         None.
@@ -123,28 +184,52 @@ def _load_models() -> dict[str, Any]:
     for filename in _MODEL_FILES:
         path = _download_from_s3(filename)
         _model_cache[filename] = joblib.load(path)
+    for filename in _MODEL_FILES:
+        if filename.startswith("tire_deg_"):
+            metrics = _download_metrics_from_s3(filename)
+            _encoding_maps_cache[filename] = tire_deg_model.encoding_maps_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
     # experiment — see docs/simulator-issues-wet-model-and-position-
-    # context.md) by aliasing it to a compatible fallback for this process.
-    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache)
+    # context.md) by aliasing it (and its encoding maps) to a compatible
+    # fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache, _encoding_maps_cache)
     return _model_cache
 
 
-def _stable_code(value: str, modulus: int = 1000) -> int:
-    """Deterministic proxy for an unrecoverable training-time pd.Categorical code.
-
-    Duplicated from strategy_service.py's identical helper (same rationale: the
-    exact training-time circuit/driver category code can't be recovered — see
-    that module's docstring). Kept in sync by convention, not by import.
+def _load_encoding_maps() -> dict[str, tire_deg_model.CategoricalEncodingMaps | None]:
+    """This process's tire_deg encoding-maps cache, populated as a side effect of _load_models().
 
     Args:
-        value: The id (circuit_id or driver_id, stringified) to encode.
-        modulus: Range to fold the hash into.
+        None.
     Returns:
-        A stable integer in [0, modulus).
+        Mapping of tire_deg model filename to its CategoricalEncodingMaps, or None for a
+        filename whose sidecar is missing/legacy — see resolve_driver_code/
+        resolve_circuit_code (tire_deg_model.py) for how a None entry is handled.
     """
-    return zlib.crc32(value.encode()) % modulus
+    _load_models()
+    return _encoding_maps_cache
+
+
+def _encoding_maps_for_compound(
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None], compound: str
+) -> tire_deg_model.CategoricalEncodingMaps | None:
+    """Look up the tire_deg encoding maps for a compound, defaulting to MEDIUM's suffix.
+
+    Duplicated from strategy_service.py's identical helper (same no-cross-service-
+    import convention as this module's other duplicated helpers). Mirrors the
+    compound -> filename suffix lookup already inlined at each of this module's
+    pipeline-selection call sites — a driver/circuit code must always be resolved
+    against the SAME model's own map as the pipeline it's about to be fed into.
+
+    Args:
+        maps_cache: Output of _load_encoding_maps().
+        compound: Tyre compound name.
+    Returns:
+        That compound's CategoricalEncodingMaps, or None if unavailable.
+    """
+    suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
+    return maps_cache.get(f"tire_deg_{suffix}.pkl")
 
 
 def _weather_key(season: int, round_number: int) -> str:
@@ -164,7 +249,7 @@ async def _resolve_weather(
     Duplicated from strategy_service._resolve_weather — identical contract
     (live f1:{season}:{round}:weather:latest key first, DB circuit+compound
     average as fallback). Duplicated rather than imported for the same
-    no-cross-service-import reason as _stable_code above.
+    no-cross-service-import reason as this module's other duplicated helpers.
 
     Args:
         async_redis_client: Async Redis client.
@@ -330,6 +415,7 @@ async def _resolve_inference_context(
 
 def _run_inference(
     models: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
     context: dict[str, Any],
     resolved: dict[str, Any],
     driver_id: uuid.UUID,
@@ -352,6 +438,9 @@ def _run_inference(
 
     Args:
         models: Loaded model registry, keyed by filename.
+        maps_cache: Output of _load_encoding_maps() — this driver/lap's real
+            training-time driver_id_encoded/circuit_id_encoded, resolved
+            against the same compound's model this call is about to feed.
         context: Driver + lap context — expects compound, tyre_age_laps, lap_number.
         resolved: Output of _resolve_inference_context — circuit_id, circuit_name,
             total_laps, track_temp, air_temp, position, gap_to_car_ahead,
@@ -371,8 +460,9 @@ def _run_inference(
     tyre_age_laps = int(context.get("tyre_age_laps", 0))
     total_laps = resolved["total_laps"] or lap_number
     compound_encoded = _COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"])
-    circuit_code = _stable_code(str(resolved["circuit_id"]))
-    driver_code = _stable_code(str(driver_id))
+    compound_maps = _encoding_maps_for_compound(maps_cache, compound)
+    circuit_code = tire_deg_model.resolve_circuit_code(compound_maps, resolved["circuit_name"])
+    driver_code = tire_deg_model.resolve_driver_code(compound_maps, str(driver_id))
 
     fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1))
     fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
@@ -565,6 +655,7 @@ async def _resolve_undercut_overcut(
 
 async def _persist_and_publish(context: dict[str, Any]) -> None:
     models = _load_models()
+    maps_cache = _load_encoding_maps()
 
     session_id = uuid.UUID(str(context["session_id"]))
     driver_id = uuid.UUID(str(context["driver_id"]))
@@ -579,7 +670,7 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
             resolved = await _resolve_inference_context(
                 db, async_redis_client, session_id, driver_id, compound
             )
-            prediction = _run_inference(models, context, resolved, driver_id)
+            prediction = _run_inference(models, maps_cache, context, resolved, driver_id)
             undercut_score, overcut_score = await _resolve_undercut_overcut(
                 async_redis_client, db, resolved, session_id, driver_id
             )
@@ -646,7 +737,7 @@ async def _cumulative_race_time(
     """Elapsed race time for one driver through up_to_lap.
 
     Duplicated from strategy_service._cumulative_race_time — same no-cross-
-    service-import reason as _stable_code/_resolve_weather above.
+    service-import reason as _resolve_weather above.
 
     Prefers LapData.session_elapsed_seconds (a real absolute elapsed time
     from the driver's latest ingested lap at or before up_to_lap — populated
@@ -699,6 +790,7 @@ async def _build_race_state(
     current_compound: str,
     current_tyre_age: int,
     total_laps: int,
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
 ) -> RaceSimulationInput:
     """Build a full-field RaceSimulationInput: every driver's latest state, requester overridden.
 
@@ -717,6 +809,21 @@ async def _build_race_state(
         current_lap, current_compound, current_tyre_age: The request's own
             state for requesting_driver_id (overrides their DB row).
         total_laps: current_lap + remaining_laps (from the request).
+        maps_cache: Output of _load_encoding_maps() — each driver's real
+            driver_id_encoded is resolved against THEIR OWN current compound's
+            map (see the driver loop below). circuit_id_encoded is a single
+            value on RaceSimulationInput shared across every compound group
+            inside race_simulator._tire_deg_predictions, so it is resolved
+            against current_compound's map specifically (the requesting
+            driver's own compound) — a deliberate, documented simplification,
+            not an oversight: correctness for every OTHER compound's group
+            depends on that compound's map agreeing with current_compound's,
+            true whenever all promoted tire_deg models share one training run
+            (train_models.py fits driver/circuit codes once, across all 5
+            compounds together — the common case) and only approximate
+            otherwise. A fully general fix needs RaceSimulationInput's
+            circuit_id_encoded to become per-compound, which is a
+            race_simulator.py data-model change out of scope here.
     Returns:
         RaceSimulationInput ready for race_simulator.simulate_race.
     Raises:
@@ -870,6 +977,13 @@ async def _build_race_state(
             position_by_driver.get(lap.driver_id) or lap.position or len(latest_laps)
         )
         baseline_lap_time = baseline_lap_time_by_driver.get(lap.driver_id, field_median_baseline)
+        # Resolved against THIS driver's own current compound — different
+        # drivers in the same field can be on different compounds, whose
+        # tire_deg models may have been promoted from different training
+        # runs (item 9's per-compound promotion) with different driver code
+        # universes; race_simulator groups drivers by compound before ever
+        # calling a pipeline, so this must match that grouping exactly.
+        driver_maps = _encoding_maps_for_compound(maps_cache, compound)
         drivers.append(
             DriverRaceState(
                 driver_id=driver_id_str,
@@ -877,11 +991,17 @@ async def _build_race_state(
                 compound=compound,
                 compound_encoded=_COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"]),
                 tyre_age_laps=tyre_age_laps,
-                driver_id_encoded=_stable_code(driver_id_str),
+                driver_id_encoded=tire_deg_model.resolve_driver_code(driver_maps, driver_id_str),
                 cumulative_race_time_seconds=cumulative_time,
                 baseline_lap_time_seconds=baseline_lap_time,
             )
         )
+
+    # current_compound's own map — used below for the requester's fallback
+    # driver code (if they had no persisted lap) and, per this function's own
+    # docstring, as the resolution context for the single shared
+    # circuit_id_encoded on RaceSimulationInput.
+    current_maps = _encoding_maps_for_compound(maps_cache, current_compound)
 
     if not requesting_driver_found:
         # No persisted lap data yet for the requester (e.g. pre-race what-if) —
@@ -900,7 +1020,7 @@ async def _build_race_state(
                     current_compound, _COMPOUND_ENCODING["MEDIUM"]
                 ),
                 tyre_age_laps=current_tyre_age,
-                driver_id_encoded=_stable_code(driver_id_str),
+                driver_id_encoded=tire_deg_model.resolve_driver_code(current_maps, driver_id_str),
                 cumulative_race_time_seconds=0.0,
                 baseline_lap_time_seconds=field_median_baseline,
             )
@@ -908,7 +1028,7 @@ async def _build_race_state(
 
     return RaceSimulationInput(
         circuit_name=circuit_name,
-        circuit_id_encoded=_stable_code(str(circuit_id)),
+        circuit_id_encoded=tire_deg_model.resolve_circuit_code(current_maps, circuit_name),
         current_lap=current_lap,
         total_laps=total_laps,
         wet_track=current_compound in _WET_COMPOUNDS,
@@ -1010,6 +1130,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             Checkpoint-6 follow-up finding.
     """
     models = _load_models()
+    maps_cache = _load_encoding_maps()
     tire_deg_pipelines = {
         compound: models[f"tire_deg_{suffix}.pkl"]
         for compound, suffix in _COMPOUND_TO_MODEL_SUFFIX.items()
@@ -1042,6 +1163,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                 current_compound,
                 current_tyre_age,
                 total_laps,
+                maps_cache,
             )
     finally:
         await async_redis_client.aclose()  # type: ignore[attr-defined]

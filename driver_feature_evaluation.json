@@ -1,0 +1,84 @@
+{
+  "driver_feature_spread": {
+    "driver_deg_sensitivity": {
+      "min": -0.35470834185238187,
+      "max": 0.07076158730158727,
+      "mean": -0.02218666968518836,
+      "std": 0.022558517144622592
+    },
+    "driver_lap_time_consistency": {
+      "min": 0.26051761662396034,
+      "max": 6.4361606408037035,
+      "mean": 1.104391203389875,
+      "std": 0.2621868150509753
+    }
+  },
+  "tire_deg": {
+    "SOFT": {
+      "baseline": 0.6613127281841831,
+      "deg_sensitivity": 0.6762604216278824,
+      "consistency": 0.6972842504863722,
+      "both": 0.6903425813732261
+    },
+    "MEDIUM": {
+      "baseline": 0.4972225808527316,
+      "deg_sensitivity": 0.5092721278893612,
+      "consistency": 0.5258262243219718,
+      "both": 0.5230435551378299
+    },
+    "HARD": {
+      "baseline": 0.5196532115568955,
+      "deg_sensitivity": 0.5092253299405827,
+      "consistency": 0.5159412316573131,
+      "both": 0.5090912103889863
+    },
+    "INTERMEDIATE": {
+      "baseline": 3.736963129746423,
+      "deg_sensitivity": 3.344224279364386,
+      "consistency": 3.7203960213347456,
+      "both": 3.4212247907078406
+    },
+    "WET": {
+      "baseline": null,
+      "deg_sensitivity": null,
+      "consistency": null,
+      "both": null
+    }
+  },
+  "encoding_mismatch": {
+    "SOFT": {
+      "trained_codes": 0.6613127281841831,
+      "inference_codes": 1.0275051648377587
+    },
+    "MEDIUM": {
+      "trained_codes": 0.4972225808527316,
+      "inference_codes": 1.8152241402771379
+    },
+    "HARD": {
+      "trained_codes": 0.5196532115568955,
+      "inference_codes": 0.7817392267012754
+    },
+    "INTERMEDIATE": {
+      "trained_codes": 3.736963129746423,
+      "inference_codes": 3.395580327746068
+    }
+  },
+  "pit_predictor": {
+    "baseline": {
+      "holdout_mae": 0.032667362537837745,
+      "holdout_auc": 0.9716776455999114
+    },
+    "deg_sensitivity": {
+      "holdout_mae": 0.032418192940825596,
+      "holdout_auc": 0.9744546361425401
+    },
+    "consistency": {
+      "holdout_mae": 0.032361227518978554,
+      "holdout_auc": 0.9734927506774789
+    },
+    "both": {
+      "holdout_mae": 0.03174680857612964,
+      "holdout_auc": 0.9726403531234317
+    }
+  }
+}

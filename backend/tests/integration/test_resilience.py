@@ -126,7 +126,7 @@ def test_prediction_worker_continues_on_model_exception() -> None:
     }
 
     with patch("sentry_sdk.capture_exception") as mock_capture:
-        result = prediction_worker._run_inference(models, context, resolved, driver_id)
+        result = prediction_worker._run_inference(models, {}, context, resolved, driver_id)
 
     assert result["tire_life_remaining"] == 0.0
     assert result["optimal_pit_lap"] == lap_number + 1

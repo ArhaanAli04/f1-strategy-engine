@@ -10,6 +10,7 @@ the feature set.
 from __future__ import annotations
 
 import logging
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,7 +64,9 @@ def pipeline_feature_count(pipeline: Any) -> int | None:
     return int(n_features) if isinstance(n_features, int | np.integer) else None
 
 
-def apply_incompatible_model_fallbacks(models: dict[str, Any]) -> None:
+def apply_incompatible_model_fallbacks(
+    models: dict[str, Any], *parallel_caches: dict[str, Any]
+) -> None:
     """Replace any registry model whose feature count doesn't match FEATURE_COLUMNS.
 
     Guards against exactly the failure class documented in
@@ -79,8 +82,17 @@ def apply_incompatible_model_fallbacks(models: dict[str, Any]) -> None:
     Args:
         models: The model registry cache, mutated in place — filename to
             deserialized model object.
+        *parallel_caches: Any number of additional filename-keyed dicts to
+            alias in lockstep with models whenever a model gets aliased to
+            its fallback — e.g. an encoding-maps cache (see
+            CategoricalEncodingMaps below), so a model aliased to
+            tire_deg_inter.pkl also picks up tire_deg_inter.pkl's own
+            encoding maps rather than keeping its own (possibly stale/
+            schema-incompatible) ones. A cache missing the fallback
+            filename's entry is left untouched for that filename — nothing
+            to alias to.
     Returns:
-        None (in-place mutation).
+        None (in-place mutation of every dict passed).
     """
     expected = len(FEATURE_COLUMNS)
     for filename, fallback_filename in INCOMPATIBLE_TYRE_MODEL_FALLBACKS.items():
@@ -109,6 +121,171 @@ def apply_incompatible_model_fallbacks(models: dict[str, Any]) -> None:
             fallback_filename,
         )
         models[filename] = fallback
+        for cache in parallel_caches:
+            if fallback_filename in cache:
+                cache[filename] = cache[fallback_filename]
+
+
+# --- Training-time categorical encoding, recovered and reused at inference ---
+#
+# train_models.encode_categoricals fits driver_id_encoded/circuit_id_encoded via
+# pd.Categorical(...).codes fresh per training run and never persisted the
+# resulting category list — strategy_service.py's and prediction_worker.py's
+# module docstrings both flagged this as an unresolved gap, and inference
+# substituted a deterministic crc32 hash as a stand-in (self-consistent, but
+# not the code the model actually trained on). Confirmed via
+# scripts/evaluate_driver_features.py's offline holdout comparison (see
+# CLAUDE.md's Deferred Wiring entry) that scoring a real fitted model with the
+# crc32 substitute instead of its own training codes inflates tire_deg holdout
+# MAE by 50-265% depending on compound — this is a live, active production
+# accuracy problem, not a theoretical one.
+#
+# Fix: train_models.py (and retrain_incremental.py) now recover the actual
+# pd.Categorical code map via build_categorical_encoding_maps and embed it
+# directly in EACH tire_deg model's own sidecar (train_models.py's
+# serialize_evaluate_and_upload metrics dict) — not one shared artifact,
+# since item 9's promotion guard promotes each compound independently, so two
+# compounds' production models can come from different training runs with
+# different driver/circuit universes. Keyed by circuit NAME rather than
+# circuit id: retrain_incremental.py's current-season fetch path has no DB
+# access and therefore no circuit UUID, while every code path (both training
+# scripts, both inference workers) already resolves a circuit's display name.
+# A missing map (legacy sidecar predating this fix) or a missing individual
+# id (a driver/circuit that debuted after a model's last training run) both
+# fall back to the same crc32 formula the pre-fix code used everywhere —
+# this makes the fix strictly non-regressive: worst case is identical to
+# today for exactly the ids it can't do better for.
+
+
+@dataclass(frozen=True)
+class CategoricalEncodingMaps:
+    """One tire_deg model's own recovered training-time category code maps.
+
+    Lives inside that model's sidecar (train_models.py's
+    serialize_evaluate_and_upload metrics dict → the {tag}/{filename}.metrics.json
+    S3 object), loaded alongside the model itself by each service's
+    _load_models() and cached per filename — see resolve_driver_code/
+    resolve_circuit_code below for how these are used.
+    """
+
+    driver_id_to_code: dict[str, int]
+    circuit_name_to_code: dict[str, int]
+
+
+def build_categorical_encoding_maps(df: pd.DataFrame) -> dict[str, dict[str, int]]:
+    """Recover the driver_id/circuit_name -> pd.Categorical code maps a training run fit.
+
+    Called once per training run (train_models.train_all / retrain_incremental.retrain),
+    right after train_models.encode_categoricals — every tire_deg compound trained from
+    that same encoded frame shares an identical map, since encode_categoricals fits the
+    codes once across the whole combined frame before per-compound filtering.
+
+    Args:
+        df: A laps frame already run through encode_categoricals — must include driver_id,
+            driver_id_encoded, circuit_name, circuit_id_encoded.
+    Returns:
+        {"driver_id_to_code": {str(driver_id): code}, "circuit_name_to_code": {circuit_name:
+        code}} — plain-str-keyed, plain-int-valued (not numpy scalars) so this is directly
+        JSON-serializable for embedding in a model sidecar's metrics dict, matching how
+        n_features/feature_names are already embedded there (item 9).
+    """
+    driver_unique = df[["driver_id", "driver_id_encoded"]].drop_duplicates()
+    driver_map = {
+        str(driver_id): int(code)
+        for driver_id, code in zip(
+            driver_unique["driver_id"], driver_unique["driver_id_encoded"], strict=True
+        )
+    }
+    circuit_unique = df[["circuit_name", "circuit_id_encoded"]].drop_duplicates()
+    circuit_map = {
+        str(circuit_name): int(code)
+        for circuit_name, code in zip(
+            circuit_unique["circuit_name"], circuit_unique["circuit_id_encoded"], strict=True
+        )
+    }
+    return {"driver_id_to_code": driver_map, "circuit_name_to_code": circuit_map}
+
+
+def encoding_maps_from_metrics(metrics: dict[str, Any] | None) -> CategoricalEncodingMaps | None:
+    """Recover CategoricalEncodingMaps from a downloaded model sidecar's metrics dict.
+
+    Args:
+        metrics: A tire_deg model's own {filename}.metrics.json contents (see
+            train_models.download_metrics for the sidecar-fetch pattern this complements),
+            or None if no sidecar could be fetched at all.
+    Returns:
+        CategoricalEncodingMaps if both driver_id_to_code and circuit_name_to_code are
+        present and are dicts, else None. A legacy sidecar (predates this fix) or a
+        non-tire_deg model's sidecar (pit_predictor.pkl/safety_car_model.pkl never carry
+        these keys) both correctly resolve to None — callers must treat None as "use the
+        crc32 fallback for every id," not as an error.
+    """
+    if metrics is None:
+        return None
+    driver_map = metrics.get("driver_id_to_code")
+    circuit_map = metrics.get("circuit_name_to_code")
+    if not isinstance(driver_map, dict) or not isinstance(circuit_map, dict):
+        return None
+    return CategoricalEncodingMaps(driver_id_to_code=driver_map, circuit_name_to_code=circuit_map)
+
+
+def _crc32_fallback_code(value: str, modulus: int = 1000) -> int:
+    """The pre-fix deterministic stand-in, numerically identical to strategy_service's/
+    prediction_worker's old duplicated `_stable_code`.
+
+    Used by resolve_driver_code/resolve_circuit_code only when no persisted training-time
+    code is available for a given id — kept bit-for-bit identical to the function it
+    replaces so behavior only ever improves (more ids get a real code), never regresses
+    for ids that had no real code recoverable either way.
+
+    Args:
+        value: The id (driver_id UUID string, or circuit name) to encode.
+        modulus: Range to fold the hash into.
+    Returns:
+        A stable integer in [0, modulus).
+    """
+    return zlib.crc32(value.encode()) % modulus
+
+
+def resolve_driver_code(maps: CategoricalEncodingMaps | None, driver_id: str) -> int:
+    """The tire_deg feature vector's driver_id_encoded value for one driver.
+
+    Prefers the real training-time pd.Categorical code recovered from the currently-loaded
+    model's own sidecar — the code that model's driver_id_encoded feature was actually fit
+    against. Falls back to a deterministic hash (see _crc32_fallback_code) for a driver
+    missing from the map, or when maps itself is None (no sidecar at all).
+
+    Args:
+        maps: This compound's CategoricalEncodingMaps, or None if unavailable.
+        driver_id: The driver's id, stringified the same way build_categorical_encoding_maps
+            built the map (str(uuid.UUID)).
+    Returns:
+        The integer driver_id_encoded feature value.
+    """
+    if maps is not None:
+        code = maps.driver_id_to_code.get(driver_id)
+        if code is not None:
+            return code
+    return _crc32_fallback_code(driver_id)
+
+
+def resolve_circuit_code(maps: CategoricalEncodingMaps | None, circuit_name: str) -> int:
+    """The tire_deg feature vector's circuit_id_encoded value for one circuit.
+
+    Mirrors resolve_driver_code exactly, keyed by circuit display name rather than id — see
+    this module's build_categorical_encoding_maps docstring for why name is the key.
+
+    Args:
+        maps: This compound's CategoricalEncodingMaps, or None if unavailable.
+        circuit_name: The circuit's display name (Circuit.name), matching how the map was built.
+    Returns:
+        The integer circuit_id_encoded feature value.
+    """
+    if maps is not None:
+        code = maps.circuit_name_to_code.get(circuit_name)
+        if code is not None:
+            return code
+    return _crc32_fallback_code(circuit_name)
 
 
 # track_temp/air_temp were removed from FEATURE_COLUMNS on 2026-07-16: adding

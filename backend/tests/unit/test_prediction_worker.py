@@ -108,6 +108,7 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         "SOFT",
         3,
         58,
+        {},
     )
 
     # Exactly one query for cumulative time (and baseline_lap_time_seconds,
@@ -194,6 +195,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
         "MEDIUM",
         14,
         58,
+        {},
     )
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
@@ -274,6 +276,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
         "MEDIUM",
         14,
         58,
+        {},
     )
 
     position_query = captured_queries[2]
@@ -322,12 +325,88 @@ def test_load_models_aliases_schema_incompatible_wet_pipeline(
     # module's imported attribute trips mypy --strict's --no-implicit-reexport.
     monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, other))
     monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    # No sidecar for any filename here — this test is scoped to model aliasing
+    # only; the encoding-maps side of the same aliasing call is covered by
+    # test_load_models_aliases_encoding_maps_alongside_wet_pipeline below.
+    monkeypatch.setattr(prediction_worker, "_download_metrics_from_s3", lambda filename: None)
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
 
     models = prediction_worker._load_models()
 
     assert models["tire_deg_wet.pkl"] is inter
     assert models["tire_deg_inter.pkl"] is inter
     assert set(models) == set(prediction_worker._MODEL_FILES)
+
+
+@pytest.mark.unit
+def test_load_models_populates_encoding_maps_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_load_models() downloads each tire_deg model's own sidecar and parses its encoding maps."""
+    n_features = len(tire_deg_model.FEATURE_COLUMNS)
+    pipeline = _fit_pipeline_with_n_features(n_features=n_features, seed=310)
+    metrics_by_filename = {
+        "tire_deg_soft.pkl": {
+            "holdout_mae": 0.5,
+            "driver_id_to_code": {"d1": 3},
+            "circuit_name_to_code": {"Monza": 7},
+        },
+        "tire_deg_medium.pkl": None,  # legacy sidecar — predates this fix, no maps recorded
+    }
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipeline)
+    monkeypatch.setattr(
+        prediction_worker,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
+
+    prediction_worker._load_models()
+    maps = prediction_worker._load_encoding_maps()
+
+    assert maps["tire_deg_soft.pkl"] == tire_deg_model.CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 3}, circuit_name_to_code={"Monza": 7}
+    )
+    assert maps["tire_deg_medium.pkl"] is None
+    assert "pit_predictor.pkl" not in maps  # only tire_deg_* filenames get an entry
+
+
+@pytest.mark.unit
+def test_load_models_aliases_encoding_maps_alongside_wet_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WET's model-schema alias also aliases its encoding-maps cache entry to INTER's real map."""
+    stale_wet = _fit_pipeline_with_n_features(n_features=8, seed=311)
+    inter = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=312)
+    pipelines_by_filename = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+    inter_maps = {
+        "holdout_mae": 0.4,
+        "driver_id_to_code": {"d1": 1},
+        "circuit_name_to_code": {"Monza": 2},
+    }
+    metrics_by_filename = {
+        "tire_deg_wet.pkl": {"holdout_mae": 5.0},  # stale sidecar, no maps of its own
+        "tire_deg_inter.pkl": inter_maps,
+    }
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, inter))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
+
+    prediction_worker._load_models()
+    maps = prediction_worker._load_encoding_maps()
+
+    assert maps["tire_deg_wet.pkl"] == tire_deg_model.CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 1}, circuit_name_to_code={"Monza": 2}
+    )
+    assert maps["tire_deg_wet.pkl"] is maps["tire_deg_inter.pkl"]
 
 
 @pytest.mark.unit
@@ -431,6 +510,7 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
         "MEDIUM",
         20,
         52,
+        {},
     )
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
@@ -518,6 +598,7 @@ async def test_build_race_state_missing_baseline_falls_back_to_field_median(
         "MEDIUM",
         10,
         44,
+        {},
     )
 
     driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
@@ -578,6 +659,7 @@ async def test_build_race_state_baseline_zero_when_field_has_none(
         "SOFT",
         0,
         50,
+        {},
     )
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(requesting_driver_id))

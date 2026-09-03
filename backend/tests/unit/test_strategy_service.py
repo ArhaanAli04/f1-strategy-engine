@@ -25,7 +25,11 @@ import pytest
 from backend.core.exceptions import NotFoundError, ValidationError
 from backend.schemas.strategy_schema import PitWindowResponse
 from backend.services import cache_service, strategy_service
-from backend.services.ml.tire_deg_model import FEATURE_COLUMNS, _build_pipeline
+from backend.services.ml.tire_deg_model import (
+    FEATURE_COLUMNS,
+    CategoricalEncodingMaps,
+    _build_pipeline,
+)
 
 SEASON = 2026
 ROUND_NUMBER = 10
@@ -65,11 +69,24 @@ def _scalar_result(value: Any) -> MagicMock:
     return result
 
 
+def _one_result(value: Any) -> MagicMock:
+    result = MagicMock()
+    result.one.return_value = value
+    return result
+
+
 def _current_state_side_effects(
-    lap: SimpleNamespace, total_laps: int, circuit_id: uuid.UUID
+    lap: SimpleNamespace,
+    total_laps: int,
+    circuit_id: uuid.UUID,
+    circuit_name: str = "Test Circuit",
 ) -> list[MagicMock]:
     """The 3 db.execute() calls _current_state makes, in order: lap, total_laps, circuit."""
-    return [_lap_result(lap), _scalar_result(total_laps), _scalar_result(circuit_id)]
+    return [
+        _lap_result(lap),
+        _scalar_result(total_laps),
+        _one_result((circuit_id, circuit_name)),
+    ]
 
 
 def _fake_competitor_lap(
@@ -266,7 +283,7 @@ async def test_get_competitor_predicted_strategy_returns_prediction_per_driver(
     ]
     mock_db_session.execute.side_effect = [
         _scalars_all_result(laps),
-        _scalar_result(circuit_id),
+        _one_result((circuit_id, "Test Circuit")),
     ]
 
     # Constant high pit probability — crosses ALERT_THRESHOLD on the very first
@@ -710,12 +727,94 @@ def test_load_models_aliases_schema_incompatible_wet_pipeline(
     # module's imported attribute trips mypy --strict's --no-implicit-reexport.
     monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, other))
     monkeypatch.setattr(strategy_service, "_model_cache", {})
+    # No sidecar for any filename here — this test is scoped to model aliasing
+    # only; the encoding-maps side of the same aliasing call is covered by
+    # test_load_models_aliases_encoding_maps_alongside_wet_pipeline below.
+    monkeypatch.setattr(strategy_service, "_download_metrics_from_s3", lambda filename: None)
+    monkeypatch.setattr(strategy_service, "_encoding_maps_cache", {})
 
     models = strategy_service._load_models()
 
     assert models["tire_deg_wet.pkl"] is inter
     assert models["tire_deg_inter.pkl"] is inter
     assert set(models) == set(strategy_service._MODEL_FILES)
+
+
+@pytest.mark.unit
+def test_load_models_populates_encoding_maps_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_load_models() downloads each tire_deg model's own sidecar and parses its encoding maps."""
+    pipeline = _fit_slope_pipeline(slope=0.1, seed=210)
+    metrics_by_filename = {
+        "tire_deg_soft.pkl": {
+            "holdout_mae": 0.5,
+            "driver_id_to_code": {"d1": 3},
+            "circuit_name_to_code": {"Monza": 7},
+        },
+        "tire_deg_medium.pkl": None,  # legacy sidecar — predates this fix, no maps recorded
+    }
+
+    monkeypatch.setattr(strategy_service, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipeline)
+    monkeypatch.setattr(
+        strategy_service,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(strategy_service, "_model_cache", {})
+    monkeypatch.setattr(strategy_service, "_encoding_maps_cache", {})
+
+    strategy_service._load_models()
+    maps = strategy_service._load_encoding_maps()
+
+    assert maps["tire_deg_soft.pkl"] == CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 3}, circuit_name_to_code={"Monza": 7}
+    )
+    assert maps["tire_deg_medium.pkl"] is None
+    assert "pit_predictor.pkl" not in maps  # only tire_deg_* filenames get an entry
+
+
+@pytest.mark.unit
+def test_load_models_aliases_encoding_maps_alongside_wet_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WET's model-schema alias also aliases its encoding-maps cache entry to INTER's real map.
+
+    A stale WET sidecar's own (possibly present but schema-mismatched) map must not be
+    used once its pipeline is aliased to INTER — using WET's own map would encode
+    driver/circuit codes for a model that isn't actually running any more.
+    """
+    stale_wet = _fit_slope_pipeline_with_n_features(n_features=8, slope=0.1, seed=203)
+    inter = _fit_slope_pipeline_with_n_features(
+        n_features=len(FEATURE_COLUMNS), slope=0.1, seed=204
+    )
+    pipelines_by_filename = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+    inter_maps = {
+        "holdout_mae": 0.4,
+        "driver_id_to_code": {"d1": 1},
+        "circuit_name_to_code": {"Monza": 2},
+    }
+    metrics_by_filename = {
+        "tire_deg_wet.pkl": {"holdout_mae": 5.0},  # stale sidecar, no maps of its own
+        "tire_deg_inter.pkl": inter_maps,
+    }
+
+    monkeypatch.setattr(strategy_service, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, inter))
+    monkeypatch.setattr(
+        strategy_service,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(strategy_service, "_model_cache", {})
+    monkeypatch.setattr(strategy_service, "_encoding_maps_cache", {})
+
+    strategy_service._load_models()
+    maps = strategy_service._load_encoding_maps()
+
+    assert maps["tire_deg_wet.pkl"] == CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 1}, circuit_name_to_code={"Monza": 2}
+    )
+    assert maps["tire_deg_wet.pkl"] is maps["tire_deg_inter.pkl"]
 
 
 @pytest.mark.unit

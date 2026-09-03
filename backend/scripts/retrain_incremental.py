@@ -230,6 +230,23 @@ def retrain() -> dict[str, dict[str, object]]:
     train_laps, holdout_laps = split_train_holdout(laps, train_seasons=train_seasons)
     logger.info("Train laps: %d, holdout laps: %d", len(train_laps), len(holdout_laps))
 
+    # Recovers this run's real driver_id/circuit_name -> code map, same as
+    # train_models.train_all — see tire_deg_model.py's "Training-time
+    # categorical encoding" section. NOTE (not fixed here, pre-existing and
+    # out of scope): base_laps' driver_id is a DB UUID string (see
+    # export_training_data.py) but current_laps' driver_id is a FastF1
+    # 3-letter code (lap["Driver"], see _fetch_current_season_rounds above) —
+    # encode_categoricals treats these as unrelated categories, so a driver
+    # active in both the base corpus and the current season gets two
+    # different codes, and only the UUID-keyed one is ever reachable at
+    # inference (driver_id there is always a DB UUID). This map faithfully
+    # reflects whichever code pd.Categorical actually assigned; it doesn't
+    # paper over that identity split. Moot in practice today: this script's
+    # CI entrypoint currently fetches zero 2026 laps (see CLAUDE.md's
+    # escalated GitHub-Actions/FastF1 deferred item), so no production model
+    # has been promoted through this path yet.
+    encoding_maps = tire_deg_model.build_categorical_encoding_maps(laps)
+
     pit_laps = raw_laps.drop(columns=["is_valid"]).copy()
     pit_laps["laps_in_session"] = pit_laps.groupby("session_id")["lap_number"].transform("max")
     pit_laps = encode_categoricals(pit_laps)
@@ -272,6 +289,7 @@ def retrain() -> dict[str, dict[str, object]]:
                 "holdout_mae": holdout_mae,
                 "n_samples": result.n_samples,
                 "promotion_basis": promotion_basis,
+                **encoding_maps,
             },
             summary,
             feature_names=tire_deg_model.FEATURE_COLUMNS,
