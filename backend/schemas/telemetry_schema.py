@@ -44,6 +44,16 @@ class LapDataCreate(BaseModel):
     sector1_seconds: float | None = None
     sector2_seconds: float | None = None
     sector3_seconds: float | None = None
+    # Optional: historical ingestion has always populated LapData.position
+    # directly from FastF1's own Position column. The live ingestor
+    # (ingest_live_session.py) previously never set it at all, leaving every
+    # live-ingested row NULL — see CLAUDE.md's core-feature-rebuild Checkpoint
+    # 1 fix, which derives it live from the streaming GapToLeader field
+    # (F1's live feed sends Position itself only once, in the Subscribe
+    # snapshot). Still optional here since replay/live callers that have no
+    # resolvable position yet (e.g. before any GapToLeader message has
+    # arrived) must not be forced to send a fabricated value.
+    position: int | None = None
 
 
 class TireStintCreate(BaseModel):

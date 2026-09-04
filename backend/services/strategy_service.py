@@ -74,8 +74,10 @@ from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.schemas.strategy_schema import (
     CompetitorStrategyEntry,
+    ExplanationFact,
     FeatureContributionResponse,
     LastIngestedSessionResponse,
+    PitRecommendationExplanation,
     PitWindowResponse,
     StrategyOverviewResponse,
     StrategyPredictionHistoryEntry,
@@ -83,7 +85,16 @@ from backend.schemas.strategy_schema import (
     UndercutThreatResponse,
 )
 from backend.services.cache_service import cacheable
-from backend.services.ml import explainability, pit_predictor, tire_deg_model
+
+# explainability/pit_predictor use the redundant "as X" alias, not a plain
+# import — tests reach them via strategy_service.explainability/
+# strategy_service.pit_predictor (the same reference this module's own code
+# uses, so monkeypatching one affects the other), which mypy --strict's
+# no_implicit_reexport check otherwise flags as an unexported cross-module
+# attribute. tire_deg_model has no such external access pattern today.
+from backend.services.ml import explainability as explainability
+from backend.services.ml import pit_predictor as pit_predictor
+from backend.services.ml import tire_deg_model
 from backend.services.ml.race_simulator import LAP_TIME_NOISE_STD_SECONDS, PIT_STOP_SECONDS
 
 logger = logging.getLogger(__name__)
@@ -108,9 +119,35 @@ _COMPOUND_TO_MODEL_SUFFIX = {
 }
 _MODEL_VERSION_TAG = "production"
 _COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
+# Same set as prediction_worker.py's identical constant — used only for the
+# safety_car_model.probability_within wet_track argument, in
+# get_pit_window_with_explanation's pit_predictor SHAP context.
+_WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 PIT_WINDOW_LOOKAHEAD_LAPS = 15
 _STINT2_CANDIDATE_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
+# Contiguous band, around the recommended pit_lap, of candidates whose
+# projected_total_delta_seconds is within this many seconds of the optimal
+# candidate's own delta — see build_pit_recommendation's window computation.
+# Anchored to the same order of magnitude as tire_deg_model.
+# DEGRADATION_THRESHOLD_SECONDS (1.5s) rather than picked arbitrarily: both
+# describe "a lap-time difference small enough to not matter operationally."
+PIT_WINDOW_TOLERANCE_SECONDS = 1.5
+# Monte Carlo draws for build_pit_recommendation's confidence_score — pure
+# numpy noise sampling + argmin, no per-sample model calls, so this can be
+# large without a real runtime cost (unlike UNDERCUT_MONTE_CARLO_SIMS, which
+# is deliberately smaller because its pre-vectorization history made 200 the
+# most it was ever measured cheap at 3 predict() calls per invocation).
+PIT_WINDOW_MONTE_CARLO_SIMS = 2000
+# Noise-scale fallback for build_pit_recommendation's confidence Monte Carlo
+# when a compound's tire_deg sidecar has no holdout_mae (a legacy sidecar
+# predating train_models.py guaranteeing that key, or a compound with no
+# model loaded at all) — a mid-range value against the real per-compound
+# MAEs seen in this project's own training runs (documented in CLAUDE.md's
+# Data Quality Notes: SOFT/MEDIUM/HARD in the 0.5-0.9s range pre-weather-
+# revert; the stale 8-feature WET leftover at 5.79 is the outlier this
+# default is deliberately NOT anchored to).
+DEFAULT_HOLDOUT_MAE_SECONDS = 1.0
 UNDERCUT_PROJECTION_LAPS = 5
 UNDERCUT_MONTE_CARLO_SIMS = 200
 COMPETITOR_STRATEGY_HORIZON_LAPS = 15
@@ -126,6 +163,11 @@ _model_cache: dict[str, Any] = {}
 # _model_cache — see _load_encoding_maps() and tire_deg_model.py's "Training-
 # time categorical encoding" section.
 _encoding_maps_cache: dict[str, Any] = {}
+# Per tire_deg model filename, its own recovered holdout_mae (or None if that
+# model's sidecar is missing/legacy) — populated alongside _encoding_maps_cache
+# as a side effect of _load_models(), same reasoning. See _load_holdout_mae()
+# and build_pit_recommendation's confidence computation.
+_holdout_mae_cache: dict[str, float | None] = {}
 
 
 def _local_model_path(filename: str) -> Path:
@@ -208,9 +250,11 @@ def _load_models() -> dict[str, Any]:
 
     Also populates _encoding_maps_cache with each tire_deg model's own recovered
     training-time driver/circuit code map (see tire_deg_model.py's "Training-time
-    categorical encoding" section) — same once-per-process lifecycle as the models
-    themselves, so this function is the single place both caches get populated
-    together, which is what lets apply_incompatible_model_fallbacks alias both in
+    categorical encoding" section) and _holdout_mae_cache with each tire_deg
+    model's own recovered holdout_mae (see build_pit_recommendation's confidence
+    computation) — same once-per-process lifecycle as the models themselves, so
+    this function is the single place all three caches get populated together,
+    which is what lets apply_incompatible_model_fallbacks alias all three in
     lockstep below.
 
     Args:
@@ -226,12 +270,15 @@ def _load_models() -> dict[str, Any]:
         if filename.startswith("tire_deg_"):
             metrics = _download_metrics_from_s3(filename)
             _encoding_maps_cache[filename] = tire_deg_model.encoding_maps_from_metrics(metrics)
+            _holdout_mae_cache[filename] = tire_deg_model.holdout_mae_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
     # experiment — see docs/simulator-issues-wet-model-and-position-
-    # context.md) by aliasing it (and its encoding maps) to a compatible
-    # fallback for this process.
-    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache, _encoding_maps_cache)
+    # context.md) by aliasing it (and its encoding maps/holdout_mae) to a
+    # compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(
+        _model_cache, _encoding_maps_cache, _holdout_mae_cache
+    )
     return _model_cache
 
 
@@ -247,6 +294,20 @@ def _load_encoding_maps() -> dict[str, tire_deg_model.CategoricalEncodingMaps | 
     """
     _load_models()
     return _encoding_maps_cache
+
+
+def _load_holdout_mae() -> dict[str, float | None]:
+    """This process's tire_deg holdout-MAE cache, populated as a side effect of _load_models().
+
+    Args:
+        None.
+    Returns:
+        Mapping of tire_deg model filename to its holdout_mae, or None for a
+        filename whose sidecar is missing/legacy — see _holdout_mae_for_compound
+        for how a None entry is handled.
+    """
+    _load_models()
+    return _holdout_mae_cache
 
 
 def _pipeline_for_compound(models: dict[str, Any], compound: str) -> Any | None:
@@ -275,6 +336,27 @@ def _encoding_maps_for_compound(
     """
     suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
     return maps_cache.get(f"tire_deg_{suffix}.pkl")
+
+
+def _holdout_mae_for_compound(mae_cache: dict[str, float | None], compound: str) -> float:
+    """This compound's tire_deg holdout_mae, defaulting to MEDIUM's suffix.
+
+    Mirrors _encoding_maps_for_compound's exact suffix lookup/default, except the
+    final fallback is a concrete float (DEFAULT_HOLDOUT_MAE_SECONDS) rather than
+    None — every caller of this needs a real noise-scale number to sample from,
+    unlike resolve_driver_code/resolve_circuit_code's crc32 fallback which needs
+    no caller-side default handling.
+
+    Args:
+        mae_cache: Output of _load_holdout_mae().
+        compound: Tyre compound name.
+    Returns:
+        That compound's holdout_mae, or DEFAULT_HOLDOUT_MAE_SECONDS if
+        unavailable (legacy sidecar, or no model loaded for this compound).
+    """
+    suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
+    mae = mae_cache.get(f"tire_deg_{suffix}.pkl")
+    return mae if mae is not None else DEFAULT_HOLDOUT_MAE_SECONDS
 
 
 # --- Shared DB helpers ---
@@ -583,7 +665,7 @@ def _sampled_noise(rng: np.random.Generator, n_laps: int, n_samples: int) -> np.
     return rng.normal(0.0, LAP_TIME_NOISE_STD_SECONDS * math.sqrt(n_laps), size=n_samples)
 
 
-# --- get_optimal_pit_window ---
+# --- build_pit_recommendation ---
 
 
 def _key_pit_window(
@@ -597,8 +679,77 @@ def _key_pit_window(
     return f"f1:{season}:{round_number}:strategy:{driver_id}:pit_window"
 
 
+def _stint2_batch_deltas(
+    pipeline: Any,
+    compound_encoded: int,
+    driver_code: int,
+    circuit_code: int,
+    pit_laps: np.ndarray,
+    laps_remaining: np.ndarray,
+    total_laps: int,
+) -> np.ndarray:
+    """One predict() call for a compound's stint-2 delta, across EVERY pit_lap
+    candidate at once — the batching this function exists for.
+
+    Unlike stint 1 (whose tyre-age trajectory at a given absolute lap number
+    is identical for every pit_lap candidate — it's the same ongoing stint
+    regardless of when it eventually ends), stint 2's fresh tyre resets at a
+    DIFFERENT lap for every candidate, so the same absolute lap number needs
+    a different tyre_age depending on which pit_lap it's being evaluated for.
+    That rules out a single 1D arange + cumsum (stint 1's approach, still used
+    in build_pit_recommendation directly). Instead this builds a padded 2D
+    grid — rows are pit_lap candidates, columns are the lap offset within that
+    candidate's own stint 2 — exactly the same "2D grid, one batched predict(),
+    reshape, mask, reduce" pattern tire_deg_model.predict_life_remaining_batch
+    already uses for its own per-row lookahead sweep, just batching across
+    candidates here instead of across drivers.
+
+    Args:
+        pipeline: Fitted tire_deg_model pipeline for this candidate compound.
+        compound_encoded, driver_code, circuit_code: Encoded categorical
+            features (see module docstring for the encoding caveat) — all
+            constant across every candidate (same driver/circuit, only the
+            stint-2 compound choice varies across the 3 calls this makes).
+        pit_laps: 1D array of candidate pit lap numbers.
+        laps_remaining: 1D array, same length as pit_laps — total_laps - pit_lap
+            for each candidate (stint 2's length on this compound).
+        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+    Returns:
+        1D array, same length as pit_laps: this compound's projected stint-2
+        delta for each candidate pit_lap. All zero if pit_laps is empty or
+        every candidate's laps_remaining is <= 0 (pitting on/after the last lap).
+    """
+    n = len(pit_laps)
+    max_remaining = int(laps_remaining.max()) if n else 0
+    if max_remaining <= 0:
+        return np.zeros(n)
+
+    offsets = np.arange(max_remaining, dtype=np.float64)
+    lap_grid = pit_laps[:, None] + 1 + offsets[None, :]
+    tyre_age_grid = np.broadcast_to(offsets[None, :], (n, max_remaining))
+    valid = offsets[None, :] < laps_remaining[:, None]
+
+    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_grid / max(total_laps, 1))
+    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
+        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    )
+    flat_features = np.column_stack(
+        [
+            lap_grid.ravel(),
+            np.full(n * max_remaining, float(compound_encoded)),
+            tyre_age_grid.ravel(),
+            fuel_adjusted_time.ravel(),
+            np.full(n * max_remaining, float(circuit_code)),
+            np.full(n * max_remaining, float(driver_code)),
+        ]
+    )
+    preds = pipeline.predict(flat_features).reshape(n, max_remaining)
+    result: np.ndarray = np.where(valid, preds, 0.0).sum(axis=1)
+    return result
+
+
 @cacheable(ttl=30, key_fn=_key_pit_window)
-async def get_optimal_pit_window(
+async def build_pit_recommendation(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
     season: int,
@@ -611,7 +762,33 @@ async def get_optimal_pit_window(
     For each candidate pit lap in [current_lap+1, current_lap+PIT_WINDOW_LOOKAHEAD_LAPS]
     (capped at the estimated race end), projects the stint-to-pit-lap delta on the
     current compound plus PIT_STOP_SECONDS plus the best of _STINT2_CANDIDATE_COMPOUNDS'
-    stint-from-pit-lap-to-race-end delta.
+    stint-from-pit-lap-to-race-end delta — same model as before this function's
+    rewrite, just computed differently:
+
+    - **Batched, not looped.** The original implementation called
+      pipeline.predict() once per (pit_lap, segment) combination — up to
+      1 + 3 = 4 calls per pit_lap candidate, 15 candidates, ~60 calls per
+      invocation. Stint 1's tyre-age trajectory at a given absolute lap
+      number is IDENTICAL for every pit_lap candidate (it's the same ongoing
+      stint regardless of when it ends), so it collapses to one predict()
+      call over the full candidate range plus a cumulative sum. Stint 2's
+      fresh-tyre age resets differently per candidate, so it can't cumsum the
+      same way — but batches into one predict() call PER CANDIDATE COMPOUND
+      (3 total) via _stint2_batch_deltas' padded 2D grid, covering all 15
+      pit_lap candidates in that single call. Total: 4 predict() calls
+      regardless of PIT_WINDOW_LOOKAHEAD_LAPS, down from ~60 — same class of
+      win as the undercut/overcut vectorization (CLAUDE.md's Deferred Wiring,
+      42x on that endpoint), same reasoning: the deterministic tire_deg
+      projection doesn't vary per unit of the thing being looped over any
+      more than it strictly has to.
+    - **The winning stint-2 compound is kept, not discarded.** The original
+      loop tracked only best_stint2_delta (a float), never which compound
+      produced it — recommended_compound now survives per candidate.
+    - **window_start/window_end is a real narrow band**, not the fixed
+      PIT_WINDOW_LOOKAHEAD_LAPS search horizon rendered as if it were a
+      recommendation. See the window computation below.
+    - **confidence_score** is now populated (previously didn't exist in any
+      form). See the Monte Carlo block below.
 
     Args:
         client: Redis client (cache-aside — first positional arg per cacheable's contract).
@@ -620,19 +797,69 @@ async def get_optimal_pit_window(
         session_id: Session to evaluate.
         driver_id: Driver to plan a pit window for.
     Returns:
-        Up to 3 dicts (pit_lap, window_start, window_end, projected_total_delta_seconds),
+        Up to 3 dicts (pit_lap, window_start, window_end,
+        projected_total_delta_seconds, recommended_compound, confidence_score),
         ascending by projected_total_delta_seconds (lower = better).
+        window_start/window_end are identical across all returned candidates
+        (the tolerance band around the #1 candidate — see below); confidence_score
+        is populated only for the #1 (rank 0) candidate, None for the rest — it
+        answers "how sure is the model that THIS recommendation is optimal,"
+        which isn't a meaningful question to ask of a candidate that isn't
+        being recommended.
     Raises:
         NotFoundError: No lap_data exists yet for this driver/session (via
             _current_state) — the API layer surfaces this as an HTTP 404,
             which is correct semantics here, not a gap to paper over with a
             null-fields response.
         ModelNotLoadedError: No tire degradation model loaded for the
-            driver's current compound.
+            driver's current compound, or for every _STINT2_CANDIDATE_COMPOUNDS
+            entry (nothing to recommend pitting onto).
     """
     models = _load_models()
     maps_cache = _load_encoding_maps()
+    mae_cache = _load_holdout_mae()
     state = await _current_state(db, session_id, driver_id)
+    return compute_pit_recommendation(models, maps_cache, mae_cache, driver_id, state)
+
+
+def compute_pit_recommendation(
+    models: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    mae_cache: dict[str, float | None],
+    driver_id: uuid.UUID,
+    state: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Pure computation core of build_pit_recommendation — no DB/cache/model-
+    loading side effects.
+
+    Split out (Checkpoint 4) so a caller that already has its own resolved
+    `state` can invoke the SAME batched counterfactual search directly,
+    bypassing both the @cacheable layer above (irrelevant to a one-shot
+    caller, not a repeated-request pattern) and _current_state's own DB
+    round trip. The one real caller today is prediction_worker.
+    _compute_recommendation_fields: it MUST NOT call _current_state (or
+    build_pit_recommendation itself) for this same lap, since process_lap
+    (a separate, independently-ordered Celery task) may not have committed
+    this lap's own LapData row yet — see that function's own docstring.
+    build_pit_recommendation above still resolves state itself, for the
+    REST-endpoint caller that has no such context already in hand.
+
+    Args:
+        models: Loaded model registry, keyed by filename (this process's own
+            cache — strategy_service's or a duplicated caller's, e.g.
+            prediction_worker's; this function doesn't care which).
+        maps_cache: Output of _load_encoding_maps() (or an equivalent cache).
+        mae_cache: Output of _load_holdout_mae() (or an equivalent cache).
+        driver_id: Driver to plan a pit window for.
+        state: Dict with compound, tyre_age_laps, lap_number, total_laps,
+            circuit_name — the same shape _current_state returns (only
+            these 5 keys are read here).
+    Returns:
+        Same as build_pit_recommendation.
+    Raises:
+        ModelNotLoadedError: No tire degradation model loaded for the
+            current compound, or for every _STINT2_CANDIDATE_COMPOUNDS entry.
+    """
     current_maps = _encoding_maps_for_compound(maps_cache, state["compound"])
     driver_code = tire_deg_model.resolve_driver_code(current_maps, str(driver_id))
     circuit_code = tire_deg_model.resolve_circuit_code(current_maps, state["circuit_name"])
@@ -644,68 +871,633 @@ async def get_optimal_pit_window(
         raise ModelNotLoadedError(
             f"No tire degradation model loaded for compound {state['compound']}"
         )
+    current_mae = _holdout_mae_for_compound(mae_cache, state["compound"])
 
-    # Resolved once per candidate compound, against THAT compound's own map —
-    # not the current compound's — since a candidate stint runs on a
-    # different tire_deg pipeline, which may have been promoted from a
-    # different training run with a different driver/circuit code universe.
-    # Invariant across the pit_lap loop below (driver_id/circuit don't change
-    # per candidate lap), so resolved once here rather than on every iteration.
-    candidate_codes: dict[str, tuple[int, int]] = {}
-    for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS:
-        candidate_maps = _encoding_maps_for_compound(maps_cache, candidate_compound)
-        candidate_codes[candidate_compound] = (
-            tire_deg_model.resolve_driver_code(candidate_maps, str(driver_id)),
-            tire_deg_model.resolve_circuit_code(candidate_maps, state["circuit_name"]),
-        )
-
-    candidates: list[dict[str, Any]] = []
     max_pit_lap = min(state["lap_number"] + PIT_WINDOW_LOOKAHEAD_LAPS, state["total_laps"])
-    for pit_lap in range(state["lap_number"] + 1, max_pit_lap + 1):
-        laps_on_current = pit_lap - state["lap_number"]
-        stint1_delta = _project_stint_delta(
-            current_pipeline,
-            current_compound_encoded,
-            driver_code,
-            circuit_code,
-            state["lap_number"] + 1,
-            laps_on_current,
-            state["tyre_age_laps"],
+    pit_laps = np.arange(state["lap_number"] + 1, max_pit_lap + 1)
+    n_candidates = len(pit_laps)
+    if n_candidates == 0:
+        return []
+
+    # --- Stint 1: one predict() call, cumulative sum. ---
+    # laps_stint1[i] == pit_laps[i] by construction (both range over
+    # [current_lap+1, max_pit_lap]) — pit_laps[i] IS the last lap of stint 1
+    # for candidate i (the driver still completes that lap before pitting),
+    # so np.cumsum(per-lap deltas)[i] is exactly stint 1's total delta for
+    # pit_laps[i], with no separate indexing needed to line the two up.
+    laps_stint1 = pit_laps.astype(np.float64)
+    tyre_age_stint1 = state["tyre_age_laps"] + np.arange(1, n_candidates + 1, dtype=np.float64)
+    fuel_at_lap1 = tire_deg_model.ASSUMED_START_FUEL_KG * (
+        1 - laps_stint1 / max(state["total_laps"], 1)
+    )
+    fuel_adjusted_time1 = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
+        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap1
+    )
+    features1 = np.column_stack(
+        [
+            laps_stint1,
+            np.full(n_candidates, float(current_compound_encoded)),
+            tyre_age_stint1,
+            fuel_adjusted_time1,
+            np.full(n_candidates, float(circuit_code)),
+            np.full(n_candidates, float(driver_code)),
+        ]
+    )
+    stint1_delta = np.cumsum(current_pipeline.predict(features1))
+
+    # --- Stint 2: one predict() call PER CANDIDATE COMPOUND (see
+    # _stint2_batch_deltas), each covering all n_candidates pit laps at once. ---
+    laps_remaining = state["total_laps"] - pit_laps
+    stint2_delta_by_compound: dict[str, np.ndarray] = {}
+    mae_by_compound: dict[str, float] = {}
+    for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS:
+        pipeline = _pipeline_for_compound(models, candidate_compound)
+        if pipeline is None:
+            continue
+        candidate_maps = _encoding_maps_for_compound(maps_cache, candidate_compound)
+        candidate_driver_code = tire_deg_model.resolve_driver_code(candidate_maps, str(driver_id))
+        candidate_circuit_code = tire_deg_model.resolve_circuit_code(
+            candidate_maps, state["circuit_name"]
+        )
+        stint2_delta_by_compound[candidate_compound] = _stint2_batch_deltas(
+            pipeline,
+            _COMPOUND_ENCODING[candidate_compound],
+            candidate_driver_code,
+            candidate_circuit_code,
+            pit_laps,
+            laps_remaining,
             state["total_laps"],
         )
-
-        best_stint2_delta: float | None = None
-        for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS:
-            pipeline = _pipeline_for_compound(models, candidate_compound)
-            if pipeline is None:
-                continue
-            candidate_driver_code, candidate_circuit_code = candidate_codes[candidate_compound]
-            laps_remaining = state["total_laps"] - pit_lap
-            delta = _project_stint_delta(
-                pipeline,
-                _COMPOUND_ENCODING[candidate_compound],
-                candidate_driver_code,
-                candidate_circuit_code,
-                pit_lap + 1,
-                laps_remaining,
-                0,
-                state["total_laps"],
-            )
-            if best_stint2_delta is None or delta < best_stint2_delta:
-                best_stint2_delta = delta
-
-        total_delta = stint1_delta + PIT_STOP_SECONDS + (best_stint2_delta or 0.0)
-        candidates.append(
-            {
-                "pit_lap": pit_lap,
-                "window_start": state["lap_number"] + 1,
-                "window_end": max_pit_lap,
-                "projected_total_delta_seconds": total_delta,
-            }
+        mae_by_compound[candidate_compound] = _holdout_mae_for_compound(
+            mae_cache, candidate_compound
         )
 
-    candidates.sort(key=lambda c: c["projected_total_delta_seconds"])
-    return candidates[:3]
+    if not stint2_delta_by_compound:
+        raise ModelNotLoadedError(
+            "No tire degradation model loaded for any stint-2 candidate compound"
+        )
+
+    compound_names = list(stint2_delta_by_compound.keys())
+    stint2_matrix = np.column_stack([stint2_delta_by_compound[c] for c in compound_names])
+    best_stint2_idx = np.argmin(stint2_matrix, axis=1)
+    best_stint2_delta = stint2_matrix[np.arange(n_candidates), best_stint2_idx]
+    winning_compound = [compound_names[i] for i in best_stint2_idx]
+
+    total_delta = stint1_delta + PIT_STOP_SECONDS + best_stint2_delta
+
+    order = np.argsort(total_delta)
+    best_idx = int(order[0])
+
+    # --- Narrow window: the contiguous band of candidates around the
+    # recommendation whose own total_delta is within PIT_WINDOW_TOLERANCE_
+    # SECONDS of the optimum — expanded outward from best_idx rather than
+    # taking every candidate under the threshold globally, since the delta
+    # curve isn't guaranteed perfectly unimodal (model noise) and a
+    # non-contiguous "window" would be a meaningless range to display. ---
+    threshold = total_delta[best_idx] + PIT_WINDOW_TOLERANCE_SECONDS
+    window_start_idx = best_idx
+    while window_start_idx > 0 and total_delta[window_start_idx - 1] <= threshold:
+        window_start_idx -= 1
+    window_end_idx = best_idx
+    while window_end_idx < n_candidates - 1 and total_delta[window_end_idx + 1] <= threshold:
+        window_end_idx += 1
+    window_start = int(pit_laps[window_start_idx])
+    window_end = int(pit_laps[window_end_idx])
+
+    # --- Confidence: vectorized Monte Carlo — P(the recommended candidate is
+    # STILL the argmin once every candidate's total_delta is perturbed by
+    # noise scaled to ITS OWN model uncertainty). Each candidate's noise std
+    # is derived from the holdout_mae of the actual model(s) that produced
+    # its total_delta (current compound for stint 1, that candidate's own
+    # winning compound for stint 2), summed by segment length under an iid-
+    # per-lap-error assumption (std scales with sqrt(n_laps) — same
+    # noise-aggregation principle as _sampled_noise above, just per-compound
+    # MAE instead of one shared LAP_TIME_NOISE_STD_SECONDS constant) and
+    # combined in quadrature (independent noise sources). No per-sample model
+    # calls — pure numpy sampling + argmin, same vectorization style as
+    # _undercut_overcut_probability's own Monte Carlo. ---
+    stint1_laps_by_candidate = np.arange(1, n_candidates + 1, dtype=np.float64)
+    winning_mae = np.array(
+        [mae_by_compound.get(c, DEFAULT_HOLDOUT_MAE_SECONDS) for c in winning_compound]
+    )
+    stint1_std = current_mae * np.sqrt(stint1_laps_by_candidate)
+    stint2_std = winning_mae * np.sqrt(np.maximum(laps_remaining, 0).astype(np.float64))
+    combined_std = np.sqrt(stint1_std**2 + stint2_std**2)
+
+    rng = np.random.default_rng()
+    noise = rng.standard_normal((n_candidates, PIT_WINDOW_MONTE_CARLO_SIMS)) * combined_std[:, None]
+    noisy_delta = total_delta[:, None] + noise
+    winners = np.argmin(noisy_delta, axis=0)
+    confidence = float(np.mean(winners == best_idx))
+
+    candidates: list[dict[str, Any]] = []
+    for rank, idx in enumerate(order[:3]):
+        idx_int = int(idx)
+        candidates.append(
+            {
+                "pit_lap": int(pit_laps[idx_int]),
+                "window_start": window_start,
+                "window_end": window_end,
+                "projected_total_delta_seconds": float(total_delta[idx_int]),
+                "recommended_compound": winning_compound[idx_int],
+                "confidence_score": confidence if rank == 0 else None,
+            }
+        )
+    return candidates
+
+
+# --- get_pit_window_with_explanation: combined tire_deg + pit_predictor explanation ---
+
+
+async def _resolve_field_neighbors_from_redis(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    driver_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    """Field position/gaps from the live-authoritative f1:{season}:{round}:gaps key.
+
+    Duplicated from prediction_worker._resolve_position_context_from_redis
+    (same no-cross-service-import convention as this module's other
+    duplicated helpers — see module docstring) — identical contract, reused
+    here so get_pit_window_with_explanation's pit_predictor gap features can
+    fall back to the same live-authoritative source the per-lap prediction
+    pipeline already does (CLAUDE.md's core-feature-rebuild Checkpoint 1),
+    rather than silently defaulting to "no neighbours" whenever
+    _resolve_field_neighbors' own bounded lap_data query can't resolve a
+    position.
+
+    Args:
+        client: Redis client.
+        season, round_number: Race weekend identifiers, for the key.
+        driver_id: Driver to locate within the field.
+    Returns:
+        Same shape as _resolve_field_neighbors' return value, or None if the
+        key is missing/unparsable/this driver isn't in it — callers must
+        treat None as "no live-gaps fallback available," not an error.
+    """
+    raw = await client.get(f"f1:{season}:{round_number}:gaps")
+    if raw is None:
+        return None
+    try:
+        entries = json.loads(raw)["gaps"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+    index = next(
+        (i for i, entry in enumerate(entries) if entry.get("driver_id") == str(driver_id)), None
+    )
+    if index is None or not isinstance(entries[index].get("position"), int):
+        return None
+
+    def _capped_gap(value: Any) -> float:
+        if value is None:
+            return pit_predictor.MAX_GAP_SECONDS
+        return min(max(float(value), 0.0), pit_predictor.MAX_GAP_SECONDS)
+
+    driver_entry = entries[index]
+    target_ahead_driver_id = None
+    gap_to_car_ahead = pit_predictor.MAX_GAP_SECONDS
+    if index > 0:
+        gap_to_car_ahead = _capped_gap(driver_entry.get("gap_to_ahead_seconds"))
+        target_ahead_driver_id = uuid.UUID(entries[index - 1]["driver_id"])
+
+    target_behind_driver_id = None
+    gap_to_car_behind = pit_predictor.MAX_GAP_SECONDS
+    if index + 1 < len(entries):
+        gap_to_car_behind = _capped_gap(driver_entry.get("gap_to_behind_seconds"))
+        target_behind_driver_id = uuid.UUID(entries[index + 1]["driver_id"])
+
+    return {
+        "position": int(driver_entry["position"]),
+        "gap_to_car_ahead": gap_to_car_ahead,
+        "gap_to_car_behind": gap_to_car_behind,
+        "target_ahead_driver_id": target_ahead_driver_id,
+        "target_behind_driver_id": target_behind_driver_id,
+    }
+
+
+async def _resolve_field_neighbors(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    current_lap: int,
+    season: int,
+    round_number: int,
+) -> dict[str, Any]:
+    """Current field position and immediate track-position neighbors for one driver.
+
+    Duplicated from prediction_worker._resolve_position_context (same
+    no-cross-service-import convention as this module's other duplicated
+    helpers) — identical contract: bounded to lap_number <= current_lap,
+    since an unbounded "latest lap per driver" query would read every OTHER
+    driver's FINAL race position for a fully-ingested/replayed session,
+    regardless of the requesting driver's own current lap (the exact bug
+    CLAUDE.md's Deferred Wiring entry documented and Checkpoint 1 of this
+    rebuild fixed on prediction_worker's own call site — this duplicates
+    that same fix onto the second call site that needed it, rather than
+    silently reintroducing it here). Falls back to the live-authoritative
+    Redis gaps key (_resolve_field_neighbors_from_redis) when the bounded
+    query can't resolve driver_id's own position.
+
+    Args:
+        client: Redis client, for the live-gaps fallback.
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver to locate within the field.
+        current_lap: Only consider lap_data rows at or before this lap.
+        season, round_number: Race weekend identifiers, for the Redis
+            fallback's key.
+    Returns:
+        Dict with position, gap_to_car_ahead, gap_to_car_behind,
+        target_ahead_driver_id, target_behind_driver_id. The two target ids
+        are None for the leader/last car, and all fields fall back to
+        MAX_GAP_SECONDS/no-target/back-of-field when driver_id has no
+        resolvable position at all.
+    """
+    subq = (
+        select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
+        .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
+        .group_by(LapData.driver_id)
+        .subquery()
+    )
+    join_condition = (LapData.driver_id == subq.c.driver_id) & (
+        LapData.lap_number == subq.c.max_lap
+    )
+    query = (
+        select(LapData)
+        .join(subq, join_condition)
+        .where(LapData.session_id == session_id, LapData.position.is_not(None))
+        .order_by(LapData.position)
+    )
+    field = list((await db.execute(query)).scalars().all())
+    index = next((i for i, lap in enumerate(field) if lap.driver_id == driver_id), None)
+
+    if index is None:
+        redis_result = await _resolve_field_neighbors_from_redis(
+            client, season, round_number, driver_id
+        )
+        if redis_result is not None:
+            return redis_result
+        return {
+            "position": len(field) + 1,
+            "gap_to_car_ahead": pit_predictor.MAX_GAP_SECONDS,
+            "gap_to_car_behind": pit_predictor.MAX_GAP_SECONDS,
+            "target_ahead_driver_id": None,
+            "target_behind_driver_id": None,
+        }
+
+    driver_lap = field[index]
+    driver_time = await _cumulative_race_time(db, session_id, driver_id, driver_lap.lap_number)
+
+    gap_to_car_ahead = pit_predictor.MAX_GAP_SECONDS
+    target_ahead_driver_id = None
+    if index > 0:
+        ahead = field[index - 1]
+        ahead_time = await _cumulative_race_time(db, session_id, ahead.driver_id, ahead.lap_number)
+        gap_to_car_ahead = min(max(driver_time - ahead_time, 0.0), pit_predictor.MAX_GAP_SECONDS)
+        target_ahead_driver_id = ahead.driver_id
+
+    gap_to_car_behind = pit_predictor.MAX_GAP_SECONDS
+    target_behind_driver_id = None
+    if index + 1 < len(field):
+        behind = field[index + 1]
+        behind_time = await _cumulative_race_time(
+            db, session_id, behind.driver_id, behind.lap_number
+        )
+        gap_to_car_behind = min(max(behind_time - driver_time, 0.0), pit_predictor.MAX_GAP_SECONDS)
+        target_behind_driver_id = behind.driver_id
+
+    return {
+        "position": driver_lap.position,
+        "gap_to_car_ahead": gap_to_car_ahead,
+        "gap_to_car_behind": gap_to_car_behind,
+        "target_ahead_driver_id": target_ahead_driver_id,
+        "target_behind_driver_id": target_behind_driver_id,
+    }
+
+
+def tire_deg_recommendation_contributions(
+    models: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    driver_id: uuid.UUID,
+    circuit_name: str,
+    total_laps: int,
+    pit_lap: int,
+    recommended_compound: str,
+) -> list[explainability.FeatureContribution]:
+    """SHAP contributions for the RECOMMENDED stint (not the current one).
+
+    Explains the first lap of the recommended stint (pit_lap + 1, tyre_age
+    0 — the same convention build_pit_recommendation's own stint-2
+    computation uses, see _stint2_batch_deltas) on recommended_compound's
+    own pipeline. This is the correction Checkpoint 3 makes to what this
+    explanation used to compute: previously it ran SHAP against the
+    driver's CURRENT compound at the pit lap — a real, documented gap (see
+    docs/core-feature-rebuild-strategy-recommendations.md §2a) where "even
+    what it does explain isn't about the recommended stint."
+
+    Public (no leading underscore): Checkpoint 4's prediction_worker.
+    _compute_recommendation_fields calls this directly with its OWN loaded
+    models/maps_cache, not strategy_service's — this is pure computation
+    with no DB/cache dependency of its own, so which module's registry the
+    caller passes in doesn't matter (see compute_pit_recommendation's own
+    docstring for the same reasoning and why prediction_worker can't just
+    call get_pit_window_with_explanation instead).
+
+    Args:
+        models: Loaded model registry, keyed by filename.
+        maps_cache: Output of _load_encoding_maps().
+        driver_id: Driver this recommendation is for.
+        circuit_name: Circuit display name, for resolve_circuit_code.
+        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        pit_lap: The #1 candidate's recommended pit lap.
+        recommended_compound: The #1 candidate's recommended_compound.
+    Returns:
+        Top-k FeatureContribution list (see explainability.DEFAULT_TOP_K),
+        or [] if recommended_compound has no loaded tire_deg pipeline (should
+        not happen in practice — build_pit_recommendation already required
+        this pipeline to produce recommended_compound in the first place —
+        kept as a defensive fallback rather than an assumed invariant).
+    """
+    pipeline = _pipeline_for_compound(models, recommended_compound)
+    if pipeline is None:
+        return []
+
+    maps = _encoding_maps_for_compound(maps_cache, recommended_compound)
+    driver_code = tire_deg_model.resolve_driver_code(maps, str(driver_id))
+    circuit_code = tire_deg_model.resolve_circuit_code(maps, circuit_name)
+    stint2_first_lap = pit_lap + 1
+    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - stint2_first_lap / max(total_laps, 1))
+    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
+        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    )
+    features = np.array(
+        [
+            [
+                stint2_first_lap,
+                _COMPOUND_ENCODING.get(recommended_compound, _COMPOUND_ENCODING["MEDIUM"]),
+                0,  # fresh tyre — first lap of the recommended stint
+                fuel_adjusted_time,
+                circuit_code,
+                driver_code,
+            ]
+        ]
+    )
+    [contributions] = explainability.explain_prediction(
+        pipeline, tire_deg_model.FEATURE_COLUMNS, features
+    )
+    return contributions
+
+
+def pit_predictor_current_contributions(
+    models: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    driver_id: uuid.UUID,
+    state: dict[str, Any],
+    neighbors: dict[str, Any],
+) -> list[explainability.FeatureContribution]:
+    """SHAP contributions for pit_predictor's read on the driver's CURRENT lap.
+
+    Unlike the tire_deg explanation above (which explains a hypothetical
+    future stint), this explains "why does the model think pitting is/isn't
+    imminent right now" — using the driver's real current tyre age and REAL
+    field position/rival gaps (via neighbors, from _resolve_field_neighbors).
+    This is the rival-gap reasoning entirely absent from tire_deg_model.
+    FEATURE_COLUMNS (see the core-feature-rebuild investigation's finding
+    that the pre-Checkpoint-3 explanation "cannot express the vision's own
+    example" — "gap to P4 behind is 8.2s").
+
+    Public (no leading underscore): same cross-module reasoning as
+    tire_deg_recommendation_contributions above — prediction_worker.
+    _compute_recommendation_fields calls this directly, passing state/
+    neighbors built from its OWN already-resolved per-lap context
+    (_resolve_inference_context's output) rather than this module's
+    _current_state/_resolve_field_neighbors, which would re-query the DB and
+    race against process_lap's own commit of this same lap (see
+    compute_pit_recommendation's docstring).
+
+    Args:
+        models: Loaded model registry, keyed by filename.
+        maps_cache: Output of _load_encoding_maps() (or an equivalent cache).
+        driver_id: Driver this recommendation is for.
+        state: compound, tyre_age_laps, lap_number, total_laps, circuit_name
+            — the same shape _current_state returns.
+        neighbors: position, gap_to_car_ahead, gap_to_car_behind — the same
+            shape _resolve_field_neighbors returns.
+    Returns:
+        Top-k FeatureContribution list, or [] if pit_predictor.pkl or the
+        current compound's tire_deg pipeline (needed for
+        predicted_life_remaining) isn't loaded.
+    """
+    pit_model = models.get("pit_predictor.pkl")
+    current_pipeline = _pipeline_for_compound(models, state["compound"])
+    if pit_model is None or current_pipeline is None:
+        return []
+
+    current_maps = _encoding_maps_for_compound(maps_cache, state["compound"])
+    driver_code = tire_deg_model.resolve_driver_code(current_maps, str(driver_id))
+    circuit_code = tire_deg_model.resolve_circuit_code(current_maps, state["circuit_name"])
+    lap_number = state["lap_number"]
+    total_laps = state["total_laps"]
+    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1))
+    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
+        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    )
+    predicted_life_remaining = float(
+        tire_deg_model.predict_life_remaining_batch(
+            current_pipeline,
+            np.array([lap_number]),
+            np.array([_COMPOUND_ENCODING.get(state["compound"], _COMPOUND_ENCODING["MEDIUM"])]),
+            np.array([state["tyre_age_laps"]]),
+            np.array([fuel_adjusted_time]),
+            np.array([circuit_code]),
+            np.array([driver_code]),
+        )[0]
+    )
+
+    sc_model = models.get("safety_car_model.pkl")
+    safety_car_probability = 0.0
+    if sc_model is not None:
+        safety_car_probability = sc_model.probability_within(
+            state["circuit_name"], lap_number, state["compound"] in _WET_COMPOUNDS, 1
+        )
+
+    fuel_load_est = max(fuel_at_lap, 0.0)
+    pit_features = np.array(
+        [
+            [
+                state["tyre_age_laps"],
+                predicted_life_remaining,
+                neighbors["gap_to_car_ahead"],
+                neighbors["gap_to_car_behind"],
+                safety_car_probability,
+                total_laps - lap_number,
+                neighbors["position"],
+                fuel_load_est,
+            ]
+        ]
+    )
+    [contributions] = explainability.explain_prediction(
+        pit_model, pit_predictor.FEATURE_COLUMNS, pit_features
+    )
+    return contributions
+
+
+def build_pit_recommendation_explanation(
+    pit_lap: int,
+    recommended_compound: str,
+    confidence: float | None,
+    tyre_age_laps: int,
+    position: int,
+    gap_to_car_ahead: float,
+    target_ahead_driver_id: uuid.UUID | None,
+    gap_to_car_behind: float,
+    target_behind_driver_id: uuid.UUID | None,
+    undercut_score: float | None,
+    overcut_score: float | None,
+    tire_deg_contributions: list[explainability.FeatureContribution],
+    pit_predictor_contributions: list[explainability.FeatureContribution],
+) -> PitRecommendationExplanation:
+    """Combine tire_deg + pit_predictor SHAP and field/undercut context into
+    structured facts and a plain-English narrative for one recommendation.
+
+    Pure function — every input is already computed by the caller
+    (get_pit_window_with_explanation, or prediction_worker.
+    _compute_recommendation_fields — public/no leading underscore for this
+    same cross-module reuse, same reasoning as
+    tire_deg_recommendation_contributions above), which is what makes this
+    testable without any DB/Redis/model fixtures.
+
+    Args:
+        pit_lap, recommended_compound, confidence: The #1 candidate's own
+            fields (build_pit_recommendation).
+        tyre_age_laps: The driver's real current tyre age (_current_state).
+        position, gap_to_car_ahead, target_ahead_driver_id, gap_to_car_behind,
+            target_behind_driver_id: Output of _resolve_field_neighbors.
+        undercut_score: probability_pit_now_gains_position vs. the car ahead
+            (get_undercut_score), or None if there's no car ahead or the
+            required model wasn't loaded.
+        overcut_score: probability_stay_out_retains_position vs. the car
+            behind (get_overcut_score), or None for the same reasons.
+        tire_deg_contributions: Output of tire_deg_recommendation_contributions.
+        pit_predictor_contributions: Output of pit_predictor_current_contributions.
+    Returns:
+        PitRecommendationExplanation.
+    """
+    facts: list[ExplanationFact] = [
+        ExplanationFact(label="Recommended pit lap", value=f"Lap {pit_lap}", source="tire_deg"),
+        ExplanationFact(
+            label="Recommended compound", value=recommended_compound, source="tire_deg"
+        ),
+        ExplanationFact(
+            label="Current tyre age",
+            value=f"{tyre_age_laps} lap{'s' if tyre_age_laps != 1 else ''}",
+            source="field",
+        ),
+        ExplanationFact(label="Track position", value=f"P{position}", source="field"),
+    ]
+    if confidence is not None:
+        facts.append(
+            ExplanationFact(label="Confidence", value=f"{confidence * 100:.0f}%", source="tire_deg")
+        )
+    if target_ahead_driver_id is not None:
+        facts.append(
+            ExplanationFact(
+                label="Gap to car ahead", value=f"{gap_to_car_ahead:.1f}s", source="pit_predictor"
+            )
+        )
+    if target_behind_driver_id is not None:
+        facts.append(
+            ExplanationFact(
+                label="Gap to car behind", value=f"{gap_to_car_behind:.1f}s", source="pit_predictor"
+            )
+        )
+    if undercut_score is not None:
+        facts.append(
+            ExplanationFact(
+                label="Undercut opportunity (car ahead)",
+                value=f"{undercut_score * 100:.0f}% gain probability",
+                source="pit_predictor",
+            )
+        )
+    if overcut_score is not None:
+        facts.append(
+            ExplanationFact(
+                label="Overcut risk (car behind)",
+                value=f"{(1 - overcut_score) * 100:.0f}% they gain by pitting now",
+                source="pit_predictor",
+            )
+        )
+    for contribution in tire_deg_contributions[:1]:
+        facts.append(
+            ExplanationFact(
+                label=explainability.FEATURE_LABELS.get(
+                    contribution.feature_name, contribution.feature_name
+                ),
+                value=explainability.format_contribution(contribution, unit="s"),
+                source="tire_deg",
+            )
+        )
+    for contribution in pit_predictor_contributions[:1]:
+        facts.append(
+            ExplanationFact(
+                label=explainability.FEATURE_LABELS.get(
+                    contribution.feature_name, contribution.feature_name
+                ),
+                value=explainability.format_contribution(contribution, unit="probability"),
+                source="pit_predictor",
+            )
+        )
+
+    narrative = f"Lap {pit_lap} on {recommended_compound} is the recommended pit"
+    if confidence is not None:
+        narrative += f" ({confidence * 100:.0f}% confidence)"
+    narrative += f". Tyre age is currently {tyre_age_laps} laps"
+    if tire_deg_contributions:
+        trend = "accelerating" if tire_deg_contributions[0].direction == "+" else "still manageable"
+        narrative += f", degradation {trend}"
+    narrative += "."
+
+    if target_behind_driver_id is not None:
+        safe = gap_to_car_behind > PIT_STOP_SECONDS
+        narrative += f" Gap to the car behind is {gap_to_car_behind:.1f}s — " + (
+            "safe to pit without losing the position."
+            if safe
+            else "a close call; rejoining could cost the position."
+        )
+    elif target_ahead_driver_id is None:
+        narrative += " Currently the race leader — no car behind to defend against."
+
+    if target_ahead_driver_id is not None and undercut_score is not None and undercut_score >= 0.5:
+        narrative += (
+            f" Pitting now also has a {undercut_score * 100:.0f}% chance of "
+            "undercutting the car ahead."
+        )
+
+    return PitRecommendationExplanation(
+        facts=facts,
+        narrative=narrative,
+        tire_deg_shap=[
+            FeatureContributionResponse(
+                feature_name=c.feature_name,
+                value=c.value,
+                contribution=c.contribution,
+                direction=c.direction,
+            )
+            for c in tire_deg_contributions
+        ],
+        pit_predictor_shap=[
+            FeatureContributionResponse(
+                feature_name=c.feature_name,
+                value=c.value,
+                contribution=c.contribution,
+                direction=c.direction,
+            )
+            for c in pit_predictor_contributions
+        ],
+    )
 
 
 async def get_pit_window_with_explanation(
@@ -716,32 +1508,44 @@ async def get_pit_window_with_explanation(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
 ) -> list[PitWindowResponse]:
-    """Optimal pit window candidates plus a SHAP explanation for the top recommendation.
+    """Optimal pit window candidates plus a combined explanation for the top recommendation.
 
-    Calls the cached get_optimal_pit_window for the ranked candidates, then
-    reconstructs the single-row 8-feature tire_deg vector for the top
-    candidate's pit lap and runs SHAP (services/ml/explainability.py) against
-    that compound's pipeline. The explanation itself is computed fresh every
-    call, not cached — a single TreeExplainer call on one row is cheap
-    relative to get_optimal_pit_window's own candidate search, which IS cached.
+    Calls the cached build_pit_recommendation for the ranked candidates, then
+    builds a combined explanation for the #1 candidate from THREE already-
+    existing mechanisms, none of them cached here (cheap relative to
+    build_pit_recommendation's own candidate search, which IS cached):
+
+    - tire_deg SHAP against the RECOMMENDED stint (not the current one — see
+      tire_deg_recommendation_contributions).
+    - pit_predictor SHAP against the driver's CURRENT lap, using real field
+      position and rival gaps (_resolve_field_neighbors) — the rival-gap
+      reasoning tire_deg_model.FEATURE_COLUMNS structurally cannot express.
+    - get_undercut_score/get_overcut_score against the real track-position
+      neighbours resolved above — reused, not recomputed (both are
+      themselves @cacheable).
+
+    build_pit_recommendation_explanation combines all of the above into
+    PitRecommendationExplanation.facts (structured) and .narrative
+    (plain-English), alongside both raw SHAP arrays.
 
     Args:
-        client: Redis client (cache-aside, forwarded to get_optimal_pit_window).
+        client: Redis client (cache-aside, forwarded to build_pit_recommendation
+            and to get_undercut_score/get_overcut_score).
         db: Async DB session.
         season, round_number: Race weekend identifiers.
         session_id: Session to evaluate.
         driver_id: Driver to plan a pit window for.
     Returns:
         Up to 3 PitWindowResponse, ascending by projected_total_delta_seconds;
-        only the first (recommended) candidate carries shap_explanation —
-        empty list if get_optimal_pit_window itself returns no candidates.
+        only the first (recommended) candidate carries explanation — empty
+        list if build_pit_recommendation itself returns no candidates.
     Raises:
         NotFoundError: No lap_data exists yet for this driver/session — HTTP
-            404 at the API layer (see get_optimal_pit_window's docstring).
+            404 at the API layer (see build_pit_recommendation's docstring).
         ModelNotLoadedError: No tire degradation model loaded for the
             driver's current compound.
     """
-    candidates = await get_optimal_pit_window(
+    candidates = await build_pit_recommendation(
         client, db, season, round_number, session_id, driver_id
     )
     responses = [PitWindowResponse(**candidate) for candidate in candidates]
@@ -750,49 +1554,74 @@ async def get_pit_window_with_explanation(
 
     state = await _current_state(db, session_id, driver_id)
     models = _load_models()
-    pipeline = _pipeline_for_compound(models, state["compound"])
-    if pipeline is None:
-        return responses
+    maps_cache = _load_encoding_maps()
 
-    top_pit_lap = candidates[0]["pit_lap"]
-    compound_encoded = _COMPOUND_ENCODING.get(state["compound"], _COMPOUND_ENCODING["MEDIUM"])
-    current_maps = _encoding_maps_for_compound(_load_encoding_maps(), state["compound"])
-    driver_code = tire_deg_model.resolve_driver_code(current_maps, str(driver_id))
-    circuit_code = tire_deg_model.resolve_circuit_code(current_maps, state["circuit_name"])
-    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
-        1 - top_pit_lap / max(state["total_laps"], 1)
+    top = candidates[0]
+    top_pit_lap = int(top["pit_lap"])
+    recommended_compound = str(top["recommended_compound"])
+    confidence = top["confidence_score"]
+
+    tire_deg_contributions = tire_deg_recommendation_contributions(
+        models,
+        maps_cache,
+        driver_id,
+        state["circuit_name"],
+        state["total_laps"],
+        top_pit_lap,
+        recommended_compound,
     )
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+
+    neighbors = await _resolve_field_neighbors(
+        client, db, session_id, driver_id, state["lap_number"], season, round_number
     )
-    features = np.array(
-        [
-            [
-                top_pit_lap,
-                compound_encoded,
-                state["tyre_age_laps"] + (top_pit_lap - state["lap_number"]),
-                fuel_adjusted_time,
-                circuit_code,
-                driver_code,
-            ]
-        ]
+    pit_predictor_contributions = pit_predictor_current_contributions(
+        models, maps_cache, driver_id, state, neighbors
     )
-    [contributions] = explainability.explain_prediction(
-        pipeline, tire_deg_model.FEATURE_COLUMNS, features
+
+    undercut_score: float | None = None
+    target_ahead_driver_id = neighbors["target_ahead_driver_id"]
+    if target_ahead_driver_id is not None:
+        try:
+            undercut_result = await get_undercut_score(
+                client, db, season, round_number, session_id, driver_id, target_ahead_driver_id
+            )
+            undercut_score = float(undercut_result["probability_pit_now_gains_position"])
+        except ModelNotLoadedError:
+            logger.warning(
+                "get_pit_window_with_explanation: undercut score unavailable for driver %s",
+                driver_id,
+            )
+
+    overcut_score: float | None = None
+    target_behind_driver_id = neighbors["target_behind_driver_id"]
+    if target_behind_driver_id is not None:
+        try:
+            overcut_result = await get_overcut_score(
+                client, db, season, round_number, session_id, driver_id, target_behind_driver_id
+            )
+            overcut_score = float(overcut_result["probability_stay_out_retains_position"])
+        except ModelNotLoadedError:
+            logger.warning(
+                "get_pit_window_with_explanation: overcut score unavailable for driver %s",
+                driver_id,
+            )
+
+    explanation = build_pit_recommendation_explanation(
+        pit_lap=top_pit_lap,
+        recommended_compound=recommended_compound,
+        confidence=confidence,
+        tyre_age_laps=state["tyre_age_laps"],
+        position=neighbors["position"],
+        gap_to_car_ahead=neighbors["gap_to_car_ahead"],
+        target_ahead_driver_id=target_ahead_driver_id,
+        gap_to_car_behind=neighbors["gap_to_car_behind"],
+        target_behind_driver_id=target_behind_driver_id,
+        undercut_score=undercut_score,
+        overcut_score=overcut_score,
+        tire_deg_contributions=tire_deg_contributions,
+        pit_predictor_contributions=pit_predictor_contributions,
     )
-    responses[0] = responses[0].model_copy(
-        update={
-            "shap_explanation": [
-                FeatureContributionResponse(
-                    feature_name=c.feature_name,
-                    value=c.value,
-                    contribution=c.contribution,
-                    direction=c.direction,
-                )
-                for c in contributions
-            ]
-        }
-    )
+    responses[0] = responses[0].model_copy(update={"explanation": explanation})
     return responses
 
 
@@ -1257,8 +2086,12 @@ async def get_strategy_prediction_history(
         driver_id: Driver whose prediction history to return.
     Returns:
         One dict per StrategyPrediction row (lap_number, predicted_pit_lap,
-        pit_probability, undercut_score, overcut_score, created_at), ordered
-        by lap_number ascending with NULLS LAST (rows predicted before the
+        pit_probability, undercut_score, overcut_score, created_at, plus the
+        Checkpoint 4 recommendation-engine fields: recommended_pit_lap,
+        window_start, window_end, recommended_compound, confidence_score,
+        explanation — None/0.0/None on a row predating that migration or
+        where the computation degraded gracefully that lap), ordered by
+        lap_number ascending with NULLS LAST (rows predicted before the
         2026-08-26 lap_number migration have no lap_number and sort after
         every row that does), predicted_at ascending as the tiebreak. Empty
         list if this driver has no predictions yet in this session.
@@ -1283,6 +2116,12 @@ async def get_strategy_prediction_history(
             "undercut_score": row.undercut_score,
             "overcut_score": row.overcut_score,
             "created_at": row.created_at,
+            "recommended_pit_lap": row.recommended_pit_lap,
+            "window_start": row.window_start,
+            "window_end": row.window_end,
+            "recommended_compound": row.recommended_compound,
+            "confidence_score": row.confidence_score,
+            "explanation": row.explanation,
         }
         for row in rows
     ]

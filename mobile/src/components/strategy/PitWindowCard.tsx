@@ -1,7 +1,6 @@
 import { Text, View } from "react-native"
 import { DriverChip } from "@/components/shared/DriverChip"
 import { usePitWindow } from "@/hooks/useStrategy"
-import type { FeatureContributionResponse } from "@/types"
 
 interface PitWindowCardProps {
   sessionId: string | null
@@ -9,42 +8,15 @@ interface PitWindowCardProps {
   compact?: boolean
 }
 
-// Mirrors backend/services/ml/explainability.py's FEATURE_LABELS — kept in
-// sync manually, same as web's copy (no endpoint exposes these labels).
-const FEATURE_LABELS: Record<string, string> = {
-  lap_number: "Lap number",
-  compound_encoded: "Tyre compound",
-  tyre_age_laps: "Tyre age",
-  fuel_adjusted_time: "Fuel-adjusted pace",
-  circuit_id_encoded: "Circuit",
-  driver_id_encoded: "Driver",
-  current_tyre_age: "Tyre age",
-  predicted_life_remaining: "Predicted tyre life remaining",
-  gap_to_car_ahead: "Gap to car ahead",
-  gap_to_car_behind: "Gap to car behind",
-  safety_car_probability: "Safety car probability",
-  laps_to_race_end: "Laps to race end",
-  position: "Track position",
-  fuel_load_est: "Estimated fuel load",
-}
-
-function topContribution(
-  shap: FeatureContributionResponse[] | null,
-): FeatureContributionResponse | null {
-  if (!shap || shap.length === 0) return null
-  return [...shap].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))[0]
-}
-
-function formatShapExplanation(shap: FeatureContributionResponse[] | null): string | null {
-  const top = topContribution(shap)
-  if (!top) return null
-  const label = FEATURE_LABELS[top.feature_name] ?? top.feature_name
-  const sign = top.direction === "+" ? "+" : "-"
-  return `${label} is the primary factor — ${top.value.toFixed(1)} (${sign}${Math.abs(top.contribution).toFixed(2)} impact)`
-}
-
-// RN port of web/src/components/strategy/PitWindowCard.tsx — same
-// compact/full modes and SHAP-explanation formatting.
+// RN port of web/src/components/strategy/PitWindowCard.tsx — Checkpoint 5
+// (core-feature-rebuild) renders the SAME recommended_compound/
+// confidence_score/explanation.narrative fields web's unified card does.
+// Mobile has no WebSocket lap-completion stream wired to the Strategy tab
+// (useLiveTelemetry.ts exists for the Live tab's CircuitMapPanel but isn't
+// consumed here) — this always sources from usePitWindow's on-demand REST
+// recompute, same as before this change. A deliberate, documented
+// simplification (see mobile/src/README.md), not an oversight: there's no
+// isReplayActive branch to remove here because one never existed on mobile.
 export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardProps) {
   const { data: windows, isLoading } = usePitWindow(sessionId, driverId)
 
@@ -64,9 +36,12 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
     )
   }
 
-  const shapText = formatShapExplanation(window.shap_explanation)
-
   if (compact) {
+    const caption =
+      window.confidence_score !== null
+        ? `${Math.round(window.confidence_score * 100)}% confidence`
+        : (window.explanation?.narrative ?? null)
+
     return (
       <View className="gap-1 rounded-md border border-white/10 bg-surface p-2">
         <View className="flex-row items-center justify-between gap-2">
@@ -75,9 +50,9 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
             L{window.window_start}–{window.window_end}
           </Text>
         </View>
-        {shapText && (
+        {caption && (
           <Text numberOfLines={1} className="text-[10px] text-muted">
-            {shapText}
+            {caption}
           </Text>
         )}
       </View>
@@ -86,12 +61,23 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
 
   return (
     <View className="gap-2 rounded-md border border-white/10 bg-surface p-4">
-      <Text className="text-base font-semibold text-foreground">Pit Window</Text>
+      <View className="flex-row items-center justify-between gap-2">
+        <Text className="text-base font-semibold text-foreground">Pit Window</Text>
+        {window.confidence_score !== null && (
+          <View className="rounded-full bg-primary/10 px-2 py-0.5">
+            <Text className="text-xs font-semibold text-primary">
+              {Math.round(window.confidence_score * 100)}% confidence
+            </Text>
+          </View>
+        )}
+      </View>
       <Text className="text-2xl font-bold text-foreground">
         Lap {window.window_start}–{window.window_end}
       </Text>
-      <Text className="text-sm text-muted">Recommended: Lap {window.pit_lap}</Text>
-      {shapText && <Text className="text-sm text-muted">{shapText}</Text>}
+      <Text className="text-sm text-muted">
+        Recommended: Lap {window.pit_lap} — {window.recommended_compound}
+      </Text>
+      {window.explanation && <Text className="text-sm text-muted">{window.explanation.narrative}</Text>}
     </View>
   )
 }

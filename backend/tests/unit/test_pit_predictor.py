@@ -16,6 +16,8 @@ from backend.services.ml.pit_predictor import (
     ALERT_THRESHOLD,
     FEATURE_COLUMNS,
     MAX_GAP_SECONDS,
+    PIT_LABEL_HORIZON_LAPS,
+    TARGET_COLUMN,
     _build_model,
     add_gap_features,
     label_pit_laps,
@@ -27,7 +29,7 @@ from backend.services.ml.pit_predictor import (
 def _synthetic_imbalanced_df(
     rng: np.random.Generator, n_sessions: int = 6, laps_per_session: int = 60
 ) -> pd.DataFrame:
-    """Multi-session synthetic laps frame where did_pit_this_lap is ~5% positive,
+    """Multi-session synthetic laps frame where pit_within_k_laps is ~5% positive,
     driven by current_tyre_age crossing a threshold — enough sessions for GroupKFold
     (CV_FOLDS=5) and enough imbalance to exercise scale_pos_weight compensation.
     """
@@ -46,7 +48,7 @@ def _synthetic_imbalanced_df(
                     "laps_to_race_end": rng.integers(0, 60),
                     "position": rng.integers(1, 21),
                     "fuel_load_est": rng.uniform(0, 110),
-                    "did_pit_this_lap": current_tyre_age > 38,
+                    TARGET_COLUMN: current_tyre_age > 38,
                 }
             )
     return pd.DataFrame(rows)
@@ -99,7 +101,7 @@ def test_imbalanced_class_handling() -> None:
     df = _synthetic_imbalanced_df(rng)
     result = train_pit_predictor(df)
 
-    assert result.positive_rate == pytest.approx(df["did_pit_this_lap"].mean())
+    assert result.positive_rate == pytest.approx(df[TARGET_COLUMN].mean())
     assert 0 < result.positive_rate < 0.2
 
     predicted_probabilities = cast(
@@ -109,12 +111,18 @@ def test_imbalanced_class_handling() -> None:
 
 
 @pytest.mark.unit
-def test_label_pit_laps_marks_stint_starts_after_first() -> None:
+def test_label_pit_laps_marks_horizon_before_pit_lap_not_just_out_lap() -> None:
+    """The Checkpoint 6 fix itself: a stint starting at lap 8 means the driver
+    actually pitted on lap 7 (start_lap - 1, the last lap on the OLD tyre —
+    see label_pit_laps' own docstring). With PIT_LABEL_HORIZON_LAPS=3, laps
+    5-7 (inclusive) should be positive — not just lap 7, and NOT lap 8 (the
+    out-lap the old, pre-fix label marked instead, per the original finding
+    this checkpoint closes)."""
     laps = pd.DataFrame(
         {
-            "session_id": ["s1"] * 5,
-            "driver_id": ["d1"] * 5,
-            "lap_number": [1, 2, 3, 4, 5],
+            "session_id": ["s1"] * 10,
+            "driver_id": ["d1"] * 10,
+            "lap_number": list(range(1, 11)),
         }
     )
     stints = pd.DataFrame(
@@ -122,19 +130,86 @@ def test_label_pit_laps_marks_stint_starts_after_first() -> None:
             "session_id": ["s1", "s1"],
             "driver_id": ["d1", "d1"],
             "stint_number": [1, 2],
-            "start_lap": [1, 4],
+            "start_lap": [1, 8],
         }
     )
 
     result = label_pit_laps(laps, stints)
 
-    assert result.set_index("lap_number")["did_pit_this_lap"].to_dict() == {
+    assert result.set_index("lap_number")[TARGET_COLUMN].to_dict() == {
         1: False,
         2: False,
         3: False,
-        4: True,
-        5: False,
+        4: False,
+        5: True,
+        6: True,
+        7: True,
+        8: False,  # the out-lap — no longer marked positive, per the fix
+        9: False,
+        10: False,
     }
+
+
+@pytest.mark.unit
+def test_label_pit_laps_clips_horizon_at_lap_one() -> None:
+    """A pit lap early enough that PIT_LABEL_HORIZON_LAPS laps back would go
+    below lap 1 must not generate (or crash on) a nonexistent lap_number —
+    the window just clips to whatever laps actually exist."""
+    laps = pd.DataFrame(
+        {
+            "session_id": ["s1"] * 4,
+            "driver_id": ["d1"] * 4,
+            "lap_number": [1, 2, 3, 4],
+        }
+    )
+    stints = pd.DataFrame(
+        {
+            "session_id": ["s1", "s1"],
+            "driver_id": ["d1", "d1"],
+            "stint_number": [1, 2],
+            "start_lap": [1, 3],
+        }
+    )
+
+    result = label_pit_laps(laps, stints)
+
+    # pit_lap = 3 - 1 = 2; window = [max(1, 2-2), 2] = [1, 2].
+    assert result.set_index("lap_number")[TARGET_COLUMN].to_dict() == {
+        1: True,
+        2: True,
+        3: False,
+        4: False,
+    }
+
+
+@pytest.mark.unit
+def test_label_pit_laps_window_width_matches_horizon_constant() -> None:
+    """Symbolic against PIT_LABEL_HORIZON_LAPS itself (not a hardcoded 3),
+    so a future retune of the constant doesn't silently invalidate this
+    test's own assumption about the window width."""
+    n_laps = 50
+    pit_lap = 30
+    laps = pd.DataFrame(
+        {
+            "session_id": ["s1"] * n_laps,
+            "driver_id": ["d1"] * n_laps,
+            "lap_number": list(range(1, n_laps + 1)),
+        }
+    )
+    stints = pd.DataFrame(
+        {
+            "session_id": ["s1", "s1"],
+            "driver_id": ["d1", "d1"],
+            "stint_number": [1, 2],
+            "start_lap": [1, pit_lap + 1],
+        }
+    )
+
+    result = label_pit_laps(laps, stints)
+
+    positive_laps = sorted(result.loc[result[TARGET_COLUMN], "lap_number"])
+    assert len(positive_laps) == PIT_LABEL_HORIZON_LAPS
+    assert positive_laps == list(range(pit_lap - PIT_LABEL_HORIZON_LAPS + 1, pit_lap + 1))
 
 
 @pytest.mark.unit
@@ -188,7 +263,11 @@ def test_prepare_pit_predictor_features_adds_all_derived_columns() -> None:
 
     result = prepare_pit_predictor_features(laps, stints)
 
-    assert bool(result.loc[result["lap_number"] == 4, "did_pit_this_lap"].iloc[0])
+    # pit_lap = 4 - 1 = 3 (the last lap on the old tyre); the out-lap itself
+    # (lap 4) is no longer positive — see label_pit_laps' own tests for the
+    # full window-boundary behavior this delegates to.
+    assert bool(result.loc[result["lap_number"] == 3, TARGET_COLUMN].iloc[0])
+    assert not bool(result.loc[result["lap_number"] == 4, TARGET_COLUMN].iloc[0])
     assert (result["current_tyre_age"] == result["tyre_age_laps"]).all()
     assert (result["laps_to_race_end"] == result["laps_in_session"] - result["lap_number"]).all()
     assert (result["fuel_load_est"] >= 0).all()

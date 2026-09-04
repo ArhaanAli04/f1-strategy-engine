@@ -85,7 +85,7 @@ def _seed_session_with_lap(
         tyre_age_laps=12,
         lap_time_seconds=91.2,
     )
-    # get_optimal_pit_window derives total_laps as MAX(lap_number) across the
+    # build_pit_recommendation derives total_laps as MAX(lap_number) across the
     # whole session (races/sessions don't persist a race-distance column —
     # see strategy_service.py's module docstring). Without a lap somewhere in
     # the session beyond the driver's own latest lap, total_laps == 12 ==
@@ -145,16 +145,28 @@ def test_pit_window_endpoint_returns_valid_schema(
         assert {"pit_lap", "window_start", "window_end", "projected_total_delta_seconds"} <= set(
             candidate
         )
-    # Only the top (first) recommendation carries a SHAP explanation, capped
-    # at explainability.DEFAULT_TOP_K (5) highest-magnitude contributions —
-    # not one entry per FEATURE_COLUMNS (6) feature (see explain_prediction's
-    # docstring: "Top-k SHAP feature contributions ... sorted by |contribution|
-    # descending").
-    assert body[0]["shap_explanation"] is not None
-    assert 1 <= len(body[0]["shap_explanation"]) <= len(FEATURE_COLUMNS)
-    for contribution in body[0]["shap_explanation"]:
+    # Only the top (first) recommendation carries an explanation. Its
+    # tire_deg_shap is capped at explainability.DEFAULT_TOP_K (5)
+    # highest-magnitude contributions — not one entry per FEATURE_COLUMNS (6)
+    # feature (see explain_prediction's docstring: "Top-k SHAP feature
+    # contributions ... sorted by |contribution| descending"). pit_predictor_shap
+    # is empty here — this test's stub_models has no pit_predictor.pkl loaded
+    # (_pit_predictor_current_contributions degrades to [] gracefully rather
+    # than raising), and neither seeded LapData row has a position set, so
+    # get_undercut_score/get_overcut_score are never even called (no resolvable
+    # track-position neighbour) — still a valid 200, just a narrower explanation.
+    explanation = body[0]["explanation"]
+    assert explanation is not None
+    assert 1 <= len(explanation["tire_deg_shap"]) <= len(FEATURE_COLUMNS)
+    for contribution in explanation["tire_deg_shap"]:
         assert contribution["feature_name"] in FEATURE_COLUMNS
         assert contribution["direction"] in ("+", "-")
+    assert explanation["pit_predictor_shap"] == []
+    assert isinstance(explanation["narrative"], str)
+    assert explanation["narrative"]
+    assert len(explanation["facts"]) > 0
+    for candidate in body[1:]:
+        assert candidate["explanation"] is None
 
 
 @pytest.fixture
