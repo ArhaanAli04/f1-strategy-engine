@@ -1414,6 +1414,27 @@ happen), or was found already fixed and moved into ### Notes below instead.
     fully solve this either. Long-term "nice to have," not a near-term
     priority — do not casually fold this into an otherwise-scoped session.
 
+- **[deferred] Re-verify live-path parity against a real live SignalR
+  connection at the next race weekend.** `verify_live_feed_parity.py`
+  (core-feature-rebuild Checkpoint 7) validates `ingest_live_session.py`'s
+  derivation logic against real ground truth via a recorded-feed harness
+  (99.0% position accuracy, 94.1% tyre_age_laps) — it cannot exercise the
+  actual websocket transport, reconnect/backoff, F1TV auth token handling,
+  or genuine live message timing/interleaving quirks, all only exercisable
+  against F1's real feed. Re-run against a genuine live race once one occurs.
+
+- **[deferred — model limitation, low priority] `_current_tyre_age`'s
+  live-path derivation always resets a new stint to `tyre_age_laps=1`, but
+  a real stint can start on an already-used tyre set.** Confirmed via
+  Checkpoint 7's parity harness against Belgian GP 2026 R10: 3 real stints
+  (PER lap 13, ANT lap 19, HAD lap 21) start at FastF1's real TyreLife
+  2/4/2, not 1 — the live TimingAppData feed carries no "starting age"
+  field this ingestor reads, so the live path can't know a tyre was
+  pre-scrubbed. Fully explains 100% of the harness's remaining
+  tyre_age_laps mismatches (94.1% match rate); no other cause contributes.
+  Same style/priority as the WET-model-retrain and track-condition-input
+  entries above — low priority, no fix attempted.
+
 ### Dependency version drift — prometheus-fastapi-instrumentator (✅ fixed Day 16)
 
 pyproject.toml lower-bound-only pins caused a silent compatibility 
@@ -1425,6 +1446,30 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Core feature rebuild — pit-window recommendation engine (✅ fixed
+2026-09-04, 7 checkpoints):** Before: `/pit-window` returned the
+tire-degradation search horizon, not an actual recommendation — no
+confidence score, compound computed then discarded, disabled during live
+races, and `pit_probability` was a lagging same-lap indicator with no
+advance warning. Fixed: CP1 live-path parity (`ingest_live_session.py`'s
+`tyre_age_laps`/`position` derivation, previously hardcoded/absent), CP2-3
+a real batched `build_pit_recommendation` (`strategy_service.py`) with
+confidence + combined tire_deg/pit_predictor SHAP explanation, CP4
+persistence wired into the per-lap live/replay pipeline (not just the
+on-demand endpoint), CP5 unified web/desktop/mobile frontend, CP6
+`pit_predictor`'s label fixed from `did_pit_this_lap` (same-lap detector)
+to `pit_within_k_laps` (genuine advance warning, K=3), CP7 a recorded-feed
+harness (`verify_live_feed_parity.py`) verifying live-path parity against
+real ground truth — 99.0% position accuracy after fixing a genuine
+retirement-handling bug it surfaced (`_update_gap_state` now evicts a car
+on F1's "RETIRED" marker instead of ranking its frozen stale gap forever).
+**Validated:** LEC/COL/GAS's real Belgian GP 2026 R10 pit stops — new
+model elevated 0.73-0.92 for the 5 laps approaching each pit, dropping
+sharply on the out-lap; old model stayed ≈0.00 until spiking to ~0.999
+only after the fact. cv_auc/holdout_mae reconfirmed against the project's
+standard 2018-2024-train/2025-holdout split. Follow-ups (real-race
+re-verification, pre-scrubbed-tyre gap) — see Deferred Wiring above.
 
 **Driver/circuit encoding persisted — item 5 investigation (✅ fixed
 2026-09-04):** `driver_id_encoded`/`circuit_id_encoded` at inference were

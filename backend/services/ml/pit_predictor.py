@@ -1,10 +1,31 @@
-"""LightGBM pit-lap classifier — probability that a driver pits on a given lap.
+"""LightGBM pit-lap classifier — probability that a driver pits within the
+next PIT_LABEL_HORIZON_LAPS laps.
 
-did_pit_this_lap is heavily imbalanced (a driver pits ~1-3 times across a
+pit_within_k_laps is heavily imbalanced (a driver pits ~1-3 times across a
 ~50-70 lap race), so scale_pos_weight is used to counter it. predicted_life_remaining
 and safety_car_probability are cross-model features computed by the training
 orchestrator (scripts/train_models.py) from the tire degradation and safety
 car models respectively, then merged in before training.
+
+Label definition fixed 2026-09-04 (core-feature-rebuild Checkpoint 6): the
+original label_pit_laps marked only the stint's own start_lap (the OUT-lap,
+first lap on the fresh tyre) as positive. Since current_tyre_age is directly
+a feature and resets to a small number on exactly that lap, the model
+learned "tyre_age just reset -> a pit just happened" — a real, measured
+finding (docs/core-feature-rebuild-strategy-recommendations.md §2b):
+pit_probability stayed near 0.0000 for every lap up to and including the
+lap before a real pit, spiked to ~0.9999 exactly ON the pit lap, then
+collapsed back to near-zero the next lap. That is a same-lap detector, not
+advance warning, despite the feature being named/used as a live "should I
+pit soon" signal throughout this codebase (StrategyPrediction.
+pit_probability, the alert system's ALERT_THRESHOLD, prediction_worker's
+per-lap pipeline). label_pit_laps now marks the PIT_LABEL_HORIZON_LAPS laps
+UP TO AND INCLUDING the pit lap itself as positive, so the model has to
+learn to recognize a stint's approaching end from degradation/context
+BEFORE the tyre actually resets, not the reset itself. Validated via
+scripts/evaluate_pit_predictor_label_fix.py (a genuine local retrain, old-
+label vs. new-label side by side, against the same real pit stops the
+finding above was measured against).
 """
 
 from __future__ import annotations
@@ -31,9 +52,20 @@ FEATURE_COLUMNS = [
     "position",
     "fuel_load_est",
 ]
-TARGET_COLUMN = "did_pit_this_lap"
+TARGET_COLUMN = "pit_within_k_laps"
 ALERT_THRESHOLD = 0.65
 CV_FOLDS = 5
+
+# How many laps of advance warning label_pit_laps trains the model to give —
+# the "K" in "pits within the next K laps". 3 laps: long enough to be a
+# genuinely earlier signal than the old same-lap-only label (which gave
+# zero laps of warning by construction), short enough that the model isn't
+# asked to forecast something this inherently uncertain very far out. Not
+# picked to match any other per-model lookahead constant in this codebase
+# (e.g. UNDERCUT_PROJECTION_LAPS=5 in strategy_service.py serves a different
+# purpose — projecting tire_deg's own deterministic delta forward, not
+# labeling a classifier's target) — this is pit_predictor's own tradeoff.
+PIT_LABEL_HORIZON_LAPS = 3
 
 # Same fuel-burn assumption as tire_deg_model.py; duplicated rather than
 # imported since services/ml modules must not import each other directly —
@@ -54,23 +86,42 @@ class PitPredictorTrainResult:
 
 
 def label_pit_laps(laps: pd.DataFrame, stints: pd.DataFrame) -> pd.DataFrame:
-    """Add did_pit_this_lap: True on a stint's start_lap, for every stint after the first.
+    """Add pit_within_k_laps: True for the PIT_LABEL_HORIZON_LAPS laps up to and
+    including the actual pit lap, for every stint after the first.
+
+    The pit lap itself is one lap BEFORE a later stint's own start_lap: a
+    stint's start_lap is the OUT-lap (first lap on the fresh tyre), so
+    start_lap - 1 is the last lap on the old tyre — the lap the driver
+    actually visits the pits on. This is the same "pit_lap = stint start_lap
+    - 1" convention strategy_service.build_pit_recommendation uses, kept
+    consistent rather than introducing a second definition of "the pit lap"
+    in this codebase.
 
     Args:
         laps: One row per lap; must include session_id, driver_id, lap_number.
         stints: tire_stints rows; must include session_id, driver_id, stint_number, start_lap.
     Returns:
-        Copy of laps with a did_pit_this_lap boolean column added.
+        Copy of laps with a pit_within_k_laps boolean column added.
     """
-    pit_laps = stints[
+    later_stints = stints[
         stints["stint_number"]
         > stints.groupby(["session_id", "driver_id"])["stint_number"].transform("min")
-    ][["session_id", "driver_id", "start_lap"]].rename(columns={"start_lap": "lap_number"})
+    ][["session_id", "driver_id", "start_lap"]].copy()
+    later_stints["pit_lap"] = later_stints["start_lap"] - 1
+
+    # Expand each pit event into its own PIT_LABEL_HORIZON_LAPS-lap window —
+    # [pit_lap - K + 1, pit_lap], inclusive — instead of the single out-lap
+    # the previous label marked. A plain cross join is cheap here: at most a
+    # few hundred pit events per training run, times K.
+    offsets = pd.DataFrame({"offset": np.arange(PIT_LABEL_HORIZON_LAPS)})
+    windows = later_stints.merge(offsets, how="cross")
+    windows["lap_number"] = windows["pit_lap"] - windows["offset"]
+    windows = windows[windows["lap_number"] >= 1]
 
     df = laps.copy()
-    pit_lap_keys = pd.MultiIndex.from_frame(pit_laps[["session_id", "driver_id", "lap_number"]])
+    pit_lap_keys = pd.MultiIndex.from_frame(windows[["session_id", "driver_id", "lap_number"]])
     row_keys = pd.MultiIndex.from_frame(df[["session_id", "driver_id", "lap_number"]])
-    df["did_pit_this_lap"] = row_keys.isin(pit_lap_keys)
+    df["pit_within_k_laps"] = row_keys.isin(pit_lap_keys)
     return df
 
 
@@ -126,7 +177,7 @@ def prepare_pit_predictor_features(laps: pd.DataFrame, stints: pd.DataFrame) -> 
         stints: tire_stints rows for the same laps.
     Returns:
         DataFrame with current_tyre_age, gap_to_car_ahead, gap_to_car_behind,
-        laps_to_race_end, position, fuel_load_est, did_pit_this_lap, session_id.
+        laps_to_race_end, position, fuel_load_est, pit_within_k_laps, session_id.
     """
     df = add_gap_features(laps)
     df = label_pit_laps(df, stints)
@@ -153,7 +204,7 @@ def train_pit_predictor(df: pd.DataFrame) -> PitPredictorTrainResult:
     """Train the LightGBM pit-lap classifier.
 
     Args:
-        df: One row per lap with FEATURE_COLUMNS + did_pit_this_lap + session_id
+        df: One row per lap with FEATURE_COLUMNS + pit_within_k_laps + session_id
             (predicted_life_remaining and safety_car_probability must already be merged in).
     Returns:
         PitPredictorTrainResult with the model fit on all of df and cross-validated AUC.
@@ -192,7 +243,7 @@ def train_pit_predictor(df: pd.DataFrame) -> PitPredictorTrainResult:
 
 
 def evaluate_holdout(model: LGBMClassifier, df: pd.DataFrame) -> float:
-    """MAE between predicted pit probability and the actual did_pit_this_lap indicator.
+    """MAE between predicted pit probability and the actual pit_within_k_laps indicator.
 
     Args:
         model: Fitted LGBMClassifier.

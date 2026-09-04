@@ -3,6 +3,8 @@ import { useMutation, useQuery, type Query } from "@tanstack/react-query"
 import * as strategyApi from "@/api/strategy"
 import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import type {
+  PitRecommendationExplanation,
+  PitWindowResponse,
   SimulateStrategyRequest,
   SimulateTaskStatusResponse,
   StrategyPredictionHistoryEntry,
@@ -113,6 +115,116 @@ export function useCurrentLapHistoryEntry(
   }, [query.data, isReplayActive, liveEvent])
 
   return { entry, isReplayActive, isLoading: query.isLoading }
+}
+
+// --- usePitRecommendation: the Checkpoint 5 unification ---
+//
+// PitWindowCard.tsx used to branch its own JSX on isReplayActive — a
+// separate, reduced-detail render path during replay/live progression (built
+// from useCurrentLapHistoryEntry's history) vs. the full render path
+// otherwise (built from usePitWindow's REST fetch). That branch existed
+// because the two sources used to carry genuinely different data:
+// StrategyPredictionHistoryEntry had no window/compound/confidence/
+// explanation at all before the core-feature-rebuild's Checkpoint 4 wired
+// the SAME recommendation engine into the per-lap persisted row. Now both
+// sources carry the same rich shape (just under different field names —
+// PitWindowResponse.pit_lap vs. StrategyPredictionHistoryEntry.
+// recommended_pit_lap, etc.), so this hook normalizes both into ONE view
+// model and picks a source; the component below renders from that view
+// alone and no longer needs to know which source it came from.
+
+// Normalized shape PitWindowCard actually renders — deliberately NOT a
+// re-export of either backend response type, so the component has one
+// consistent set of field names regardless of source.
+export interface PitRecommendationView {
+  // Falls back to StrategyPredictionHistoryEntry.predicted_pit_lap (pit_
+  // predictor's own, cruder estimate) when the rich recommendation isn't
+  // available for this row (a pre-Checkpoint-4 row, or a lap where the
+  // computation degraded gracefully) — see fromHistoryEntry below. Never
+  // null when a source resolved at all.
+  pitLap: number
+  windowStart: number | null
+  windowEnd: number | null
+  recommendedCompound: string | null
+  confidenceScore: number | null
+  explanation: PitRecommendationExplanation | null
+  // pit_predictor's own lagging-indicator signal (CLAUDE.md: fires ~on the
+  // pit lap itself, not before) — surfaced honestly as a labeled secondary
+  // signal, never as the headline. Only ever available from the history
+  // source; PitWindowResponse carries no pit_predictor read of its own.
+  pitProbability: number | null
+  // The lap this view was valid as of, when sourced from history (live/
+  // replay progression) — null when sourced from the always-current
+  // /pit-window REST fetch, which has no single "as of" lap.
+  asOfLapNumber: number | null
+}
+
+function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommendationView | null {
+  if (!window) return null
+  return {
+    pitLap: window.pit_lap,
+    windowStart: window.window_start,
+    windowEnd: window.window_end,
+    recommendedCompound: window.recommended_compound,
+    confidenceScore: window.confidence_score,
+    explanation: window.explanation,
+    pitProbability: null,
+    asOfLapNumber: null,
+  }
+}
+
+function viewFromHistoryEntry(
+  entry: StrategyPredictionHistoryEntry | null,
+): PitRecommendationView | null {
+  if (!entry) return null
+  const hasRecommendation = entry.recommended_pit_lap !== null
+  return {
+    pitLap: entry.recommended_pit_lap ?? entry.predicted_pit_lap,
+    windowStart: entry.window_start,
+    windowEnd: entry.window_end,
+    recommendedCompound: entry.recommended_compound,
+    // Only meaningful alongside a real recommendation — the column
+    // defaults to 0.0 (not null) on a degraded/pre-migration row, which
+    // would otherwise misrender as "0% confidence" rather than "unknown".
+    confidenceScore: hasRecommendation ? entry.confidence_score : null,
+    explanation: entry.explanation,
+    pitProbability: entry.pit_probability,
+    asOfLapNumber: entry.lap_number,
+  }
+}
+
+export interface UsePitRecommendationResult {
+  view: PitRecommendationView | null
+  isLoading: boolean
+}
+
+// Single hook backing PitWindowCard in both its compact (Strategy Wall) and
+// full (RacePage right rail) modes — the component itself never checks
+// isReplayActive; it renders PitRecommendationView fields only. Source
+// selection (history vs. REST) still legitimately differs by scenario (a
+// lap-gated DB read during live/replay progression vs. an on-demand
+// recompute otherwise are fundamentally different plumbing, not a
+// stylistic choice), but that selection is made HERE, once, not
+// re-decided in the component's JSX.
+export function usePitRecommendation(
+  sessionId: string | null,
+  driverId: string | null,
+): UsePitRecommendationResult {
+  const { entry: historyEntry, isReplayActive, isLoading: historyLoading } =
+    useCurrentLapHistoryEntry(sessionId, driverId)
+  // Skip the live ML-inference recompute while a replay/live session is
+  // progressing for this driver — the history source above is authoritative
+  // and current then; see usePitWindow's own docstring.
+  const { data: windows, isLoading: windowLoading } = usePitWindow(
+    sessionId,
+    driverId,
+    !isReplayActive,
+  )
+
+  if (isReplayActive) {
+    return { view: viewFromHistoryEntry(historyEntry), isLoading: historyLoading }
+  }
+  return { view: viewFromPitWindow(windows?.[0]), isLoading: windowLoading }
 }
 
 export function useSimulateStrategy(sessionId: string) {

@@ -1,12 +1,11 @@
 # Core Feature Rebuild — Real-Time Strategy Recommendations
 
-> **Status:** Investigation only, 2026-09-04. Nothing in this document has
-> been implemented or fixed. This is a scoping document for a future
-> dedicated session (or several) to rebuild the project's originally
-> planned core feature, which — as documented below — does not currently
-> exist as a coherent thing, even though its individual pieces (tire_deg
-> models, pit_predictor, SHAP explainability) are all real and working on
-> their own terms.
+> **Status: ✅ COMPLETE, 2026-09-04.** All 7 checkpoints below (§5's plan)
+> implemented, tested, and verified against real data — see §6 for final
+> results per checkpoint. The rest of this document (§1-§5) is the original
+> investigation/scoping writeup and is kept as-is for historical context —
+> it describes the state of the system *before* this rebuild, not the
+> current state.
 >
 > Produced investigating two follow-on questions from the item-5 encoding
 > fix session (`docs/day-deferred-fixes-session2-handoff.md`): (1) could
@@ -349,3 +348,47 @@ to skip live verification in the rebuild).
 
 Do not run git commands unless explicitly asked.
 ```
+
+---
+
+## 6. Completion Summary (2026-09-04)
+
+All 7 checkpoints below were implemented, tested, and verified against real
+data — checkpoint-by-checkpoint with approval between each, per this
+document's own required workflow (§5). The live/replay parity requirement
+(§2d/§4's closing bullet) held throughout: CP1-4 wired into the shared
+per-lap pipeline both `ingest_live_session.py` and `replay_pipeline.py`
+dispatch through, and CP7 specifically re-verified CP1's live-path
+derivation against real ground truth via a dedicated recorded-feed harness
+(a genuine live connection wasn't available on demand — see the follow-up
+below).
+
+| CP | What | Result |
+|---|---|---|
+| 1 | Live-path data parity | `ingest_live_session.py`'s `tyre_age_laps` (was hardcoded 0) and `position` (was never populated live) now derived from tracked stint `start_lap` / streaming `GapToLeader` ranking. |
+| 2 | Recommendation engine | `strategy_service.build_pit_recommendation`, batched — a genuine narrow `pit_lap` + `confidence_score` + surviving recommended compound. Closes §3's first three ❌ rows. |
+| 3 | Explanation | Combined tire_deg + pit_predictor SHAP, narrative facts including gap-to-rival reasoning. Closes §3's "partial" row — the vision's own "gap to P4 behind" example is now structurally reachable. |
+| 4 | Persistence | Wired into the per-lap live/replay Celery pipeline (`prediction_worker.py`), not just the on-demand endpoint — new `StrategyPrediction` columns, migration applied. |
+| 5 | Frontend | Web/desktop/mobile unified on the new recommendation shape; `PitWindowCard.tsx`'s `enabled: !isReplayActive` gating removed — the rich mechanism now runs during live progression. Closes §3's "wrong mechanism" row. |
+| 6 | `pit_predictor` label fix | `did_pit_this_lap` → `pit_within_k_laps` (K=3) — turns the lagging same-lap detector into genuine advance warning. Closes §4's lagging-indicator bullet (§4's option (a), not (b) — §2a's mechanism needed the label-fixed `pit_predictor` for its own confidence score anyway). |
+| 7 | Verification | `verify_live_feed_parity.py`, a recorded-feed harness validating CP1's live-path derivation against real ground truth: **99.0% position accuracy, 94.1% tyre_age_laps** (both remaining gaps fully explained — see CLAUDE.md's Deferred Wiring). Surfaced and fixed a real, previously-unknown retirement-handling bug in `_update_gap_state` along the way. |
+
+**Key validation** — LEC/COL/GAS's real Belgian GP 2026 R10 pit stops (the
+same evidence base §2b's original investigation used): the new
+`pit_predictor`, evaluated against the project's standard
+2018-2024-train/2025-holdout split, rises **0.73-0.92 across the 5 laps
+approaching each real pit**, dropping sharply on the out-lap — genuine
+multi-lap advance warning. The old label's model, run side-by-side on the
+same split, stays ≈0.00 until spiking to ~0.999 only after the fact —
+confirming §2b's original "zero advance warning" finding, and that the fix
+actually resolves it.
+
+**Open follow-ups (not blocking — see CLAUDE.md's Deferred Wiring &
+Integration Gaps):**
+1. Re-verify live-path parity against a real live SignalR connection at
+   the next race weekend — CP7's harness validates derivation logic only,
+   not the actual websocket transport/reconnect/F1TV auth/real message
+   timing quirks.
+2. `_current_tyre_age`'s always-resets-to-1 formula doesn't know when a
+   real stint starts on an already-used tyre set — low priority, fully
+   explains the harness's remaining `tyre_age_laps` gap.

@@ -17,7 +17,7 @@ cache_service.cacheable. The cached function returns a JSON-serialisable dict
 (`.model_dump(mode="json")`) rather than the Pydantic response model itself,
 since cache_set/redis_set round-trip through json.dumps — the public function
 reconstructs the response schema from that dict on both cache hit and miss.
-Same split already used by strategy_service.get_optimal_pit_window (cached,
+Same split already used by strategy_service.build_pit_recommendation (cached,
 raw) vs. get_pit_window_with_explanation (uncached wrapper).
 """
 

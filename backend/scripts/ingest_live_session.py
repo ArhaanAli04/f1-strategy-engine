@@ -46,8 +46,16 @@ from backend.scripts._ingest_common import (
     get_or_create_session,
     resolve_scheduled_start,
 )
-from backend.workers.prediction_worker import run_strategy_prediction
-from backend.workers.telemetry_worker import process_lap, record_tire_stint
+
+# All three use the redundant "as X" alias, not a plain import — tests (and
+# verify_live_feed_parity.py) reach them via ingest_live_session.process_lap/
+# .run_strategy_prediction/.record_tire_stint to monkeypatch .delay, which
+# mypy --strict's no_implicit_reexport check otherwise flags as an
+# unexported cross-module attribute (see strategy_service.py's identical
+# note for the general pattern).
+from backend.workers.prediction_worker import run_strategy_prediction as run_strategy_prediction
+from backend.workers.telemetry_worker import process_lap as process_lap
+from backend.workers.telemetry_worker import record_tire_stint as record_tire_stint
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -131,6 +139,12 @@ def _parse_temp(value: Any) -> float | None:
 
 _LAPS_BEHIND_PATTERN = re.compile(r"^\+?\s*(\d+)\s*LAPS?$", re.IGNORECASE)
 
+# F1's live feed sends this exact string as GapToLeader once a car is out of
+# the race (see _parse_gap_string's own docstring, which already anticipated
+# it as one of several unparseable inputs) — _update_gap_state below treats
+# it as an explicit retirement signal, not just "no update this message".
+_RETIRED_MARKER = "RETIRED"
+
 
 def _extract_string_field(raw: Any) -> str | None:
     """Unwrap a TimingData sub-field that may be a bare string or a {"Value": ...}
@@ -202,6 +216,16 @@ class F1SignalRIngestor:
         # duplicate Celery dispatch (the DB insert itself is also idempotent
         # via ON CONFLICT DO NOTHING, this just avoids the redundant task).
         self._car_last_stint_index: dict[str, int] = {}
+        # Per-car start_lap of the CURRENT stint (same value as the start_lap
+        # dispatched to record_tire_stint), used by _current_tyre_age to
+        # derive a real tyre_age_laps for every completed lap — previously
+        # this ingestor hardcoded tyre_age_laps=0 for every lap (see
+        # CLAUDE.md's core-feature-rebuild Checkpoint 1: this silently
+        # starved tire_deg/pit_predictor inference of any real degradation
+        # signal for the whole live path). Populated by
+        # _handle_timing_app_data alongside its own start_lap computation, so
+        # the two can never disagree.
+        self._car_stint_start_lap: dict[str, int] = {}
         # Per-car live standings state, parsed directly from TimingData's own
         # Position/GapToLeader/IntervalToPositionAhead fields — F1's own
         # authoritative gap computation, immune to gaps in our own recorded
@@ -385,13 +409,19 @@ class F1SignalRIngestor:
             if self._car_last_stint_index.get(car_number, -1) >= stint_index:
                 continue
             self._car_last_stint_index[car_number] = stint_index
+            start_lap = self._laps_seen.get(car_number, 0) + 1
+            # Tracked alongside the record_tire_stint dispatch below (not
+            # derived separately) so _current_tyre_age's tyre_age_laps always
+            # agrees with whichever start_lap this same stint was actually
+            # recorded under.
+            self._car_stint_start_lap[car_number] = start_lap
             record_tire_stint.delay(
                 {
                     "session_id": str(self._session_id),
                     "driver_id": str(driver_id),
                     "stint_number": stint_index + 1,
                     "compound": compound,
-                    "start_lap": self._laps_seen.get(car_number, 0) + 1,
+                    "start_lap": start_lap,
                 }
             )
 
@@ -420,7 +450,21 @@ class F1SignalRIngestor:
         return None, None
 
     def _handle_timing_data(self, payload: dict[str, Any]) -> None:
-        for car_number, entry in payload.get("Lines", {}).items():
+        """Two passes over this message's Lines, not one.
+
+        Pass 1 updates sector accumulation and gap/position tracking state
+        for every car this message mentions; _recompute_positions() then
+        re-ranks the WHOLE field once from that now-current state; pass 2
+        checks for lap completions and builds/dispatches raw_lap, so a
+        completed lap's own "position" reflects the full field snapshot this
+        message just established — not a value computed before this same
+        message's OTHER cars' gap updates were applied (a single message
+        commonly carries updates for several cars at once, and the car whose
+        lap just completed is not guaranteed to be processed last).
+        """
+        lines = payload.get("Lines", {})
+
+        for car_number, entry in lines.items():
             if not isinstance(entry, dict):
                 # Same "_kf"/bool-sentinel quirk as _handle_driver_list — F1's
                 # diff-based TimingData updates can carry a bare bool for an
@@ -449,6 +493,16 @@ class F1SignalRIngestor:
             # the "laps_completed increased" check below.
             self._update_gap_state(car_number, entry)
 
+        # Re-rank the whole field from the now-current gap state, once per
+        # message rather than once per car — see _recompute_positions' own
+        # docstring for why this replaces F1's own Position field (sent only
+        # once, in the Subscribe snapshot; never on a later diff).
+        self._recompute_positions()
+
+        for car_number, entry in lines.items():
+            if not isinstance(entry, dict):
+                continue
+
             laps_completed = entry.get("NumberOfLaps")
             if laps_completed is None or laps_completed <= self._laps_seen.get(car_number, 0):
                 continue
@@ -471,11 +525,12 @@ class F1SignalRIngestor:
                 "lap_number": int(laps_completed),
                 "lap_time_seconds": _parse_lap_time(last_lap.get("Value")),
                 "compound": self._car_current_compound.get(car_number, "UNKNOWN"),
-                "tyre_age_laps": 0,
+                "tyre_age_laps": self._current_tyre_age(car_number, int(laps_completed)),
                 "is_valid": True,
                 "sector1_seconds": acc.get("0"),
                 "sector2_seconds": acc.get("1"),
                 "sector3_seconds": acc.get("2"),
+                "position": self._car_live_gap_state.get(car_number, {}).get("position"),
             }
             process_lap.delay(raw_lap)
             run_strategy_prediction.delay(raw_lap)
@@ -492,13 +547,107 @@ class F1SignalRIngestor:
         # keeps the TTL reliably warm at negligible extra cost.
         self._publish_live_gaps()
 
+    def _current_tyre_age(self, car_number: str, lap_number: int) -> int:
+        """tyre_age_laps for a just-completed lap, from the tracked stint start_lap.
+
+        Matches ingest_historical.py's FastF1 TyreLife convention (the first
+        lap on a fresh tyre is age 1, not 0) — confirmed against real ingested
+        rows: tyre_age_laps == 1 on a stint's own start_lap for the
+        overwhelming majority of recorded pit-stop laps (a stint's start_lap
+        IS the out-lap on the new tyre). _car_stint_start_lap is populated by
+        _handle_timing_app_data whenever a new stint is detected; a car with
+        no TimingAppData seen yet defaults to stint start_lap 1 — "on the
+        tyre they started the session on" — same fallback spirit as
+        _car_current_compound's own "UNKNOWN" default for the same gap.
+
+        Args:
+            car_number: F1 live-timing car number string.
+            lap_number: The lap number that was just completed.
+        Returns:
+            Tyre age in laps, floored at 0 (defensive against an out-of-order
+            message reporting a lap before the tracked stint's own start_lap).
+        """
+        start_lap = self._car_stint_start_lap.get(car_number, 1)
+        return max(lap_number - start_lap + 1, 0)
+
+    def _recompute_positions(self) -> None:
+        """Re-rank every known car by cumulative GapToLeader.
+
+        F1's live feed sends the Position field exactly once, in the
+        Subscribe snapshot — never again on a later "feed" diff (confirmed
+        live, see _on_subscribe_result's docstring). Left alone,
+        _car_live_gap_state's "position" stays frozen at its pre-race value
+        for the entire session, silently going wrong on the very first pit
+        stop or overtake. GapToLeader/IntervalToPositionAhead DO stream
+        continuously, so this reconstructs a live ranking from GapToLeader
+        instead — called once per _handle_timing_data message, after every
+        car in that message has had its gap state updated.
+
+        F1 sends a blank/unparseable GapToLeader for whoever currently leads
+        (so _update_gap_state never writes a value for them, and their state
+        stays at its None default), which makes the leader identifiable as
+        the one car with gap_to_leader still None. Everyone else ranks by
+        their own gap_to_leader, ascending. If more than one car has no
+        gap_to_leader (e.g. right after Subscribe, before any GapToLeader
+        message has arrived for anyone — or several cars that retired before
+        ever posting one), the leader can't be disambiguated from gap data
+        alone: those cars fall back to their last-known position instead of a
+        guess. This correctly reproduces the original Subscribe-snapshot
+        order for the common "no gap data at all yet" case, since every car
+        is in that fallback bucket together and _update_gap_state already
+        seeded "position" from F1's own snapshot Position field.
+
+        Args:
+            None — operates on self._car_live_gap_state.
+        Returns:
+            None. Mutates every known car's "position" entry in place.
+        """
+        with_gap = [
+            (car, state["gap_to_leader"])
+            for car, state in self._car_live_gap_state.items()
+            if state["gap_to_leader"] is not None
+        ]
+        no_gap = [
+            car for car, state in self._car_live_gap_state.items() if state["gap_to_leader"] is None
+        ]
+
+        if len(no_gap) != 1:
+            no_gap.sort(key=lambda car: self._car_live_gap_state[car]["position"] or 999)
+
+        ranked: list[str] = list(no_gap)
+        ranked.extend(car for car, _ in sorted(with_gap, key=lambda pair: pair[1]))
+
+        for i, car in enumerate(ranked, start=1):
+            self._car_live_gap_state[car]["position"] = i
+
     def _update_gap_state(self, car_number: str, entry: dict[str, Any]) -> bool:
         """Parse Position/GapToLeader/IntervalToPositionAhead for one car.
 
         Returns True if this car's tracked state actually changed (kept for
         potential future use/diagnostics — the caller no longer gates on every
         single TimingData message regardless of content).
+
+        A car whose GapToLeader is the explicit "RETIRED" marker is evicted
+        from _car_live_gap_state entirely rather than left in place. Without
+        this, _parse_gap_string correctly returns None for "RETIRED" (an
+        unparseable value), but the "gap_to_leader is not None" guard below
+        then means that None is simply never written — the car's gap stays
+        FROZEN at its last real value forever, and _recompute_positions keeps
+        ranking that stale entry against every other car's still-advancing
+        gap. Confirmed live via the core-feature-rebuild Checkpoint 7
+        recorded-feed harness (verify_live_feed_parity.py) against a real
+        session with 3 retirements: a retired car's frozen gap eventually
+        ranks ahead of still-racing cars whose own gap keeps growing (once
+        their real gap grows past the retiree's stale one), silently
+        shifting every trailing driver's derived position by one for the
+        rest of the race — not specific to synthesized data, this is real
+        production behavior any live race with a retirement would hit.
         """
+        gap_to_leader_raw = _extract_string_field(entry.get("GapToLeader"))
+        if gap_to_leader_raw is not None and gap_to_leader_raw.strip().upper() == _RETIRED_MARKER:
+            was_present = self._car_live_gap_state.pop(car_number, None) is not None
+            return was_present
+
         state = self._car_live_gap_state.setdefault(
             car_number,
             {"position": None, "gap_to_leader": None, "gap_to_ahead": None, "laps_behind": 0},

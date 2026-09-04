@@ -229,6 +229,34 @@ def encoding_maps_from_metrics(metrics: dict[str, Any] | None) -> CategoricalEnc
     return CategoricalEncodingMaps(driver_id_to_code=driver_map, circuit_name_to_code=circuit_map)
 
 
+def holdout_mae_from_metrics(metrics: dict[str, Any] | None) -> float | None:
+    """Recover a tire_deg model's own holdout_mae from its downloaded sidecar metrics dict.
+
+    Used by strategy_service.build_pit_recommendation to scale its confidence
+    Monte Carlo's noise per compound — a compound whose model is measurably
+    less accurate on holdout data should produce a correspondingly less
+    confident recommendation, not the same fixed noise assumption applied to
+    every compound regardless of its own real accuracy.
+
+    Args:
+        metrics: A tire_deg model's own {filename}.metrics.json contents (see
+            train_models.serialize_evaluate_and_upload, which requires this
+            key for every sidecar it writes), or None if no sidecar could be
+            fetched at all.
+    Returns:
+        The sidecar's holdout_mae as a float, or None if missing/not a number
+        (a legacy sidecar predating this key being guaranteed present, or a
+        non-tire_deg model's sidecar) — callers must treat None as "no
+        recoverable MAE," not as an error.
+    """
+    if metrics is None:
+        return None
+    mae = metrics.get("holdout_mae")
+    if not isinstance(mae, int | float):
+        return None
+    return float(mae)
+
+
 def _crc32_fallback_code(value: str, modulus: int = 1000) -> int:
     """The pre-fix deterministic stand-in, numerically identical to strategy_service's/
     prediction_worker's old duplicated `_stable_code`.

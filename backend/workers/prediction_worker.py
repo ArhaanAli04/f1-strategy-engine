@@ -30,7 +30,13 @@ from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.services import alert_service, strategy_service
-from backend.services.ml import pit_predictor, race_simulator, tire_deg_model
+
+# pit_predictor uses the redundant "as X" alias, not a plain import — tests
+# reach it via prediction_worker.pit_predictor (see strategy_service.py's
+# identical note for why); race_simulator/tire_deg_model have no such
+# external access pattern today.
+from backend.services.ml import pit_predictor as pit_predictor
+from backend.services.ml import race_simulator, tire_deg_model
 from backend.services.ml.race_simulator import DriverRaceState, RaceSimulationInput
 from backend.workers.celery_app import app
 
@@ -76,6 +82,15 @@ _model_cache: dict[str, Any] = {}
 # _model_cache — see _load_encoding_maps() and tire_deg_model.py's "Training-
 # time categorical encoding" section.
 _encoding_maps_cache: dict[str, Any] = {}
+# Per tire_deg model filename, its own recovered holdout_mae (or None if that
+# model's sidecar is missing/legacy) — populated alongside _encoding_maps_cache
+# as a side effect of _load_models(), same reasoning. Duplicated from
+# strategy_service.py's identical cache (same no-cross-service-import
+# convention as this module's other duplicated helpers) — needed here as of
+# Checkpoint 4 so _compute_recommendation_fields can call strategy_service.
+# compute_pit_recommendation's confidence Monte Carlo with THIS process's own
+# loaded models, not strategy_service's separate cache.
+_holdout_mae_cache: dict[str, float | None] = {}
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
@@ -169,10 +184,13 @@ def _load_models() -> dict[str, Any]:
 
     Also populates _encoding_maps_cache with each tire_deg model's own recovered
     training-time driver/circuit code map (see tire_deg_model.py's "Training-time
-    categorical encoding" section) — same once-per-process lifecycle as the models
-    themselves, so this function is the single place both caches get populated
-    together, which is what lets apply_incompatible_model_fallbacks alias both in
-    lockstep below.
+    categorical encoding" section) and _holdout_mae_cache with each tire_deg
+    model's own recovered holdout_mae (see strategy_service.compute_pit_
+    recommendation's confidence computation, called from this module's own
+    _compute_recommendation_fields as of Checkpoint 4) — same once-per-process
+    lifecycle as the models themselves, so this function is the single place
+    all three caches get populated together, which is what lets
+    apply_incompatible_model_fallbacks alias all three in lockstep below.
 
     Args:
         None.
@@ -188,12 +206,15 @@ def _load_models() -> dict[str, Any]:
         if filename.startswith("tire_deg_"):
             metrics = _download_metrics_from_s3(filename)
             _encoding_maps_cache[filename] = tire_deg_model.encoding_maps_from_metrics(metrics)
+            _holdout_mae_cache[filename] = tire_deg_model.holdout_mae_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
     # experiment — see docs/simulator-issues-wet-model-and-position-
-    # context.md) by aliasing it (and its encoding maps) to a compatible
-    # fallback for this process.
-    tire_deg_model.apply_incompatible_model_fallbacks(_model_cache, _encoding_maps_cache)
+    # context.md) by aliasing it (and its encoding maps/holdout_mae) to a
+    # compatible fallback for this process.
+    tire_deg_model.apply_incompatible_model_fallbacks(
+        _model_cache, _encoding_maps_cache, _holdout_mae_cache
+    )
     return _model_cache
 
 
@@ -209,6 +230,19 @@ def _load_encoding_maps() -> dict[str, tire_deg_model.CategoricalEncodingMaps | 
     """
     _load_models()
     return _encoding_maps_cache
+
+
+def _load_holdout_mae() -> dict[str, float | None]:
+    """This process's tire_deg holdout-MAE cache, populated as a side effect of _load_models().
+
+    Args:
+        None.
+    Returns:
+        Mapping of tire_deg model filename to its holdout_mae, or None for a
+        filename whose sidecar is missing/legacy.
+    """
+    _load_models()
+    return _holdout_mae_cache
 
 
 def _encoding_maps_for_compound(
@@ -284,10 +318,109 @@ async def _resolve_weather(
     )
 
 
+async def _resolve_position_context_from_redis(
+    async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    driver_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    """Field position/gaps from the live-authoritative f1:{season}:{round}:gaps key.
+
+    Fallback for a driver whose lap_data has no usable position within the
+    _resolve_position_context bound (see that function's own docstring for
+    when this is reached) — reads the same key ingest_live_session.py's
+    _publish_live_gaps and replay_pipeline.py's own gaps-publish both write
+    (CLAUDE.md's Redis Cache Key Schema): SessionGapsResponse-shaped JSON,
+    entries already sorted by position with gap_to_ahead_seconds/
+    gap_to_behind_seconds populated per entry directly from F1's own feed (or
+    FastF1's Time column for a replay) — not a DB reconstruction, so this is
+    at least as authoritative as the DB path it's backstopping, not merely a
+    degraded substitute.
+
+    Args:
+        async_redis_client: Async Redis client.
+        season, round_number: Race weekend identifiers, for the key.
+        driver_id: Driver to locate within the field.
+    Returns:
+        Same shape as _resolve_position_context's return value, or None if
+        the key is missing/unparsable/this driver isn't in it — callers must
+        treat None as "no live-gaps fallback available," not an error.
+    """
+    raw = await async_redis_client.get(f"f1:{season}:{round_number}:gaps")
+    if raw is None:
+        return None
+    try:
+        entries = json.loads(raw)["gaps"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+    index = next(
+        (i for i, entry in enumerate(entries) if entry.get("driver_id") == str(driver_id)), None
+    )
+    if index is None or not isinstance(entries[index].get("position"), int):
+        return None
+
+    def _capped_gap(value: Any) -> float:
+        if value is None:
+            return pit_predictor.MAX_GAP_SECONDS
+        return min(max(float(value), 0.0), pit_predictor.MAX_GAP_SECONDS)
+
+    driver_entry = entries[index]
+    target_ahead_driver_id = None
+    gap_to_car_ahead = pit_predictor.MAX_GAP_SECONDS
+    if index > 0:
+        gap_to_car_ahead = _capped_gap(driver_entry.get("gap_to_ahead_seconds"))
+        target_ahead_driver_id = uuid.UUID(entries[index - 1]["driver_id"])
+
+    target_behind_driver_id = None
+    gap_to_car_behind = pit_predictor.MAX_GAP_SECONDS
+    if index + 1 < len(entries):
+        gap_to_car_behind = _capped_gap(driver_entry.get("gap_to_behind_seconds"))
+        target_behind_driver_id = uuid.UUID(entries[index + 1]["driver_id"])
+
+    return {
+        "position": int(driver_entry["position"]),
+        "gap_to_car_ahead": gap_to_car_ahead,
+        "gap_to_car_behind": gap_to_car_behind,
+        "target_ahead_driver_id": target_ahead_driver_id,
+        "target_behind_driver_id": target_behind_driver_id,
+    }
+
+
 async def _resolve_position_context(
-    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+    db: AsyncSession,
+    async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    current_lap: int,
+    season: int,
+    round_number: int,
 ) -> dict[str, Any]:
     """Current field position and immediate track-position neighbors for one driver.
+
+    Bounded to lap_number <= current_lap — previously unbounded, which read
+    each driver's absolute-latest DB row regardless of the requesting
+    driver's own current lap. For a session replayed/backfilled from
+    ingest_historical.py (the whole race already in lap_data ahead of any one
+    driver's own in-progress prediction), that silently ordered the field by
+    FINISHING position and used race-END cumulative-time gaps for every
+    prediction — undercut_score/overcut_score came out frozen and mostly
+    saturated for a whole replay (see CLAUDE.md's Deferred Wiring entry this
+    closes). Same fix pattern already proven in this module's own
+    _build_race_state (position_subq/ref_lap, the Monte Carlo /simulate path)
+    — this is that same pattern's second call site catching up.
+
+    Falls back to the live-authoritative f1:{season}:{round}:gaps Redis key
+    (_resolve_position_context_from_redis) whenever the bounded lap_data
+    query can't resolve driver_id's own position — the case for a live
+    session during its brief connection window before enough GapToLeader
+    messages have streamed to rank anyone (ingest_live_session.py's
+    _recompute_positions), or for any lap ingested before Checkpoint 1's live
+    ingestor fix landed (position was never set at all previously; ON
+    CONFLICT DO NOTHING means those rows stay NULL permanently — same
+    accepted-limitation shape as the compound-tracking gap documented in
+    docs/day36-fixes.md's Bug 5). A historical session never needs this
+    fallback: ingest_historical.py populates position on every row.
 
     Uses the same "latest LapData row per driver, ordered by position" pattern
     as _build_race_state below and alert_service._latest_positions — the
@@ -298,18 +431,24 @@ async def _resolve_position_context(
 
     Args:
         db: Async DB session.
+        async_redis_client: Async Redis client, for the live-gaps fallback.
         session_id: Session to read.
         driver_id: Driver to locate within the field.
+        current_lap: Only consider lap_data rows at or before this lap.
+        season, round_number: Race weekend identifiers, for the Redis
+            fallback's key.
     Returns:
         Dict with position, gap_to_car_ahead, gap_to_car_behind,
         target_ahead_driver_id, target_behind_driver_id. The two target ids are
         None for the leader/last car, and all fields fall back to
         MAX_GAP_SECONDS/no-target/back-of-field when driver_id has no
-        persisted lap yet in this session (e.g. the very first lap ingested).
+        resolvable position at all (neither a bounded lap_data row nor a
+        live-gaps entry) — e.g. the very first lap ingested, before anyone
+        has a position yet.
     """
     subq = (
         select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
-        .where(LapData.session_id == session_id)
+        .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
         .group_by(LapData.driver_id)
         .subquery()
     )
@@ -326,6 +465,11 @@ async def _resolve_position_context(
     index = next((i for i, lap in enumerate(field) if lap.driver_id == driver_id), None)
 
     if index is None:
+        redis_result = await _resolve_position_context_from_redis(
+            async_redis_client, season, round_number, driver_id
+        )
+        if redis_result is not None:
+            return redis_result
         return {
             "position": len(field) + 1,
             "gap_to_car_ahead": pit_predictor.MAX_GAP_SECONDS,
@@ -370,6 +514,7 @@ async def _resolve_inference_context(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
     compound: str,
+    current_lap: int,
 ) -> dict[str, Any]:
     """Resolve circuit/season/round/total_laps/weather/position context for one driver+lap.
 
@@ -379,6 +524,9 @@ async def _resolve_inference_context(
         session_id: Session the lap belongs to.
         driver_id: Driver to resolve field position/neighbors for.
         compound: Current tyre compound, for the weather DB-average fallback.
+        current_lap: This prediction's own lap number — bounds
+            _resolve_position_context's field-position query (see that
+            function's docstring).
     Returns:
         Dict with circuit_id, circuit_name, season, round_number, total_laps,
         track_temp, air_temp, plus _resolve_position_context's position,
@@ -399,7 +547,9 @@ async def _resolve_inference_context(
     track_temp, air_temp = await _resolve_weather(
         async_redis_client, db, season, round_number, circuit_id, compound
     )
-    position_context = await _resolve_position_context(db, session_id, driver_id)
+    position_context = await _resolve_position_context(
+        db, async_redis_client, session_id, driver_id, current_lap, season, round_number
+    )
 
     return {
         "circuit_id": circuit_id,
@@ -447,8 +597,12 @@ def _run_inference(
             gap_to_car_behind.
         driver_id: Driver this prediction is for, for the driver_id_encoded feature.
     Returns:
-        Prediction fields matching the StrategyPrediction model; undercut_score
-        and overcut_score are placeholder 0.0, overwritten by the caller.
+        Prediction fields matching the StrategyPrediction model; undercut_score,
+        overcut_score, and confidence_score are placeholder 0.0, overwritten
+        by the caller (_persist_and_publish, the latter via
+        _compute_recommendation_fields). recommended_pit_lap/window_start/
+        window_end/recommended_compound/explanation are NOT included here at
+        all — they're added entirely by _compute_recommendation_fields.
     """
     compound = str(context.get("compound", "")).upper()
     suffix = _COMPOUND_TO_MODEL_SUFFIX.get(compound, "medium")
@@ -469,42 +623,35 @@ def _run_inference(
         tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
     )
 
-    tire_deg_features = [
-        [
-            lap_number,
-            compound_encoded,
-            tyre_age_laps,
-            fuel_adjusted_time,
-            circuit_code,
-            driver_code,
-        ]
-    ]
-
-    # Fallback defaults — used both when a model never loaded (deg_model is
+    # Fallback default — used both when a model never loaded (deg_model is
     # None) and when a loaded model raises during inference (corrupt
     # weights, a shape mismatch, etc.): either way the worker must not crash,
     # it must degrade to a null prediction and keep processing subsequent
-    # laps/drivers.
-    tire_life_remaining = 0.0
+    # laps/drivers. predicted_life_remaining (laps until predicted
+    # degradation crosses tire_deg_model.DEGRADATION_THRESHOLD_SECONDS) is
+    # the ONLY tire_deg output this function needs — the raw per-lap
+    # lap_time_delta prediction deg_model.predict() itself returns is used
+    # only as an input to predict_life_remaining_batch below, never
+    # persisted directly (that WAS a bug: StrategyPrediction.
+    # tire_life_remaining previously stored this raw, sometimes-negative
+    # delta instead of a genuine laps-remaining count — see CLAUDE.md's
+    # now-closed Deferred Wiring entry, fixed in this function's return
+    # dict below).
     predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
     if deg_model is not None:
         try:
-            # predict() and predict_life_remaining_batch() are treated as one
-            # unit (same model, and pit_features below needs both to be
-            # mutually consistent) rather than falling back independently.
             with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
-                tire_life_remaining = float(deg_model.predict(tire_deg_features)[0])
-            predicted_life_remaining = float(
-                tire_deg_model.predict_life_remaining_batch(
-                    deg_model,
-                    np.array([lap_number]),
-                    np.array([compound_encoded]),
-                    np.array([tyre_age_laps]),
-                    np.array([fuel_adjusted_time]),
-                    np.array([circuit_code]),
-                    np.array([driver_code]),
-                )[0]
-            )
+                predicted_life_remaining = float(
+                    tire_deg_model.predict_life_remaining_batch(
+                        deg_model,
+                        np.array([lap_number]),
+                        np.array([compound_encoded]),
+                        np.array([tyre_age_laps]),
+                        np.array([fuel_adjusted_time]),
+                        np.array([circuit_code]),
+                        np.array([driver_code]),
+                    )[0]
+                )
         except Exception as exc:  # noqa: BLE001 — degrade to null prediction, never crash the worker
             sentry_sdk.capture_exception(exc)
             logger.warning(
@@ -512,7 +659,6 @@ def _run_inference(
                 driver_id,
                 exc_info=True,
             )
-            tire_life_remaining = 0.0
             predicted_life_remaining = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
 
     safety_car_probability = 0.0
@@ -559,11 +705,23 @@ def _run_inference(
             pit_probability = 0.0
 
     return {
-        "optimal_pit_lap": lap_number + max(int(tire_life_remaining), 1),
+        # FIXED (Checkpoint 4): was lap_number + max(int(tire_life_remaining), 1)
+        # using the OLD tire_life_remaining (the raw lap_time_delta prediction,
+        # a small ±2s float with no laps-count meaning) — collapsed to
+        # current_lap + 1 almost always. predicted_life_remaining is the
+        # genuine laps-until-degradation-threshold count.
+        "optimal_pit_lap": lap_number + max(int(predicted_life_remaining), 1),
         "pit_probability": pit_probability,
         "undercut_score": 0.0,
         "overcut_score": 0.0,
-        "tire_life_remaining": tire_life_remaining,
+        # FIXED (Checkpoint 4): was the raw tire_deg lap_time_delta prediction
+        # (sometimes negative, no "remaining laps" meaning despite the column
+        # name) — see CLAUDE.md's now-closed Deferred Wiring entry.
+        "tire_life_remaining": predicted_life_remaining,
+        # Placeholder, overwritten by _persist_and_publish's own call to
+        # _compute_recommendation_fields (Checkpoint 4) — that function's
+        # confidence_score is build_pit_recommendation's real Monte Carlo
+        # output, not available inside this synchronous function.
         "confidence_score": 0.0,
         "model_version": _MODEL_VERSION_TAG,
     }
@@ -653,13 +811,157 @@ async def _resolve_undercut_overcut(
     return undercut_score, overcut_score
 
 
+def _compute_recommendation_fields(
+    models: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    mae_cache: dict[str, float | None],
+    driver_id: uuid.UUID,
+    context: dict[str, Any],
+    resolved: dict[str, Any],
+    undercut_score: float,
+    overcut_score: float,
+) -> dict[str, Any]:
+    """The Checkpoint 4 recommendation-engine fields, for the SAME StrategyPrediction
+    row _run_inference's fields go into.
+
+    Reimplements get_pit_window_with_explanation's own chain — strategy_service.
+    compute_pit_recommendation -> tire_deg_recommendation_contributions ->
+    pit_predictor_current_contributions -> build_pit_recommendation_explanation
+    — around THIS task's own already-resolved per-lap state (context/resolved)
+    instead of that function's own DB reads (strategy_service._current_state /
+    _resolve_field_neighbors). This is not optional or a performance shortcut:
+    process_lap (a separate, independently-ordered Celery task dispatched
+    alongside run_strategy_prediction by the same ingestor — see
+    ingest_live_session.py/replay_pipeline.py) may not have committed THIS
+    lap's own LapData row by the time this task runs, so a fresh DB query for
+    "the driver's latest lap" is not guaranteed to see it — exactly why
+    _run_inference itself already takes context directly rather than
+    re-querying (see that function's own docstring). compute_pit_recommendation
+    was split out of build_pit_recommendation in Checkpoint 4 specifically to
+    make this state-injectable call possible.
+
+    undercut_score/overcut_score are passed in rather than recomputed — the
+    caller (_persist_and_publish) already resolved them via
+    _resolve_undercut_overcut, against the SAME two neighbours
+    (resolved["target_ahead_driver_id"]/target_behind_driver_id) this
+    function's own explanation needs; calling strategy_service.
+    get_undercut_score/get_overcut_score a second time here would be pure
+    redundant work (each call is itself a cache-aside Monte Carlo).
+
+    Args:
+        models, maps_cache, mae_cache: This process's loaded model registry
+            and its two per-tire_deg-model sidecar caches.
+        driver_id: Driver this prediction is for.
+        context: Driver + lap context — expects compound, tyre_age_laps, lap_number.
+        resolved: Output of _resolve_inference_context — circuit_name, total_laps,
+            position, gap_to_car_ahead, gap_to_car_behind, target_ahead_driver_id,
+            target_behind_driver_id.
+        undercut_score, overcut_score: Already resolved by the caller.
+    Returns:
+        Dict with recommended_pit_lap, window_start, window_end,
+        recommended_compound, confidence_score, explanation (a plain JSON-
+        serializable dict via .model_dump(mode="json"), or None) — all
+        None/0.0/None if build_pit_recommendation's own candidate search
+        returns nothing (e.g. current_lap >= total_laps, race essentially
+        over) or any sub-computation raises. Degrades gracefully, never
+        crashes the worker — same convention as every other _run_inference
+        sub-computation.
+    """
+    empty_fields: dict[str, Any] = {
+        "recommended_pit_lap": None,
+        "window_start": None,
+        "window_end": None,
+        "recommended_compound": None,
+        "confidence_score": 0.0,
+        "explanation": None,
+    }
+    try:
+        compound = str(context.get("compound", "")).upper()
+        lap_number = int(context.get("lap_number", 0))
+        tyre_age_laps = int(context.get("tyre_age_laps", 0))
+        total_laps = resolved["total_laps"] or lap_number
+        recommendation_state = {
+            "lap_number": lap_number,
+            "compound": compound,
+            "tyre_age_laps": tyre_age_laps,
+            "total_laps": total_laps,
+            "circuit_name": resolved["circuit_name"],
+        }
+
+        candidates = strategy_service.compute_pit_recommendation(
+            models, maps_cache, mae_cache, driver_id, recommendation_state
+        )
+        if not candidates:
+            return empty_fields
+
+        top = candidates[0]
+        fields: dict[str, Any] = {
+            "recommended_pit_lap": top["pit_lap"],
+            "window_start": top["window_start"],
+            "window_end": top["window_end"],
+            "recommended_compound": top["recommended_compound"],
+            "confidence_score": top["confidence_score"] or 0.0,
+        }
+
+        tire_deg_contributions = strategy_service.tire_deg_recommendation_contributions(
+            models,
+            maps_cache,
+            driver_id,
+            resolved["circuit_name"],
+            total_laps,
+            top["pit_lap"],
+            top["recommended_compound"],
+        )
+        neighbors = {
+            "position": resolved["position"],
+            "gap_to_car_ahead": resolved["gap_to_car_ahead"],
+            "gap_to_car_behind": resolved["gap_to_car_behind"],
+            "target_ahead_driver_id": resolved["target_ahead_driver_id"],
+            "target_behind_driver_id": resolved["target_behind_driver_id"],
+        }
+        pit_predictor_contributions = strategy_service.pit_predictor_current_contributions(
+            models, maps_cache, driver_id, recommendation_state, neighbors
+        )
+        explanation = strategy_service.build_pit_recommendation_explanation(
+            pit_lap=top["pit_lap"],
+            recommended_compound=top["recommended_compound"],
+            confidence=top["confidence_score"],
+            tyre_age_laps=tyre_age_laps,
+            position=neighbors["position"],
+            gap_to_car_ahead=neighbors["gap_to_car_ahead"],
+            target_ahead_driver_id=neighbors["target_ahead_driver_id"],
+            gap_to_car_behind=neighbors["gap_to_car_behind"],
+            target_behind_driver_id=neighbors["target_behind_driver_id"],
+            undercut_score=(
+                undercut_score if neighbors["target_ahead_driver_id"] is not None else None
+            ),
+            overcut_score=(
+                overcut_score if neighbors["target_behind_driver_id"] is not None else None
+            ),
+            tire_deg_contributions=tire_deg_contributions,
+            pit_predictor_contributions=pit_predictor_contributions,
+        )
+        fields["explanation"] = explanation.model_dump(mode="json")
+        return fields
+    except Exception as exc:  # noqa: BLE001 — degrade to null recommendation, never crash the worker
+        sentry_sdk.capture_exception(exc)
+        logger.warning(
+            "pit recommendation computation failed for driver %s, falling back to null",
+            driver_id,
+            exc_info=True,
+        )
+        return empty_fields
+
+
 async def _persist_and_publish(context: dict[str, Any]) -> None:
     models = _load_models()
     maps_cache = _load_encoding_maps()
+    mae_cache = _load_holdout_mae()
 
     session_id = uuid.UUID(str(context["session_id"]))
     driver_id = uuid.UUID(str(context["driver_id"]))
     compound = str(context.get("compound", "")).upper()
+    lap_number = int(context.get("lap_number", 0))
 
     async_redis_client: aioredis.Redis = aioredis.from_url(  # type: ignore[type-arg]
         get_redis_settings().redis_url, decode_responses=True
@@ -668,7 +970,7 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
     try:
         async with session_factory() as db:
             resolved = await _resolve_inference_context(
-                db, async_redis_client, session_id, driver_id, compound
+                db, async_redis_client, session_id, driver_id, compound, lap_number
             )
             prediction = _run_inference(models, maps_cache, context, resolved, driver_id)
             undercut_score, overcut_score = await _resolve_undercut_overcut(
@@ -676,6 +978,18 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
             )
             prediction["undercut_score"] = undercut_score
             prediction["overcut_score"] = overcut_score
+            prediction.update(
+                _compute_recommendation_fields(
+                    models,
+                    maps_cache,
+                    mae_cache,
+                    driver_id,
+                    context,
+                    resolved,
+                    undercut_score,
+                    overcut_score,
+                )
+            )
 
             row = StrategyPrediction(
                 id=uuid.uuid4(),

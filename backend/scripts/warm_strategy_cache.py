@@ -13,8 +13,8 @@ is currently empty (no seed_teams.py yet), so it cannot be used to enumerate
 distinct driver_id for the session — which also means this can only warm
 predictions once at least one lap has been recorded for each driver, not at
 the literal instant a session opens with zero laps. That's consistent with
-get_optimal_pit_window's own requirement (via _current_state) of at least one
-lap_data row per driver.
+build_pit_recommendation's own requirement (via _current_state) of at least
+one lap_data row per driver.
 
 Graceful no-op (log a warning, exit 0, never raise) in two cases, per spec:
 - session_id doesn't resolve to a real session (resolve_season_round's

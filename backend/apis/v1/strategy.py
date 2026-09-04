@@ -266,9 +266,16 @@ async def simulate_strategy(
     response_model=list[PitWindowResponse],
     summary="Get predicted optimal pit windows for a driver",
     description=(
-        "Returns predicted pit lap(s) with a projected total time delta and, "
-        "when available, the top SHAP feature contributions behind the "
-        "prediction (tyre age, gap to rivals, safety car probability, etc.)."
+        "Returns up to 3 predicted pit lap candidates, ranked by projected total "
+        "time delta. Only the #1 (recommended) candidate carries a confidence "
+        "score and a combined explanation: tire_deg SHAP for the recommended "
+        "stint (tyre age, fuel-adjusted pace, circuit, driver), pit_predictor "
+        "SHAP for the driver's current rival-gap context (gap to car ahead/"
+        "behind, safety car probability, track position), plus undercut/overcut "
+        "probabilities against the real track-position neighbours — combined "
+        "into structured facts and a plain-English narrative. window_start/"
+        "window_end are a narrow band around the recommendation, shared across "
+        "all returned candidates, not a per-candidate range."
     ),
     openapi_extra={
         "responses": {
@@ -281,21 +288,54 @@ async def simulate_strategy(
                                 "window_start": 22,
                                 "window_end": 26,
                                 "projected_total_delta_seconds": -4.8,
-                                "shap_explanation": [
-                                    {
-                                        "feature_name": "predicted_life_remaining",
-                                        "value": 3.0,
-                                        "contribution": 0.31,
-                                        "direction": "+",
-                                    },
-                                    {
-                                        "feature_name": "safety_car_probability",
-                                        "value": 0.12,
-                                        "contribution": -0.05,
-                                        "direction": "-",
-                                    },
-                                ],
-                            }
+                                "recommended_compound": "MEDIUM",
+                                "confidence_score": 0.71,
+                                "explanation": {
+                                    "narrative": (
+                                        "Lap 24 on MEDIUM is the recommended pit (71% "
+                                        "confidence). Tyre age is currently 24 laps, "
+                                        "degradation accelerating. Gap to the car behind "
+                                        "is 8.2s — safe to pit without losing the position."
+                                    ),
+                                    "facts": [
+                                        {
+                                            "label": "Recommended pit lap",
+                                            "value": "Lap 24",
+                                            "source": "tire_deg",
+                                        },
+                                        {
+                                            "label": "Gap to car behind",
+                                            "value": "8.2s",
+                                            "source": "pit_predictor",
+                                        },
+                                    ],
+                                    "tire_deg_shap": [
+                                        {
+                                            "feature_name": "tyre_age_laps",
+                                            "value": 24.0,
+                                            "contribution": 0.31,
+                                            "direction": "+",
+                                        }
+                                    ],
+                                    "pit_predictor_shap": [
+                                        {
+                                            "feature_name": "gap_to_car_behind",
+                                            "value": 8.2,
+                                            "contribution": -0.22,
+                                            "direction": "-",
+                                        }
+                                    ],
+                                },
+                            },
+                            {
+                                "pit_lap": 25,
+                                "window_start": 22,
+                                "window_end": 26,
+                                "projected_total_delta_seconds": -4.1,
+                                "recommended_compound": "HARD",
+                                "confidence_score": None,
+                                "explanation": None,
+                            },
                         ]
                     }
                 }

@@ -664,3 +664,219 @@ async def test_build_race_state_baseline_zero_when_field_has_none(
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(requesting_driver_id))
     assert driver_state.baseline_lap_time_seconds == 0.0
+
+
+# --- _resolve_position_context: core-feature-rebuild Checkpoint 1 ---
+# (current_lap bound + live-gaps Redis fallback — see
+# docs/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
+# Deferred Wiring entry on _resolve_position_context's missing bound.)
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_bounds_query_by_current_lap(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """The field-position subquery must filter lap_number <= current_lap —
+    otherwise a fully-ingested/replayed session reads every OTHER driver's
+    FINAL race classification regardless of the requesting driver's own
+    current lap (same bug shape _build_race_state's position_subq already
+    fixed for the Monte Carlo path — see this file's own tests above)."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    current_lap = 20
+
+    captured_queries: list[Any] = []
+
+    async def _execute_side_effect(query: Any, *args: Any, **kwargs: Any) -> Any:
+        captured_queries.append(query)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        return result
+
+    mock_db_session.execute.side_effect = _execute_side_effect
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, current_lap, 2026, 10
+    )
+
+    assert len(captured_queries) == 1
+    compiled = str(captured_queries[0].compile(compile_kwargs={"literal_binds": True}))
+    assert f"lap_number <= {current_lap}" in compiled
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_falls_back_to_redis_when_db_position_missing(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A live session's lap_data has no usable position (e.g. before enough
+    GapToLeader messages have streamed to rank anyone, or a pre-Checkpoint-1
+    NULL row) — must fall back to the live-authoritative
+    f1:{season}:{round}:gaps key instead of defaulting to "no neighbours"."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    ahead_id = uuid.uuid4()
+    behind_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps(
+            {
+                "gaps": [
+                    {
+                        "driver_id": str(ahead_id),
+                        "position": 1,
+                        "gap_to_ahead_seconds": 0.0,
+                        "gap_to_behind_seconds": 2.5,
+                    },
+                    {
+                        "driver_id": str(driver_id),
+                        "position": 2,
+                        "gap_to_ahead_seconds": 2.5,
+                        "gap_to_behind_seconds": 4.0,
+                    },
+                    {
+                        "driver_id": str(behind_id),
+                        "position": 3,
+                        "gap_to_ahead_seconds": 4.0,
+                        "gap_to_behind_seconds": 0.0,
+                    },
+                ]
+            }
+        ),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 2
+    assert result["gap_to_car_ahead"] == pytest.approx(2.5)
+    assert result["gap_to_car_behind"] == pytest.approx(4.0)
+    assert result["target_ahead_driver_id"] == ahead_id
+    assert result["target_behind_driver_id"] == behind_id
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_leader_has_no_ahead_target(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    behind_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps(
+            {
+                "gaps": [
+                    {
+                        "driver_id": str(driver_id),
+                        "position": 1,
+                        "gap_to_ahead_seconds": 0.0,
+                        "gap_to_behind_seconds": 3.1,
+                    },
+                    {
+                        "driver_id": str(behind_id),
+                        "position": 2,
+                        "gap_to_ahead_seconds": 3.1,
+                        "gap_to_behind_seconds": 0.0,
+                    },
+                ]
+            }
+        ),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+    assert result["target_behind_driver_id"] == behind_id
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_tolerates_malformed_payload(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set("f1:2026:10:gaps", "not valid json")
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_driver_not_in_gaps_list(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps({"gaps": [{"driver_id": str(other_id), "position": 1}]}),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_returns_hardcoded_default_when_nothing_resolves(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """Neither the bounded DB query nor the Redis fallback has anything for
+    this driver (e.g. the very first lap ever ingested) — must reproduce the
+    original pre-Checkpoint-1 "no neighbours" default, not raise."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result == {
+        "position": 1,
+        "gap_to_car_ahead": prediction_worker.pit_predictor.MAX_GAP_SECONDS,
+        "gap_to_car_behind": prediction_worker.pit_predictor.MAX_GAP_SECONDS,
+        "target_ahead_driver_id": None,
+        "target_behind_driver_id": None,
+    }
