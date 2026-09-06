@@ -507,43 +507,37 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Deferred items — batch 3 (item 5)
-Status:   Item 5 investigated and closed with a corrected scope: the
-          driver-skill-feature ask itself was evaluated offline
-          (scripts/evaluate_driver_features.py) and found NOT a
-          clean win (helps HARD/INTER tire_deg, hurts SOFT/MEDIUM,
-          small win for pit_predictor only) — deliberately not
-          added. The investigation surfaced a much bigger, separate
-          bug along the way: driver_id_encoded/circuit_id_encoded
-          at inference never matched the real training-time code
-          (a crc32 stand-in was used instead), inflating tire_deg
-          holdout MAE by 50-265%. That IS fixed — each tire_deg
-          model's sidecar now carries its real training-time code
-          map, resolved per-pipeline-call, graceful crc32 fallback
-          for any missing map/id. Validated via a real local retrain
-          (4 of 5 tire_deg models promoted with real maps; holdout
-          MAEs matched the offline evaluation to 4 decimal places)
-          — see this file's own ✅ Notes entry ("Driver/circuit
-          encoding persisted"). Also incidentally validated item 9's
-          promotion guard for the first time against a real run: it
-          correctly force-promoted working candidates over 3
-          corrupted incumbent .pkl files. Item 4 (predicted_finish_
-          time) and item 7 (NULL-lap cumulative-sum) remain closed
-          from prior sessions — see their own ✅ Notes entries.
-          3 items remain in
-          docs/day-deferred-fixes-session2-handoff.md: 6 (strategic
-          adaptation — research-first), 8 (WET model retrain, low
-          value, unblocked since item 9), 10 (track-condition
-          input).
-Next:     Continue down the remaining 3 deferred items, pick per
-          session based on priority/scope. Fly.io deployment (Day
-          40 A4) after deferred items are addressed. Note:
-          train-models.yml (CI) still fetches zero 2026 laps (see
-          the escalated GitHub-Actions/FastF1 deferred item) — a
-          real LOCAL training run (item 5's fix) has now exercised
-          item 9's guard for the first time, but the CI path itself
-          remains untested; resolve or consciously accept the
-          base-corpus-only outcome before triggering a real CI run.
+Day:      Core feature rebuild — What-If Strategy Simulator (multi-scenario compare)
+Status:   All 6 checkpoints of docs/core-feature-rebuild-whatif-simulator.md
+          complete (see that doc's §6 and this file's own ✅ Notes entry for
+          full detail): CP1 memoized _tire_deg_predictions (~50s -> ~7-10s
+          per simulate_race call, bit-identical output), CP2 exposed
+          position_probabilities/mean_position on the response, CP3 added
+          server-orchestrated multi-scenario compare (SimulateStrategyRequest
+          .scenarios, shared-seed common random numbers) + starting_position,
+          CP4 built PositionDistributionChart.tsx + a Single Plan/Compare
+          Scenarios mode toggle, CP5 ported desktop in full and mobile's data
+          layer only (native chart deferred, disclosed in mobile/src/
+          README.md), CP6 is this doc update. Validated end-to-end against
+          the real running stack (3-scenario compare, 34s total, genuinely
+          distinguishable outcomes). Along the way, discovered (and
+          partially fixed) that PlanExplanationCard's narrative text can
+          contradict the real Monte Carlo position_gain_loss it explains —
+          see the _build_plan_explanation entry in Deferred Wiring above
+          (Option 3 wording mitigation shipped to all 3 clients; the full
+          fix — real tire_deg-derived degradation + per-lap rival pit
+          events extracted from the simulation itself — is deferred to a
+          dedicated future session, NOT started).
+Next:     A dedicated session for the _build_plan_explanation full fix
+          (two parts — see Deferred Wiring's own entry for the exact scope),
+          or mobile's deferred Compare Scenarios UI/native chart, or return
+          to docs/day-deferred-fixes-session2-handoff.md's remaining 3 items
+          (6: strategic adaptation research-first, 8: WET model retrain,
+          10: track-condition input). Fly.io deployment (Day 40 A4) still
+          pending behind whichever of the above gets picked up first. Note:
+          train-models.yml (CI) still fetches zero 2026 laps (see the
+          escalated GitHub-Actions/FastF1 deferred item) — unrelated to this
+          session's work, still unresolved.
 Blockers: No physical device for testing — Android emulator
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
@@ -751,6 +745,59 @@ These are not schema changes but known integration gaps. Audited Day 39:
 each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
+
+- **[deferred, real architectural work] `prediction_worker._build_plan_explanation`'s
+  narrative can contradict the real Monte Carlo `position_gain_loss` it's
+  supposed to be explaining.** `drivers_overtaken` is a frozen gap snapshot
+  at `current_lap`, and `fresh_tyre_gain_per_lap` comes from a hardcoded
+  per-compound constant (`_FRESH_TYRE_GAIN_PER_LAP_SECONDS = {"HARD": 0.3,
+  "MEDIUM": 0.5, "SOFT": 0.8}`) — `total_recoverable_seconds` then assumes
+  every rival in that list holds their exact current pace for the rest of
+  the race, never pitting again, tyres never degrading. This is a real
+  divergence from the actual simulation: `race_simulator.simulate_race`'s
+  per-lap loop gives every OTHER driver the pit_predictor model's own
+  autonomous pit decision every lap for the whole simulated remainder
+  (`forced_pit_laps` only ever overrides the requester's own flag), and
+  every rival's tyre degradation is modelled too — so `position_gain_loss`/
+  `mean_position` already account for rivals eventually pitting and losing
+  time, while the narrative explaining that number does not, and can
+  flatly contradict it. Discovered 2026-09-06 building the What-If
+  Simulator's multi-scenario compare feature (see
+  docs/core-feature-rebuild-whatif-simulator.md §7 for the full writeup)
+  — the SAME misleading "not enough to recover on fresh tyres" text
+  repeating almost verbatim across two different candidate pit laps, side
+  by side in the new Compare Scenarios view, made the disconnect from the
+  real simulation obvious in a way a single-scenario view never had.
+  - **Mitigated 2026-09-06 (Option 3, cheap/honest, shipped to all 3
+    clients):** removed the "sufficient"/"not enough to recover" verdict
+    language entirely from `PlanExplanationCard` (web/desktop's inline copy
+    in `SimulatorPage.tsx`, mobile's `components/strategy/
+    PlanExplanationCard.tsx`) — the remaining text states the assumption
+    explicitly ("this is a simplified snapshot that assumes rivals hold
+    their current pace with no further pit stops of their own — the Monte
+    Carlo position change above already accounts for rivals' own tyre wear
+    and pit stops") instead of asserting a conclusion the real number can
+    contradict. Copy-only — no model/data changes, and it doesn't make the
+    narrative a genuine explanation of the real number, only stops it from
+    actively contradicting one.
+  - **Full fix, NOT done — two parts, real engineering effort:**
+    (a) Replace the hardcoded constants with a real tire_deg model call —
+    predict the OLD compound's degradation delta at its current/growing
+    tyre age vs. the NEW compound at `tyre_age=0`, for the requester
+    specifically. Removes the "magic number," still doesn't model rivals
+    pitting. Smaller, contained change (~30-60 min).
+    (b) Extract real per-lap pit events for every rival from the actual
+    simulation run and build the narrative from that — the real fix.
+    `race_simulator.simulate_race`/`RaceSimulationResult` currently returns
+    only FINAL AGGREGATED distributions per driver
+    (`DriverPositionDistribution`), no per-lap history survives the call at
+    all. Needs a new return shape (e.g. per-driver per-lap `pit_flags`/
+    compound/position across some or all of the 1000 sims, or a
+    representative summary) threaded through `_run_one_scenario`/
+    `_build_plan_explanation`. Likely several hours on its own — not a
+    quick follow-on to (a). Held for a dedicated future session per
+    explicit user decision 2026-09-06 — do not fold into an unrelated
+    change.
 
 - **[✅ done 2026-09-02] Cumulative-sum gap/race-time reconstruction (`SUM(lap_time_
   seconds) ... WHERE lap_time_seconds IS NOT NULL`) silently produced
@@ -1446,6 +1493,62 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Core feature rebuild — What-If Simulator multi-scenario compare +
+position-probability distribution (✅ done 2026-09-06, 6 checkpoints):**
+Before: `race_simulator.simulate_race` already computed a full
+finishing-position probability distribution from 1000 real simulations
+(`DriverPositionDistribution.position_probabilities`) for every driver on
+every call — silently discarded before reaching the API or frontend — and
+`POST /simulate` only ever ran ONE scenario per request, with no mechanism
+to compare candidate pit laps side by side (see
+docs/core-feature-rebuild-whatif-simulator.md). Fixed: CP1 memoized
+`_tire_deg_predictions` on `(tyre_age, driver_id_encoded, compound_encoded)`
+— the only per-(sim,driver)-varying inputs — cutting one `simulate_race`
+call from ~50s to ~7-10s on a real ~22-driver field (bit-identical output,
+confirmed via a seeded test against the un-deduped path — this is exact
+memoization, not an approximation), which is what made server-orchestrated
+multi-scenario comparison viable at all. CP2 exposed
+`position_probabilities`/`mean_position` on `SimulatedRaceOutcome` (a list
+of `{position, probability}`, not a `dict[int, float]`, avoiding a
+dependency on Pydantic's JSON-string-key coercion). CP3 added
+`SimulateStrategyRequest.scenarios` (1-4 `ScenarioPlan`s, mutually
+exclusive with the existing top-level `pit_laps`/`compounds`) — one
+`_build_race_state` call, N `race_simulator.simulate_race` calls sharing
+ONE random seed (`secrets.randbelow`) across all N so the comparison
+isolates each scenario's own pit-lap decision from independently-drawn
+safety-car/noise randomness ("common random numbers" — verified via two
+identical scenarios producing bit-identical Monte Carlo output in a real
+integration test); also added top-level
+`SimulateStrategyResponse.starting_position` so the frontend can compute
+P(Gain)/P(Hold)/P(Lose) without reverse-engineering it from the
+already-rounded `position_gain_loss`. CP4 built a new
+`PositionDistributionChart.tsx` (`components/strategy/`) — a grouped bar
+chart (x=finishing position, one series per scenario, the dataviz skill's
+validated 4-slot dark categorical palette) plus a risk/reward table — and a
+Single Plan/Compare Scenarios mode toggle in `SimulatorPage.tsx` (Compare
+mode is always a single pit lap per scenario, matching the vision's literal
+"lap 30 vs 33 vs 36" example — the existing sequential "+ Add Pit Stop"
+multi-stop planner is untouched, deliberately kept as a separate mental
+model). CP5 ported the full feature to desktop (verbatim
+`PositionDistributionChart.tsx` copy — zero web-specific dependencies — an
+adapted `SimulatorPage.tsx`, and CSV export extended with the new columns)
+and synced mobile's data layer/types only — a native equivalent of a
+dynamically-sized grouped bar chart was scoped out as a dedicated future
+effort, disclosed in `mobile/src/README.md`. **Validated end-to-end against
+the real running stack:** a genuine 3-scenario compare request (pit laps
+25/28/31, Belgian GP 2026 R10) resolved in 34s total (well under the 60s
+client timeout), each scenario producing genuinely different, plausible
+outcomes (mean position 6.83/6.55/6.11). 302 backend unit + 3 relevant
+integration tests, 54 web vitest tests, `tsc` clean on web/desktop/mobile,
+production `vite build` succeeds on web/desktop. Also fixed along the way
+(Option 3 wording mitigation, all 3 clients) — see the
+`_build_plan_explanation` entry in Deferred Wiring above for the fuller,
+NOT-yet-fixed issue this surfaced: `PlanExplanationCard`'s narrative no
+longer asserts a "sufficient"/"not enough to recover" verdict that could
+contradict the real Monte Carlo `position_gain_loss` displayed right above
+it. Full checkpoint-by-checkpoint detail:
+docs/core-feature-rebuild-whatif-simulator.md §6-§7.
 
 **Core feature rebuild — pit-window recommendation engine (✅ fixed
 2026-09-04, 7 checkpoints):** Before: `/pit-window` returned the

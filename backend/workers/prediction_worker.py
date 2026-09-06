@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import secrets
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1419,16 +1420,148 @@ def _build_plan_explanation(
     }
 
 
+def _shape_position_probabilities(
+    distribution: race_simulator.DriverPositionDistribution,
+) -> list[dict[str, Any]]:
+    """PositionProbability-shaped list from a DriverPositionDistribution, sparse and sorted.
+
+    race_simulator.simulate_race returns a DENSE dict covering every position
+    in the field (n_drivers entries) for every driver — most of which are
+    0.0 for any single driver in a real ~20-car field (e.g. a midfield
+    driver has genuinely zero probability of finishing P1). Filtering those
+    out keeps the API response compact without losing information. Sorted
+    by position ascending (not probability descending) so a frontend chart's
+    x-axis renders in natural finishing-position order regardless of the
+    source dict's insertion order.
+
+    Args:
+        distribution: One driver's DriverPositionDistribution from a
+            race_simulator.simulate_race call.
+    Returns:
+        PositionProbability-shaped dicts, position ascending, probability > 0.0 only.
+    """
+    return [
+        {"position": position, "probability": probability}
+        for position, probability in sorted(distribution.position_probabilities.items())
+        if probability > 0.0
+    ]
+
+
+def _run_one_scenario(
+    race_state: RaceSimulationInput,
+    requester_state: DriverRaceState,
+    requesting_driver_id: uuid.UUID,
+    tire_deg_pipelines: dict[str, Any],
+    pit_model: Any,
+    sc_model: Any,
+    pit_laps: list[int],
+    compounds: list[str],
+    total_laps: int,
+    remaining_laps: int,
+    label: str | None,
+    rng_seed: int | None,
+) -> dict[str, Any]:
+    """One race_simulator.simulate_race call for one candidate plan, shaped as SimulatedRaceOutcome.
+
+    Shared by both the single-plan path (SimulateStrategyRequest.scenarios
+    omitted) and the multi-scenario compare path (Checkpoint 3, see
+    docs/core-feature-rebuild-whatif-simulator.md) — the only difference
+    between the two is how many times this is called per request and
+    whether rng_seed is shared across those calls.
+
+    Args:
+        race_state: The full-field state, built ONCE per request (by
+            _build_race_state) regardless of how many scenarios are run
+            against it — this is the whole point of the server-orchestrated
+            design: identical DB-derived field state, N simulate_race calls.
+        requester_state: race_state.drivers entry for the requesting driver —
+            a property of the STARTING state, identical for every scenario
+            in this request (not something simulate_race's outcome affects).
+        requesting_driver_id: The driver running the what-if.
+        tire_deg_pipelines, pit_model, sc_model: Loaded ML models.
+        pit_laps, compounds: This scenario's forced pit plan — may be empty
+            (that scenario's pit timing is left fully model-driven).
+        total_laps, remaining_laps: Request-level race-length context,
+            identical across every scenario in one request.
+        label: This scenario's optional display label (ScenarioPlan.label),
+            passed through verbatim — None on the single-plan path, which
+            has no ScenarioPlan to carry one from.
+        rng_seed: None on the single-plan path (unchanged, non-reproducible
+            behaviour — see race_simulator.simulate_race's own docstring).
+            A shared seed across every call in a multi-scenario request so
+            scenarios use the SAME safety-car/lap-noise draws (a Monte Carlo
+            "common random numbers" technique) — isolating the comparison to
+            each scenario's own pit-lap decision rather than also comparing
+            independently-drawn randomness. This works because every
+            scenario in one request shares current_lap/total_laps (so
+            simulate_race's per-lap loop makes the identical number/order of
+            RNG draws regardless of forced_pit_laps' content — confirmed by
+            test_forced_pit_laps_changes_outcome_only_for_that_driver in
+            test_race_simulator.py, which already relies on this same
+            property for an untouched driver within a single simulate_race
+            call).
+    Returns:
+        SimulatedRaceOutcome-shaped dict.
+    """
+    forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None
+    if pit_laps:
+        schedule = {
+            lap: (compound, _COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"]))
+            for lap, compound in zip(pit_laps, compounds, strict=True)
+        }
+        forced_pit_laps = {str(requesting_driver_id): schedule}
+
+    with f1_ml_inference_duration_seconds.labels(model="race_simulator").time():
+        result = race_simulator.simulate_race(
+            race_state,
+            tire_deg_pipelines,
+            pit_model,
+            sc_model,
+            forced_pit_laps=forced_pit_laps,
+            rng_seed=rng_seed,
+        )
+
+    requester_id_str = str(requesting_driver_id)
+    requesting_distribution = next(
+        d for d in result.driver_distributions if d.driver_id == requester_id_str
+    )
+    position_gain_loss = round(
+        requester_state.starting_position - requesting_distribution.mean_position
+    )
+    explanation = _build_plan_explanation(
+        race_state, requester_state, pit_laps, compounds, total_laps, remaining_laps
+    )
+
+    return {
+        "pit_laps": pit_laps,
+        "compounds": compounds,
+        "label": label,
+        "predicted_finish_time": requesting_distribution.mean_finish_time_seconds,
+        "position_gain_loss": position_gain_loss,
+        "mean_position": requesting_distribution.mean_position,
+        "position_probabilities": _shape_position_probabilities(requesting_distribution),
+        "confidence_interval": (
+            requesting_distribution.finish_time_p5_seconds,
+            requesting_distribution.finish_time_p95_seconds,
+        ),
+        "explanation": explanation,
+    }
+
+
 async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
-    """Build race state from DB + request, run the Monte Carlo simulation, shape the result.
+    """Build race state from DB + request, run the Monte Carlo simulation(s), shape the result.
 
     Args:
         payload: session_id plus the SimulateStrategyRequest fields (driver_id,
             current_lap, current_compound, current_tyre_age, remaining_laps,
-            pit_laps, compounds — the latter two already length-matched and
+            pit_laps, compounds, scenarios — pit_laps/compounds and each
+            scenario's own pit_laps/compounds are already length-matched and
             compound-validated by SimulateStrategyRequest's model_validator).
     Returns:
-        SimulateStrategyResponse-shaped dict (JSON-serialisable).
+        SimulateStrategyResponse-shaped dict (JSON-serialisable). strategies
+        has exactly one entry for the single-plan path (scenarios omitted,
+        unchanged from before Checkpoint 3), or one entry per scenario, in
+        request order, for a multi-scenario compare request.
     Raises:
         NotFoundError: No session with this ID exists.
         ValidationError: current_lap exceeds this session's real progress by
@@ -1460,6 +1593,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
     total_laps = current_lap + int(payload["remaining_laps"])
     pit_laps = [int(lap) for lap in payload.get("pit_laps", [])]
     compounds = [str(c).upper() for c in payload.get("compounds", [])]
+    raw_scenarios: list[dict[str, Any]] | None = payload.get("scenarios")
 
     async_redis_client: aioredis.Redis = aioredis.from_url(  # type: ignore[type-arg]
         get_redis_settings().redis_url, decode_responses=True
@@ -1491,51 +1625,62 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
         # case this comment already accounted for.
         await get_engine().dispose()
 
-    forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None
-    if pit_laps:
-        schedule = {
-            lap: (compound, _COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"]))
-            for lap, compound in zip(pit_laps, compounds, strict=True)
-        }
-        forced_pit_laps = {str(requesting_driver_id): schedule}
-
-    with f1_ml_inference_duration_seconds.labels(model="race_simulator").time():
-        result = race_simulator.simulate_race(
-            race_state, tire_deg_pipelines, pit_model, sc_model, forced_pit_laps=forced_pit_laps
-        )
-
     requester_id_str = str(requesting_driver_id)
-    requesting_distribution = next(
-        d for d in result.driver_distributions if d.driver_id == requester_id_str
-    )
     requester_state = next(d for d in race_state.drivers if d.driver_id == requester_id_str)
-    position_gain_loss = round(
-        requester_state.starting_position - requesting_distribution.mean_position
-    )
-    explanation = _build_plan_explanation(
-        race_state,
-        requester_state,
-        pit_laps,
-        compounds,
-        total_laps,
-        int(payload["remaining_laps"]),
-    )
+    remaining_laps = int(payload["remaining_laps"])
+
+    if raw_scenarios:
+        # Common random numbers (see _run_one_scenario's docstring): one seed,
+        # shared across every scenario in THIS request, so the comparison
+        # isolates each scenario's own pit-lap decision rather than also
+        # comparing independently-drawn safety-car/noise randomness. A fresh
+        # seed per request (not a fixed constant) — different requests must
+        # still see independent Monte Carlo outcomes.
+        shared_seed = secrets.randbelow(2**31)
+        strategies = [
+            _run_one_scenario(
+                race_state,
+                requester_state,
+                requesting_driver_id,
+                tire_deg_pipelines,
+                pit_model,
+                sc_model,
+                pit_laps=[int(lap) for lap in scenario.get("pit_laps", [])],
+                compounds=[str(c).upper() for c in scenario.get("compounds", [])],
+                total_laps=total_laps,
+                remaining_laps=remaining_laps,
+                label=scenario.get("label"),
+                rng_seed=shared_seed,
+            )
+            for scenario in raw_scenarios
+        ]
+    else:
+        strategies = [
+            _run_one_scenario(
+                race_state,
+                requester_state,
+                requesting_driver_id,
+                tire_deg_pipelines,
+                pit_model,
+                sc_model,
+                pit_laps=pit_laps,
+                compounds=compounds,
+                total_laps=total_laps,
+                remaining_laps=remaining_laps,
+                label=None,
+                # Unchanged from before Checkpoint 3: the single-plan path
+                # stays unseeded/non-reproducible — there is only one call,
+                # so there is nothing to hold common across, and changing
+                # this would alter existing behaviour outside this
+                # checkpoint's scope.
+                rng_seed=None,
+            )
+        ]
 
     return {
         "driver_id": requester_id_str,
-        "strategies": [
-            {
-                "pit_laps": pit_laps,
-                "compounds": compounds,
-                "predicted_finish_time": requesting_distribution.mean_finish_time_seconds,
-                "position_gain_loss": position_gain_loss,
-                "confidence_interval": (
-                    requesting_distribution.finish_time_p5_seconds,
-                    requesting_distribution.finish_time_p95_seconds,
-                ),
-                "explanation": explanation,
-            }
-        ],
+        "starting_position": requester_state.starting_position,
+        "strategies": strategies,
     }
 
 

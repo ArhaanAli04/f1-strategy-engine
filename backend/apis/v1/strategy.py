@@ -95,12 +95,20 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
                             "status": "SUCCESS",
                             "result": {
                                 "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "starting_position": 6,
                                 "strategies": [
                                     {
                                         "pit_laps": [22, 41],
                                         "compounds": ["MEDIUM", "HARD"],
+                                        "label": None,
                                         "predicted_finish_time": 5423.7,
                                         "position_gain_loss": 1,
+                                        "mean_position": 5.62,
+                                        "position_probabilities": [
+                                            {"position": 5, "probability": 0.18},
+                                            {"position": 6, "probability": 0.71},
+                                            {"position": 7, "probability": 0.11},
+                                        ],
                                         "confidence_interval": [5401.2, 5449.8],
                                         "explanation": {
                                             "pit_cost_seconds": 22.5,
@@ -186,13 +194,21 @@ async def get_last_ingested_session(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a Monte Carlo race strategy simulation",
     description=(
-        "Enqueues a 1000-run Monte Carlo simulation (Celery task) for one driver "
-        "at their current race state. Leave pit_laps empty to let the simulation "
-        "decide pit timing autonomously, or set pit_laps + compounds to force a "
-        "specific what-if pit plan. Returns immediately with a task_id — poll "
-        "GET /simulate/{task_id} for the result. current_lap must be at most one "
-        "lap past this session's real ingested progress (404 if the session "
-        "doesn't exist, 422 if current_lap is implausibly far ahead)."
+        "Enqueues one or more 1000-run Monte Carlo simulations (one Celery task) "
+        "for one driver at their current race state. Leave pit_laps empty to let "
+        "the simulation decide pit timing autonomously, or set pit_laps + "
+        "compounds to force a specific what-if pit plan. To compare several "
+        "candidate plans at once (e.g. 'pit lap 30 vs 33 vs 36'), set scenarios "
+        "instead (1-4 entries, mutually exclusive with pit_laps/compounds) — "
+        "each is simulated against the identical field state, sharing one "
+        "random seed across all of them so the comparison isolates each "
+        "scenario's own pit-lap decision rather than also comparing "
+        "independently-drawn safety-car/noise randomness; the response's "
+        "strategies list then carries one result per scenario, in request "
+        "order. Returns immediately with a task_id — poll GET /simulate/{task_id} "
+        "for the result. current_lap must be at most one lap past this session's "
+        "real ingested progress (404 if the session doesn't exist, 422 if "
+        "current_lap is implausibly far ahead or a pit plan is malformed)."
     ),
     openapi_extra={
         "requestBody": {
@@ -221,6 +237,33 @@ async def get_last_ingested_session(
                                 "remaining_laps": 40,
                                 "pit_laps": [22, 41],
                                 "compounds": ["MEDIUM", "HARD"],
+                            },
+                        },
+                        "compare_scenarios": {
+                            "summary": "Compare 3 candidate single-stop pit laps",
+                            "value": {
+                                "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "current_lap": 28,
+                                "current_compound": "MEDIUM",
+                                "current_tyre_age": 18,
+                                "remaining_laps": 30,
+                                "scenarios": [
+                                    {
+                                        "pit_laps": [30],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 30",
+                                    },
+                                    {
+                                        "pit_laps": [33],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 33",
+                                    },
+                                    {
+                                        "pit_laps": [36],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 36",
+                                    },
+                                ],
                             },
                         },
                     }
