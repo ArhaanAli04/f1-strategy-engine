@@ -41,7 +41,6 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
     : "Drivers who overtook you in pitstop"
   const arrowLabel = isGain ? "you overtake" : "now ahead of you"
 
-  const sufficient = explanation.total_recoverable_seconds >= explanation.pit_cost_seconds
   const headingColor = isGain ? GAIN_COLOR : isLoss ? LOSS_COLOR : "#fafafa"
 
   return (
@@ -90,21 +89,15 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
         </View>
       )}
 
-      {isLoss && (
-        <Text className="text-xs text-muted">
-          Only {pluralize(explanation.remaining_laps, "lap")} remaining after pit —{" "}
-          {sufficient ? "sufficient" : "not enough"} to recover on fresh tyres.
-        </Text>
-      )}
-
+      {/* Deliberately does NOT assert a "sufficient"/"not enough to recover"
+          verdict — mirrors web/src/pages/SimulatorPage.tsx's Option 3 fix
+          (see docs/core-feature-rebuild-whatif-simulator.md). fresh_tyre_
+          gain_per_lap is a hardcoded constant and total_recoverable_seconds
+          assumes rivals hold their current pace forever, which the real
+          Monte Carlo simulation behind position_gain_loss does NOT assume. */}
       {explanation.fresh_tyre_gain_per_lap > 0 && freshCompound && (
         <Text className="text-xs text-muted">
-          Fresh {freshCompound} tyre advantage: ~{explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap —{" "}
-          {isGain
-            ? `recovers ~${explanation.total_recoverable_seconds.toFixed(1)}s over ${pluralize(explanation.remaining_laps, "lap")}, enough to pass ${pluralize(explanation.drivers_overtaken.length, "driver")}.`
-            : isLoss
-              ? `recovers only ~${explanation.total_recoverable_seconds.toFixed(1)}s in ${pluralize(explanation.remaining_laps, "lap")}.`
-              : `roughly offsets the pit-stop loss over ${pluralize(explanation.remaining_laps, "lap")} (~${explanation.total_recoverable_seconds.toFixed(1)}s recovered).`}
+          {`Fresh ${freshCompound} tyre advantage: ~${explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap over ${pluralize(explanation.remaining_laps, "lap")} recovers ~${explanation.total_recoverable_seconds.toFixed(1)}s of the ${explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost. This is a simplified snapshot that assumes rivals hold their current pace with no further pit stops of their own — the Monte Carlo position change above already accounts for rivals' own tyre wear and pit stops, so treat that as the number to trust and this line as partial context, not the full picture.`}
         </Text>
       )}
     </View>

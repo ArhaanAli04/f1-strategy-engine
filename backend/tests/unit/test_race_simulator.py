@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from backend.services.ml import tire_deg_model
 from backend.services.ml.pit_predictor import FEATURE_COLUMNS as PIT_FEATURE_COLUMNS
 from backend.services.ml.pit_predictor import _build_model
 from backend.services.ml.race_simulator import (
@@ -190,6 +191,88 @@ def test_tire_deg_predictions_uses_compatible_pipeline_normally(
     # crosses the degradation threshold within the lookahead window, so that
     # field alone can't distinguish "used normally" from "skipped" — delta can).
     assert not np.all(predicted_delta == 0.0)
+
+
+# --- _tire_deg_predictions memoization correctness (What-If Simulator
+# multi-scenario rebuild, Checkpoint 1: see race_simulator.py's own
+# docstring on _tire_deg_predictions for the ~53s -> ~14s measurement this
+# is verifying is exact, not an approximation) ---
+
+
+@pytest.mark.unit
+def test_tire_deg_predictions_dedup_matches_naive_predictions(
+    race_state: RaceSimulationInput,
+) -> None:
+    """Deduping on (tyre_age, driver_id_encoded, compound_encoded) must be
+    bit-identical to predicting every (sim, driver) row directly — a fitted
+    pipeline's predict() is a deterministic, stateless function of its input
+    row, so grouping by unique input and scattering the result back can
+    never change the answer, only how many rows reach the model.
+
+    Builds a tyre_age array with a genuine mix of repeated AND unique values
+    across sims (not the fixture's default all-identical-across-sims
+    tiling), so this actually exercises non-trivial deduplication rather
+    than a degenerate single-unique-row case.
+    """
+    n_sims = 37  # odd, deliberately not a multiple of n_drivers — no accidental alignment
+    n_drivers = len(race_state.drivers)
+    pipeline = _synthetic_tire_pipeline(seed=42)
+
+    rng = np.random.default_rng(7)
+    tyre_age = rng.integers(0, 30, size=(n_sims, n_drivers)).astype(np.int64)
+    driver_id_encoded = np.array([d.driver_id_encoded for d in race_state.drivers], dtype=np.int64)
+    compound_encoded_by_driver = np.array(
+        [d.compound_encoded for d in race_state.drivers], dtype=np.int64
+    )
+    lap_number = race_state.current_lap + 1
+    fuel_adjusted_time = -1.5
+    compound_groups = {COMPOUND: np.arange(n_drivers)}
+
+    predicted_delta, predicted_life_remaining = _tire_deg_predictions(
+        race_state=race_state,
+        compound_groups=compound_groups,
+        compound_encoded_by_driver=compound_encoded_by_driver,
+        tire_deg_pipelines={COMPOUND: pipeline},
+        lap_number=lap_number,
+        tyre_age=tyre_age,
+        driver_id_encoded=driver_id_encoded,
+        fuel_adjusted_time=fuel_adjusted_time,
+    )
+
+    # Ground truth: the pre-memoization approach — build the full
+    # (n_sims * n_drivers)-row feature matrix with no deduplication at all
+    # and predict on every row directly.
+    tyre_age_flat = tyre_age.ravel().astype(np.int64)
+    compound_encoded_flat = np.tile(compound_encoded_by_driver, n_sims)
+    driver_id_encoded_flat = np.tile(driver_id_encoded, n_sims)
+    naive_features = np.column_stack(
+        [
+            np.full(tyre_age_flat.shape[0], lap_number, dtype=np.float64),
+            compound_encoded_flat.astype(np.float64),
+            tyre_age_flat.astype(np.float64),
+            np.full(tyre_age_flat.shape[0], fuel_adjusted_time),
+            np.full(tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.float64),
+            driver_id_encoded_flat.astype(np.float64),
+        ]
+    )
+    naive_delta = pipeline.predict(naive_features).reshape(tyre_age.shape)
+    naive_life = tire_deg_model.predict_life_remaining_batch(
+        pipeline,
+        np.full(tyre_age_flat.shape[0], lap_number, dtype=np.int64),
+        compound_encoded_flat,
+        tyre_age_flat,
+        np.full(tyre_age_flat.shape[0], fuel_adjusted_time),
+        np.full(tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.int64),
+        driver_id_encoded_flat,
+    ).reshape(tyre_age.shape)
+
+    # Sanity check this test actually exercises deduplication, not a
+    # degenerate all-unique or all-identical case.
+    n_unique_tyre_ages = len(np.unique(tyre_age))
+    assert 1 < n_unique_tyre_ages < tyre_age.size
+
+    np.testing.assert_array_equal(predicted_delta, naive_delta)
+    np.testing.assert_array_equal(predicted_life_remaining, naive_life)
 
 
 # --- _advance_lap baseline_lap_time_seconds handling (item 4: predicted_finish_time

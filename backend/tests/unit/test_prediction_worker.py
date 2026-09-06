@@ -20,7 +20,7 @@ import joblib
 import numpy as np
 import pytest
 
-from backend.services.ml import tire_deg_model
+from backend.services.ml import race_simulator, tire_deg_model
 from backend.workers import prediction_worker
 
 
@@ -880,3 +880,48 @@ async def test_resolve_position_context_returns_hardcoded_default_when_nothing_r
         "target_ahead_driver_id": None,
         "target_behind_driver_id": None,
     }
+
+
+# --- _shape_position_probabilities (What-If Simulator multi-scenario rebuild,
+# Checkpoint 2: see docs/core-feature-rebuild-whatif-simulator.md) ---
+
+
+@pytest.mark.unit
+def test_shape_position_probabilities_filters_zero_and_sorts_by_position() -> None:
+    """race_simulator.simulate_race returns a DENSE dict covering every
+    position in the field (e.g. 20 entries for a 20-car field) — most of
+    them 0.0 for any one driver. The shaped output must drop those and be
+    ordered by position ascending, not by dict insertion order or
+    probability descending."""
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="driver-1",
+        # Deliberately out of position order and with zero-probability
+        # positions mixed in, to prove both the filter and the sort are real.
+        position_probabilities={5: 0.0, 3: 0.71, 1: 0.0, 2: 0.18, 4: 0.11},
+        mean_position=2.4,
+        mean_finish_time_seconds=5400.0,
+        finish_time_p5_seconds=5350.0,
+        finish_time_p95_seconds=5460.0,
+    )
+
+    result = prediction_worker._shape_position_probabilities(distribution)
+
+    assert result == [
+        {"position": 2, "probability": 0.18},
+        {"position": 3, "probability": 0.71},
+        {"position": 4, "probability": 0.11},
+    ]
+
+
+@pytest.mark.unit
+def test_shape_position_probabilities_empty_when_all_zero() -> None:
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="driver-1",
+        position_probabilities={1: 0.0, 2: 0.0},
+        mean_position=1.5,
+        mean_finish_time_seconds=5400.0,
+        finish_time_p5_seconds=5350.0,
+        finish_time_p95_seconds=5460.0,
+    )
+
+    assert prediction_worker._shape_position_probabilities(distribution) == []

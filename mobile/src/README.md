@@ -88,7 +88,7 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
 | `components/circuit/CircuitOutlineSvg.tsx` | `web/src/components/circuit/CircuitOutlineSvg.tsx` | `svg`/`path`/`circle`/`text` -> react-native-svg's `Svg`/`Path`/`Circle`/`Text`. Web's actual markup uses `<path>` (built from `points`), not `<polyline>` — ported as literally written, not per the primitive-mapping note's general guidance. `dominantBaseline="central"` has no react-native-svg equivalent — approximated with a `dy` nudge. |
 | `components/telemetry/TyreIcon.tsx` | inline `TyreIcon` function in `web/src/components/telemetry/LiveTimingTower.tsx` | Extracted into its own file since mobile reuses it on both the Live tab and Driver Detail; web only uses it in one place. Same two-arc geometry. |
 | `components/strategy/PitWindowCard.tsx` | `web/src/components/strategy/PitWindowCard.tsx` | Same compact/full modes, same fields (recommended_compound/confidence_score/explanation.narrative, Checkpoint 5 of the core-feature-rebuild — replaced the old client-side SHAP top-contribution formatting, now redundant with the server-built narrative). Deliberately simpler than web's post-Checkpoint-5 version: always sources from usePitWindow's on-demand REST recompute — mobile has no WebSocket lap-completion stream wired to the Strategy tab (`hooks/useLiveTelemetry.ts` exists for the Live tab's CircuitMapPanel only), so there's no `isReplayActive`/`usePitRecommendation`-style unification to port; the Strategy tab (`app/(tabs)/strategy.tsx`) only ever renders this in `compact` mode inside its driver grid, same as before. |
-| `components/strategy/PlanExplanationCard.tsx` | inline `PlanExplanationCard` in `web/src/pages/SimulatorPage.tsx` (desktop's copy-and-adapted version is identical here, minus CSV export) | Ported Day 32 (Checkpoint 4). Same gain/loss heading logic, same pit-cost/recoverable-seconds text. `drivers_overtaken` renders as a `FlatList` (`scrollEnabled={false}`, nested inside the Simulator screen's outer `ScrollView` — lists here are short enough that the nested-list perf warning doesn't matter in practice) using `LiveTimingTower`'s team-color-bar + code row convention (`app/(tabs)/live.tsx`), not `DriverChip`'s pill style — same choice web/desktop made for the same reason. |
+| `components/strategy/PlanExplanationCard.tsx` | inline `PlanExplanationCard` in `web/src/pages/SimulatorPage.tsx` (desktop's copy-and-adapted version is identical here, minus CSV export) | Ported Day 32 (Checkpoint 4). Same gain/loss heading logic, same pit-cost/recoverable-seconds text. `drivers_overtaken` renders as a `FlatList` (`scrollEnabled={false}`, nested inside the Simulator screen's outer `ScrollView` — lists here are short enough that the nested-list perf warning doesn't matter in practice) using `LiveTimingTower`'s team-color-bar + code row convention (`app/(tabs)/live.tsx`), not `DriverChip`'s pill style — same choice web/desktop made for the same reason. **2026-09-06:** ported web/desktop's wording fix — no longer asserts a "sufficient"/"not enough to recover" verdict from the hardcoded `fresh_tyre_gain_per_lap` constant, which could contradict the real Monte Carlo `position_gain_loss` above it (see `docs/core-feature-rebuild-whatif-simulator.md`'s deferred-item writeup). |
 | `components/dashboard/UpcomingRaceCard.tsx` | `web/src/components/dashboard/UpcomingRaceCard.tsx` | Same countdown logic. |
 | `components/dashboard/QuickAccessCards.tsx` | `web/src/components/dashboard/QuickAccessCards.tsx` | Two cards, not three — web's third card scroll-anchors to an in-page `#driver-roster` section that doesn't exist on mobile's Home; navigates to the Drivers tab instead. |
 | `components/dashboard/RecentAlertsFeed.tsx` | `web/src/components/dashboard/RecentAlertsFeed.tsx` | Shows last 3, not 5 (Day 31 spec explicitly calls for 3 on mobile). |
@@ -144,6 +144,27 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
   first breaks TypeScript's overload resolution for `CartesianChart`'s
   generic `RawData` (confirmed while building this screen; see the inline
   comment at the call site).
+  **Not yet ported (What-If Simulator multi-scenario rebuild, 2026-09-06 —
+  see `docs/core-feature-rebuild-whatif-simulator.md`):** web/desktop gained
+  a Single Plan vs. Compare Scenarios mode toggle (up to 4 candidate pit
+  laps run against one shared field state, one shared random seed) and a
+  new finishing-position probability distribution chart (`components/
+  strategy/PositionDistributionChart.tsx` on web/desktop — a recharts
+  grouped bar chart with a risk/reward table). Only the DATA layer was
+  synced here: `types/simulate.ts` mirrors the full new response shape
+  (`ScenarioPlan`, `SimulatedRaceOutcome.label`/`mean_position`/
+  `position_probabilities`, `SimulateStrategyResponse.starting_position`),
+  and `PlanExplanationCard.tsx` got the same wording fix web/desktop did
+  (see its own table row below). The UI itself — the mode toggle, the
+  scenario-row builder, and a native equivalent of the distribution chart —
+  is deferred: this screen's existing chart is already a real engineering
+  lift over web's recharts version (see the synthetic-gain/loss-series
+  workaround above), and a grouped bar chart with a DYNAMIC per-scenario
+  series count would need its own dedicated native charting effort, not a
+  quick follow-on to this one. `app/simulator.tsx` still only submits a
+  single plan (`pit_laps`/`compounds`, `scenarios` never set) and never
+  reads `position_probabilities`/`mean_position`/`starting_position` from a
+  response. Add when a future session scopes the native chart properly.
 
 ## Offline support (Day 32 Checkpoint 5)
 

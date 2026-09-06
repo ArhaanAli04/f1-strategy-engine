@@ -180,3 +180,106 @@ describe("SimulatorPage — error surfacing (item 12)", () => {
     expect(screen.queryByText("Simulation failed.")).not.toBeInTheDocument()
   })
 })
+
+// What-If Simulator multi-scenario rebuild, Checkpoint 4 — see
+// docs/core-feature-rebuild-whatif-simulator.md. Single Plan mode's own
+// existing payload shape is already covered by the two tests above (both
+// stay on the default mode); these cover Compare mode specifically.
+describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it("defaults to Single Plan mode with the sequential pit-stop builder, not scenario rows", async () => {
+    baseSetup()
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+
+    expect(screen.getByLabelText("Pit stop 1 lap")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Scenario 1 pit lap")).not.toBeInTheDocument()
+  })
+
+  it("switching to Compare Scenarios shows scenario rows instead of the pit-stop builder", async () => {
+    baseSetup()
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+
+    expect(screen.getByLabelText("Scenario 1 pit lap")).toBeInTheDocument()
+    expect(screen.getByLabelText("Scenario 2 pit lap")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Pit stop 1 lap")).not.toBeInTheDocument()
+  })
+
+  it("submits scenarios (not pit_laps/compounds) when running a compare-mode simulation", async () => {
+    baseSetup()
+    const resolvingMutateAsync = vi.fn().mockResolvedValue({ task_id: "task-1", status: "PENDING" })
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(resolvingMutateAsync),
+    )
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+    fireEvent.change(screen.getByLabelText("Scenario 1 label"), {
+      target: { value: "My custom label" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: "Run Simulation" }))
+
+    await waitFor(() => expect(resolvingMutateAsync).toHaveBeenCalledTimes(1))
+    const payload = resolvingMutateAsync.mock.calls[0][0] as SimulateStrategyRequest
+    expect(payload.pit_laps).toBeUndefined()
+    expect(payload.compounds).toBeUndefined()
+    expect(payload.scenarios).toEqual([
+      { pit_laps: [30], compounds: ["HARD"], label: "My custom label" },
+      { pit_laps: [33], compounds: ["HARD"], label: "Pit lap 33" },
+    ])
+  })
+
+  it("caps scenarios at 4 and disables Add Scenario once the cap is reached", async () => {
+    baseSetup()
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+    // Starts with 2 default rows — two more clicks reach the cap of 4.
+    fireEvent.click(screen.getByRole("button", { name: /\+ Add Scenario/ }))
+    fireEvent.click(screen.getByRole("button", { name: /\+ Add Scenario/ }))
+
+    expect(screen.getByLabelText("Scenario 4 pit lap")).toBeInTheDocument()
+    expect(screen.queryByLabelText("Scenario 5 pit lap")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: /\+ Add Scenario/ })).toBeDisabled()
+  })
+
+  it("disables Run Simulation when every scenario has been removed in Compare mode", async () => {
+    baseSetup()
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+    fireEvent.click(screen.getByLabelText("Remove scenario 1"))
+    fireEvent.click(screen.getByLabelText("Remove scenario 1"))
+
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeDisabled()
+  })
+})

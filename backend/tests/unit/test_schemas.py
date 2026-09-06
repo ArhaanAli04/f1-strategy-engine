@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from backend.schemas.simulate_schema import SimulateStrategyRequest
+from backend.schemas.simulate_schema import ScenarioPlan, SimulateStrategyRequest
 from backend.schemas.strategy_schema import StrategyPredictionResponse
 from backend.schemas.telemetry_schema import LiveTelemetryEvent
 
@@ -43,6 +43,7 @@ def _build_request(
     remaining_laps: int = 40,
     pit_laps: list[int] | None = None,
     compounds: list[str] | None = None,
+    scenarios: list[ScenarioPlan] | None = None,
 ) -> SimulateStrategyRequest:
     return SimulateStrategyRequest(
         driver_id=uuid.uuid4(),
@@ -52,6 +53,7 @@ def _build_request(
         remaining_laps=remaining_laps,
         pit_laps=pit_laps if pit_laps is not None else [],
         compounds=compounds if compounds is not None else [],
+        scenarios=scenarios,
     )
 
 
@@ -99,6 +101,91 @@ def test_simulate_request_accepts_pit_lap_at_horizon_boundaries() -> None:
         current_lap=10, remaining_laps=5, pit_laps=[11, 15], compounds=["MEDIUM", "HARD"]
     )
     assert request.pit_laps == [11, 15]
+
+
+# --- SimulateStrategyRequest.scenarios (What-If Simulator multi-scenario
+# rebuild, Checkpoint 3 — see docs/core-feature-rebuild-whatif-simulator.md) ---
+
+
+@pytest.mark.unit
+def test_scenario_plan_rejects_mismatched_pit_laps_and_compounds() -> None:
+    with pytest.raises(ValidationError):
+        ScenarioPlan(pit_laps=[30, 33], compounds=["HARD"])
+
+
+@pytest.mark.unit
+def test_scenario_plan_rejects_unknown_compound() -> None:
+    with pytest.raises(ValidationError):
+        ScenarioPlan(pit_laps=[30], compounds=["ROCKET_FUEL"])
+
+
+@pytest.mark.unit
+def test_scenario_plan_accepts_empty_pit_laps_as_autonomous() -> None:
+    # Same convention as the top-level plan: empty pit_laps means "let the
+    # simulation decide pit timing for this scenario" — a legitimate
+    # baseline scenario in a compare request (e.g. "no pit" vs two candidate
+    # pit laps), not a malformed one.
+    scenario = ScenarioPlan(pit_laps=[], compounds=[], label="No pit")
+    assert scenario.pit_laps == []
+
+
+@pytest.mark.unit
+def test_simulate_request_rejects_scenarios_alongside_top_level_plan() -> None:
+    with pytest.raises(ValidationError):
+        _build_request(
+            pit_laps=[15],
+            compounds=["HARD"],
+            scenarios=[ScenarioPlan(pit_laps=[30], compounds=["HARD"])],
+        )
+
+
+@pytest.mark.unit
+def test_simulate_request_rejects_empty_scenarios_list() -> None:
+    # An explicit [] is meaningless (nothing to compare) — distinct from
+    # omitting scenarios entirely (None), which is the ordinary single-plan
+    # request and must keep working unchanged.
+    with pytest.raises(ValidationError):
+        _build_request(scenarios=[])
+
+
+@pytest.mark.unit
+def test_simulate_request_rejects_more_than_max_scenarios() -> None:
+    with pytest.raises(ValidationError):
+        _build_request(
+            current_lap=10,
+            remaining_laps=40,
+            scenarios=[ScenarioPlan(pit_laps=[11 + i], compounds=["HARD"]) for i in range(5)],
+        )
+
+
+@pytest.mark.unit
+def test_simulate_request_rejects_scenario_pit_lap_beyond_horizon() -> None:
+    with pytest.raises(ValidationError):
+        _build_request(
+            current_lap=10,
+            remaining_laps=5,
+            scenarios=[
+                ScenarioPlan(pit_laps=[12], compounds=["HARD"]),
+                ScenarioPlan(pit_laps=[99], compounds=["HARD"]),  # beyond horizon_end=15
+            ],
+        )
+
+
+@pytest.mark.unit
+def test_simulate_request_accepts_valid_scenarios() -> None:
+    request = _build_request(
+        current_lap=28,
+        remaining_laps=30,
+        scenarios=[
+            ScenarioPlan(pit_laps=[30], compounds=["HARD"], label="Pit lap 30"),
+            ScenarioPlan(pit_laps=[33], compounds=["HARD"], label="Pit lap 33"),
+            ScenarioPlan(pit_laps=[36], compounds=["HARD"], label="Pit lap 36"),
+        ],
+    )
+    assert request.scenarios is not None
+    assert len(request.scenarios) == 3
+    assert request.pit_laps == []
+    assert [s.label for s in request.scenarios] == ["Pit lap 30", "Pit lap 33", "Pit lap 36"]
 
 
 @pytest.mark.unit

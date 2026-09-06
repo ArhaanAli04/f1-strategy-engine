@@ -1,12 +1,16 @@
 # Core Feature Rebuild — What-If Strategy Simulator
 
-> **Status:** Investigation only, 2026-09-04. Nothing in this document has
-> been implemented or fixed. This is a scoping document for a future
-> dedicated session (or several) to close the gap between this project's
-> originally planned What-If Strategy Simulator and what currently exists —
-> a real, working single-scenario Monte Carlo simulator whose richest output
-> (a full per-position probability distribution) is already computed
-> internally and then thrown away before it ever reaches the API or the UI.
+> **Status: ✅ COMPLETE, 2026-09-06.** All 6 checkpoints (proposed and
+> approved checkpoint-by-checkpoint in-session, per §5's own anchor prompt)
+> implemented, tested, and verified against real data — see §6 for final
+> results per checkpoint. The rest of this document (§1-§5) is the original
+> investigation/scoping writeup and is kept as-is for historical context —
+> it describes the state of the system *before* this rebuild, not the
+> current state; §5's anchor prompt in particular is what was actually
+> pasted in to start this session, preserved verbatim rather than edited to
+> match what shipped. §7 documents one real, related bug this rebuild
+> surfaced but deliberately did NOT fix (also tracked in CLAUDE.md's
+> Deferred Wiring).
 >
 > Produced as a follow-on to the core-feature rebuild session that closed
 > `docs/core-feature-rebuild-strategy-recommendations.md` (the pit-window
@@ -306,3 +310,180 @@ complete.
 
 Do not run git commands unless explicitly asked.
 ```
+
+---
+
+## 6. Completion Summary (2026-09-06)
+
+All 6 checkpoints were implemented, tested, and verified against real data —
+checkpoint-by-checkpoint with approval between each. Two corrections to this
+document's own §4/§5 that emerged during the session, not deviations from
+approval: (1) the anchor prompt's live-progression requirement (§5, mirroring
+the pit-window rebuild's §2d) was explicitly waived by the user mid-session —
+the Simulator's non-live-race mode simply uses `useLastIngestedSession`
+(already built), with no attempt to sync `current_lap` to an active replay's
+progression; (2) §4's "further optimization" idea (stacking N scenarios into
+one array-batched `simulate_race` call) was explicitly declined in favor of
+CP1's per-call memoization alone, once CP1's real-world measurement showed it
+was sufficient on its own.
+
+| CP | What | Result |
+|---|---|---|
+| 1 | Memoize `_tire_deg_predictions` | Deduped on `(tyre_age, driver_id_encoded, compound_encoded)` — the only per-(sim,driver)-varying inputs at a given lap. **~50s → ~7-10s per simulate_race call** on a real ~22-driver field, bit-identical output (not an approximation) — confirmed via a seeded test compared against the un-deduped path. This is what made server-orchestrated multi-scenario comparison viable at all; without it, 3 scenarios would cost ~150s, past `useSimulationResult`'s 60s client timeout. |
+| 2 | Expose `position_probabilities`/`mean_position` | New `PositionProbability` (`{position, probability}`, a list — not a `dict[int, float]`, to avoid depending on Pydantic's JSON-string-key coercion) on `SimulatedRaceOutcome`, sparse and sorted ascending. Restores the vision's own "67% chance of finishing P2, 18% chance P1, 15% chance P3" — computed by `race_simulator.simulate_race` on every call already, previously discarded (§2c/§3's central finding). Single-scenario response shape only, no multi-scenario change yet. |
+| 3 | Multi-scenario request/response (server-orchestrated) | `SimulateStrategyRequest.scenarios` (1-4 `ScenarioPlan`s, mutually exclusive with the existing top-level `pit_laps`/`compounds`, each independently horizon-validated) — one `_build_race_state` call, N `race_simulator.simulate_race` calls sharing ONE random seed (`secrets.randbelow`) across all N ("common random numbers" — isolates the comparison to each scenario's own pit-lap decision, not independently-drawn safety-car/noise randomness; verified via two identical scenarios producing bit-identical Monte Carlo output in a real integration test). Also added top-level `SimulateStrategyResponse.starting_position` so the frontend can compute P(Gain)/P(Hold)/P(Lose) without reverse-engineering it from the already-rounded `position_gain_loss`. Closes §3's first gap row — server-orchestrated was chosen over client-orchestrated (§4's option (a)) because polling N tasks at 2s intervals would exceed the 60/minute authenticated rate limit, and `_build_race_state`'s DB queries would otherwise repeat N times for identical data. |
+| 4 | Frontend: compare mode + distribution chart | New `PositionDistributionChart.tsx` (`components/strategy/`) — a grouped bar chart (x=finishing position, one series per scenario) plus a risk/reward table (Mean Position, P(Gain)/P(Hold)/P(Lose), Finish Time Range), using the dataviz skill's validated 4-slot dark categorical palette (blue/orange/aqua/yellow — worst adjacent CVD ΔE 8.4, normal-vision ΔE 19.8, all >=3:1 contrast against this app's actual `--card` surface). `SimulatorPage.tsx` gained a Single Plan/Compare Scenarios mode toggle — deliberately kept separate mental models (§4's own open question, resolved): Compare mode is always a single pit lap per scenario (matching the vision's literal "lap 30 vs 33 vs 36" example), never a multi-stop sequence; the existing "+ Add Pit Stop" sequential planner is untouched. Closes §3's remaining two gap rows. |
+| 5 | Desktop/mobile port | Desktop: full port (verbatim `PositionDistributionChart.tsx` copy — zero web-specific dependencies — plus an adapted `SimulatorPage.tsx`, CSV export extended with the new columns). Mobile: data layer only (`types/simulate.ts` synced, `PlanExplanationCard.tsx` got the CP6/§7 wording fix) — the mode toggle and a native equivalent of the distribution chart were deliberately scoped OUT as a dedicated future effort (mobile's existing chart already needs a synthetic-series workaround for simple gain/loss coloring; a *dynamically-sized* grouped bar chart is a bigger, separate native-charting task), disclosed inline in `mobile/src/README.md`. |
+| 6 | Docs | This completion summary; CLAUDE.md's Notes and Deferred Wiring sections updated to match. |
+
+**Key validation** — a genuine 3-scenario compare request against the real
+running stack (not a mock), Belgian GP 2026 R10, pit laps 25/28/31 for the
+same driver/race-state: **resolved in 34s total** (comfortably under the 60s
+client timeout), each scenario producing genuinely different, plausible
+outcomes —
+
+```
+label='Pit lap 25'  pit_laps=[25]  mean_pos=6.826  finish=5093.56  top: P7 80.1%, P6 18.7%
+label='Pit lap 28'  pit_laps=[28]  mean_pos=6.545  finish=5091.83  top: P7 54.7%, P6 44.5%
+label='Pit lap 31'  pit_laps=[31]  mean_pos=6.113  finish=5089.53  top: P6 74.8%, P7 18.8%
+```
+
+— exactly the vision's own use case (§1), now real.
+
+**Supplementary validation — a genuine LIVE race, not historical/replay
+(2026-09-06, Italian GP 2026 Round 13, Monza):** every prior verification in
+this document used a completed, historically-ingested session
+(`ingest_historical.py`). This one ran while the race was actually live via
+`ingest_live_session.py`'s real live path — different data-freshness
+characteristics (only 3 laps ingested at query time), different validation
+edge (`current_lap` one past real progress, the genuine "what-if starting
+now" case `strategy_service.validate_current_lap` exists for), and it held
+up. The user ran a real 2-scenario compare for VER at lap 4 (pit lap 30 on
+HARD vs. pit lap 23 on MEDIUM, 53 remaining-lap horizon — Monza's real race
+distance). Independently cross-checked against the live database, not just
+"the numbers look plausible":
+- `starting_position` (back-calculated from the returned
+  `position_gain_loss`/`mean_position` pair, consistent across both
+  scenarios) = 4 — matches VER's real `lap_data.position` at lap 3 (their
+  latest actually-ingested lap) exactly.
+- Every one of the 9 `drivers_overtaken` entries' `gap_seconds` was
+  recomputed from the DB's own `SUM(lap_time_seconds)` through lap 3 (this
+  session has no `session_elapsed_seconds` — never populated for a live
+  session, only backfilled historical ones, per CLAUDE.md's Deferred
+  Wiring) and matched the API's reported value to 0.1s on all 9 (COL 0.9s,
+  PIA 8.0s, NOR 9.6s, LIN 10.8s, HAM 12.1s, BEA 17.3s, OCO 18.5s, ANT 19.9s,
+  BOR 20.6s), in the correct gap-ascending order.
+- The Option 3 wording fix (§7) rendered correctly in production — the
+  exact intended sentence ("This is a simplified snapshot that assumes
+  rivals hold their current pace... the Monte Carlo position change above
+  already accounts for rivals' own tyre wear and pit stops") appeared under
+  both scenarios' explanation cards.
+
+This is decisive evidence the feature is a faithful reflection of the real
+live database state, not something that only happens to look right against
+one already-tested historical session.
+
+Test coverage added:
+8 new schema-validation unit tests, a `_tire_deg_predictions` memoization
+correctness test (seeded, bit-for-bit vs. the un-deduped path), 2 new
+integration tests (shared-seed correctness via two identical scenarios;
+single-plan-path regression guard), 7 new `PositionDistributionChart` unit
+tests (position-union/zero-fill, label fallback, legend gating, P/gain-hold-
+lose math), 5 new `SimulatorPage` compare-mode tests (mode toggle, payload
+shape, scenario cap, minimum-1-scenario guard). Full suites green: 302
+backend unit + 3 relevant integration tests; 54 web vitest tests; `tsc`
+clean on web/desktop/mobile; full production `vite build` succeeds on
+web/desktop.
+
+**Open follow-ups (not blocking — see CLAUDE.md's Deferred Wiring &
+Integration Gaps):**
+1. §7 below — `_build_plan_explanation`'s narrative can still contradict
+   the real Monte Carlo number it explains; only a cheap wording mitigation
+   shipped this session, not the full fix.
+2. Mobile's Compare Scenarios UI + native distribution chart (CP5's own
+   scoped-out item).
+3. `_run_one_scenario`'s shared-seed idea (CP3) is not applied to the
+   single-plan path, by design — that path still uses an unseeded RNG,
+   unchanged from before this rebuild.
+
+---
+
+## 7. Deferred — `_build_plan_explanation`'s narrative can contradict the real simulation
+
+**Not fixed this session — needs a dedicated future session.** Discovered
+2026-09-06 during manual verification of Checkpoint 4's Compare Scenarios
+mode: the user ran two real scenarios (pit lap 25 vs. pit lap 31) and got
+back a `PlanExplanationCard` for each reading, almost verbatim, "Only 19
+[13] laps remaining after pit — not enough to recover on fresh tyres... Fresh
+HARD tyre advantage: ~0.3s/lap — recovers only ~5.7s [3.9s] in 19 [13]
+laps," listing the SAME 5 rivals (HAM, NOR, PIA, ANT, VER) as having
+overtaken and never being caught, for BOTH scenarios. The user correctly
+identified this as unrealistic: those rivals will also need to pit
+eventually (or suffer catastrophic tyre wear staying out), so treating them
+as a permanent, un-catchable wall is wrong — and the repetition across two
+different pit laps, side by side in the new Compare view, is what made the
+flaw obvious in a way a single-scenario view never had.
+
+**Root cause, confirmed by code trace, not assumption:**
+`prediction_worker._build_plan_explanation` is a static heuristic, entirely
+disconnected from the real Monte Carlo simulation two lines above it in the
+same response:
+- `drivers_overtaken` is a snapshot of the field's gaps AT `current_lap` —
+  frozen. Reasonable on its own terms ("who's close enough to leapfrog you
+  right now"), but not evolved forward at all.
+- `fresh_tyre_gain_per_lap` comes from `_FRESH_TYRE_GAIN_PER_LAP_SECONDS`,
+  a **hardcoded per-compound constant** (`{"HARD": 0.3, "MEDIUM": 0.5,
+  "SOFT": 0.8}`) — not derived from the tire_deg model's actual predicted
+  degradation curve at all.
+- `total_recoverable_seconds = fresh_tyre_gain_per_lap × laps_after_pit`
+  implicitly assumes every rival in `drivers_overtaken` holds their EXACT
+  current pace for the rest of the race, tyres never degrading, never
+  pitting again.
+
+This is a real, confirmed divergence from the actual simulation:
+`race_simulator.simulate_race`'s per-lap loop gives every driver EXCEPT the
+requester the pit_predictor model's own autonomous pit decision, every lap,
+for the whole simulated remainder — `forced_pit_laps` only ever overrides
+the requester's own flag. Every rival's tyre degradation is modelled too
+(the same batched `_tire_deg_predictions` call, using their own evolving
+compound/tyre age). So `position_gain_loss`/`mean_position` already account
+for rivals eventually pitting and losing time — the narrative explaining
+that number does not, and can flatly contradict it.
+
+**Mitigated 2026-09-06 (Option 3 — cheap, honest, shipped to all 3
+clients):** removed the "sufficient"/"not enough to recover" verdict
+language entirely from `PlanExplanationCard` (web/desktop's inline copy in
+`SimulatorPage.tsx`; mobile's `components/strategy/PlanExplanationCard.tsx`)
+— the remaining sentence states the assumption explicitly ("this is a
+simplified snapshot that assumes rivals hold their current pace with no
+further pit stops of their own — the Monte Carlo position change above
+already accounts for rivals' own tyre wear and pit stops") instead of
+asserting a conclusion the real number can contradict. This is a copy-only
+fix — no model or data changes, and it does not make the narrative a
+genuine explanation of the real number, only stops it from actively
+contradicting one.
+
+**Full fix — NOT done, two parts, real architectural work:**
+1. **Replace the hardcoded constants with a real tire_deg model call.**
+   Predict the OLD compound's degradation delta at its current/growing tyre
+   age vs. the NEW compound at `tyre_age=0`, for the requester specifically
+   — removes the "magic number," still doesn't model rivals pitting.
+   Smaller, contained change (~30-60 min).
+2. **Extract real per-lap pit events for every rival from the actual
+   simulation run, and build the narrative from that.** This is the real
+   fix. `race_simulator.simulate_race`/`RaceSimulationResult` currently
+   returns only FINAL AGGREGATED distributions per driver
+   (`DriverPositionDistribution`) — no per-lap history survives the call at
+   all. Needs a new return shape (e.g. per-driver per-lap `pit_flags`/
+   compound/position across some or all of the 1000 sims, or a
+   representative summary) threaded through `_run_one_scenario`/
+   `_build_plan_explanation`. Real engineering effort — likely several
+   hours on its own, not a quick follow-on to part 1.
+
+**Why this matters:** the narrative sits directly below the real
+`position_gain_loss` number in the same card, so a reader has every reason
+to assume it's explaining that number — the Option 3 mitigation stops it
+from asserting things that flatly contradict the real number, but doesn't
+make it a genuine, dynamically-correct explanation. Parts 1+2 above would
+close that gap for real. Held for a dedicated future session per explicit
+user decision 2026-09-06 — do not fold into an unrelated change.
