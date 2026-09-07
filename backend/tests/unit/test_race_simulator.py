@@ -21,6 +21,7 @@ from backend.services.ml.pit_predictor import FEATURE_COLUMNS as PIT_FEATURE_COL
 from backend.services.ml.pit_predictor import _build_model
 from backend.services.ml.race_simulator import (
     SC_LAP_TIME_MULTIPLIER,
+    DriverPositionDistribution,
     DriverRaceState,
     RaceSimulationInput,
     RaceSimulationResult,
@@ -559,3 +560,117 @@ def test_sc_lap_time_derived_from_field_median_baseline(
         assert distribution.mean_finish_time_seconds == pytest.approx(
             expected_finish_time, abs=1e-6
         )
+
+
+# --- projected_pit_laps / finish_ahead_probability (What-If Simulator
+# rebuild part (b): see docs/core-feature-rebuild-whatif-simulator.md §7) ---
+
+
+@pytest.mark.unit
+def test_driver_position_distribution_defaults_new_fields_when_omitted() -> None:
+    """Every pre-existing DriverPositionDistribution(...) call site (real code
+    and other test fixtures in this suite) constructs one without
+    projected_pit_laps/finish_ahead_probability — both must default to empty,
+    not require every call site to be updated for this fix.
+    """
+    distribution = DriverPositionDistribution(
+        driver_id="driver-1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5400.0,
+        finish_time_p5_seconds=5350.0,
+        finish_time_p95_seconds=5460.0,
+    )
+    assert distribution.projected_pit_laps == []
+    assert distribution.finish_ahead_probability == {}
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_projected_pit_laps_reflects_forced_pit_lap(
+    race_state: RaceSimulationInput, tire_deg_pipelines: dict[str, Any], sc_model: SafetyCarModel
+) -> None:
+    """A forced what-if pit lap must show probability 1.0 at that lap for the
+    requesting driver — projected_pit_laps is captured from the SAME pit_flags
+    array that actually fires the pit stop (see simulate_race's own comment on
+    this), not a separate computation that could disagree with it. Another
+    driver, with a pit model that (almost) never recommends pitting on its own
+    (same no_pit_model as test_forced_pit_laps_changes_outcome_only_for_that_
+    driver), must show an empty projected_pit_laps — sparse, probability > 0.0
+    only, same convention as position_probabilities' own shaping.
+    """
+
+    def _no_pit_predict_proba(features: np.ndarray) -> np.ndarray:
+        return np.tile([0.95, 0.05], (features.shape[0], 1))
+
+    no_pit_model = MagicMock()
+    no_pit_model.predict_proba.side_effect = _no_pit_predict_proba
+
+    forced_driver_id = race_state.drivers[0].driver_id
+    other_driver_id = race_state.drivers[1].driver_id
+    forced_pit_laps = {forced_driver_id: {46: ("HARD", 0)}}
+
+    result = simulate_race(
+        race_state,
+        tire_deg_pipelines,
+        no_pit_model,
+        sc_model,
+        n_simulations=100,
+        rng_seed=123,
+        forced_pit_laps=forced_pit_laps,
+    )
+
+    forced_dist = next(d for d in result.driver_distributions if d.driver_id == forced_driver_id)
+    other_dist = next(d for d in result.driver_distributions if d.driver_id == other_driver_id)
+
+    assert forced_dist.projected_pit_laps == [(46, 1.0)]
+    assert other_dist.projected_pit_laps == []
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_finish_ahead_probability_complementary_and_matches_large_gap(
+    race_state: RaceSimulationInput,
+    tire_deg_pipelines: dict[str, Any],
+    pit_model: Any,
+) -> None:
+    """finish_ahead_probability must (a) reflect a real, large starting gap and
+    (b) be internally consistent: P(i ahead of j) + P(j ahead of i) == 1.0, since
+    both come from the SAME final cumulative_time array position_probabilities
+    is built from, not two independent estimates.
+
+    SC is force-disabled here (a MagicMock returning probability 0.0, not the
+    sc_model fixture's tiny-but-nonzero rate): an SC lap on the FINAL simulated
+    lap bunches every driver in that sim to the identical leader_time-derived
+    value (see _advance_lap), which can produce a genuine EXACT tie between two
+    drivers — contributing to neither direction and making (b)'s sum come out
+    slightly UNDER 1.0 (confirmed directly: ~0.998 over 1000 sims at the
+    sc_model fixture's real 0.001 rate, an accurate reflection of ~2 tied sims,
+    not a bug — see finish_ahead_probability's own docstring). Eliminating SC
+    isolates the property this test is actually about.
+
+    The race_state fixture starts driver i's cumulative_race_time_seconds at
+    100.0 * i — driver 0 leads driver 3 by 300s with only 3 laps remaining
+    (current_lap=45, total_laps=48), far too large a gap for per-lap noise
+    (LAP_TIME_NOISE_STD_SECONDS=0.35) to plausibly close. Driver 0 must finish
+    ahead of driver 3 in virtually every simulation.
+    """
+    no_sc_model = MagicMock()
+    no_sc_model.probability_within.return_value = 0.0
+
+    result = simulate_race(race_state, tire_deg_pipelines, pit_model, no_sc_model, rng_seed=17)
+    driver0_id = race_state.drivers[0].driver_id
+    driver3_id = race_state.drivers[3].driver_id
+    dist0 = next(d for d in result.driver_distributions if d.driver_id == driver0_id)
+    dist3 = next(d for d in result.driver_distributions if d.driver_id == driver3_id)
+
+    assert dist0.finish_ahead_probability[driver3_id] > 0.99
+    assert dist3.finish_ahead_probability[driver0_id] < 0.01
+    assert dist0.finish_ahead_probability[driver3_id] + dist3.finish_ahead_probability[
+        driver0_id
+    ] == pytest.approx(1.0, abs=1e-9)
+
+    # One entry per OTHER driver in the field, never a self-entry.
+    assert set(dist0.finish_ahead_probability) == {
+        d.driver_id for d in race_state.drivers if d.driver_id != driver0_id
+    }

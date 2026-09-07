@@ -119,6 +119,9 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
                                                         "2c6b1f8e-4a3d-4b2c-9e7f-1d8a5c3b6f42"
                                                     ),
                                                     "gap_seconds": 3.2,
+                                                    "finish_ahead_probability": 0.64,
+                                                    "rival_projected_pit_lap": 34,
+                                                    "rival_pit_probability": 0.71,
                                                 }
                                             ],
                                             "remaining_laps": 30,

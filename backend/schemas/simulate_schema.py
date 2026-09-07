@@ -158,11 +158,37 @@ class OvertakingDriver(BaseModel):
 
     driver_id, not driver_code — the frontend resolves id -> code/team color via
     its own driver roster query, same pattern as DriverChip/LiveTimingTower.
+
+    finish_ahead_probability/rival_projected_pit_lap/rival_pit_probability are
+    real outputs of the SAME 1000-run Monte Carlo simulate_race call behind
+    position_gain_loss/position_probabilities — added for the What-If
+    Simulator rebuild part (b) (see
+    docs/core-feature-rebuild-whatif-simulator.md §7) so this row's numbers
+    can no longer flatly contradict the real simulation result they sit next
+    to in the response. All three are None only when the simulation genuinely
+    has no data for this rival (should not happen in practice — every rival
+    in drivers_overtaken raced in the same simulate_race call — but never
+    coerced to a misleading 0.0 default).
     """
 
     position: int
     driver_id: str
     gap_seconds: float
+    # P(the requester finishes ahead of THIS rival specifically), from
+    # race_simulator.DriverPositionDistribution.finish_ahead_probability.
+    finish_ahead_probability: float | None = None
+    # This rival's own single most likely pit lap, from race_simulator.
+    # DriverPositionDistribution.projected_pit_laps (that rival's per-lap pit
+    # probability across all simulations, summarized to its peak). None means
+    # no lap in the simulated remainder had any meaningful pit probability for
+    # this rival — not necessarily "never pits," just not concentrated enough
+    # to name one lap.
+    rival_projected_pit_lap: int | None = None
+    # The pit probability AT rival_projected_pit_lap — always present together
+    # with rival_projected_pit_lap (both None or both set), so a reader can
+    # judge how confident that projection actually is rather than treating the
+    # named lap as a certainty.
+    rival_pit_probability: float | None = None
 
 
 class PlanExplanation(BaseModel):

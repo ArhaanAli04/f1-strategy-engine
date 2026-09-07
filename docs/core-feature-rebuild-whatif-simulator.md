@@ -1,16 +1,22 @@
 # Core Feature Rebuild — What-If Strategy Simulator
 
-> **Status: ✅ COMPLETE, 2026-09-06.** All 6 checkpoints (proposed and
-> approved checkpoint-by-checkpoint in-session, per §5's own anchor prompt)
+> **Status: ✅ COMPLETE, 2026-09-06 (§1-§6), plus a ✅ COMPLETE follow-on fix,
+> 2026-09-07 (§7).** §1-§6's 6 checkpoints (proposed and approved
+> checkpoint-by-checkpoint in-session, per §5's own anchor prompt)
 > implemented, tested, and verified against real data — see §6 for final
-> results per checkpoint. The rest of this document (§1-§5) is the original
-> investigation/scoping writeup and is kept as-is for historical context —
-> it describes the state of the system *before* this rebuild, not the
-> current state; §5's anchor prompt in particular is what was actually
-> pasted in to start this session, preserved verbatim rather than edited to
-> match what shipped. §7 documents one real, related bug this rebuild
-> surfaced but deliberately did NOT fix (also tracked in CLAUDE.md's
-> Deferred Wiring).
+> results per checkpoint. The rest of that part of this document (§1-§5) is
+> the original investigation/scoping writeup and is kept as-is for
+> historical context — it describes the state of the system *before* this
+> rebuild, not the current state; §5's anchor prompt in particular is what
+> was actually pasted in to start that session, preserved verbatim rather
+> than edited to match what shipped. §7 originally documented one real,
+> related bug that session surfaced but deliberately did NOT fix
+> (`_build_plan_explanation`'s narrative could contradict the real Monte
+> Carlo `position_gain_loss` it explains) — a dedicated 2026-09-07 follow-on
+> session (also 6 checkpoints) fixed it fully, both parts; §7 is kept as the
+> original problem writeup with a completion summary appended, not rewritten,
+> so the "why this was deferred" reasoning stays intact. Both sessions'
+> fixes are also tracked in CLAUDE.md's Deferred Wiring/Notes.
 >
 > Produced as a follow-on to the core-feature rebuild session that closed
 > `docs/core-feature-rebuild-strategy-recommendations.md` (the pit-window
@@ -487,3 +493,83 @@ from asserting things that flatly contradict the real number, but doesn't
 make it a genuine, dynamically-correct explanation. Parts 1+2 above would
 close that gap for real. Held for a dedicated future session per explicit
 user decision 2026-09-06 — do not fold into an unrelated change.
+
+---
+
+## §7 Completion Summary (2026-09-07)
+
+**Both parts above are done.** A dedicated follow-on session (independently
+investigated and confirmed this section's own findings against the current
+codebase first, per its own anchor-prompt-style discipline) implemented and
+verified both, checkpoint-by-checkpoint with approval between each — same
+convention as §5/§6 above.
+
+| CP | What | Result |
+|---|---|---|
+| 1 | Part 1: real tire_deg-derived degradation | New shared `tire_deg_model.project_stint_delta` (lifts `strategy_service._project_stint_delta`'s logic, adding the `pipeline_feature_count` schema guard `race_simulator._tire_deg_predictions` already uses elsewhere) — `strategy_service._project_stint_delta` now delegates to it, one implementation instead of two. `_build_plan_explanation` projects the OLD compound continuing to degrade (real tyre age at the plan's last forced pit) vs. the NEW compound fresh at `tyre_age=0`, both over the laps remaining after that pit. **Caught a real bug not in the original plan:** a multi-stop plan's LAST pit must resolve "old compound"/tyre-age from the PREVIOUS forced stop (`compounds[-2]`/`pit_laps[-2]`), not the plan's STARTING compound — the original scoping assumed a single pit stop implicitly. Falls back to the original hardcoded constant (non-regressive) when a real projection can't be made. The value can now be genuinely NEGATIVE (new compound projected slower — e.g. dry-track INTERMEDIATE, see CLAUDE.md's track-condition-input limitation) — a real signal the old constant could never produce. Also incidentally fixed: INTERMEDIATE/WET had no entry in the old constant dict at all (silently rendered nothing), now get a real value like every other compound. |
+| 2 | Frontend: sign-aware gate + copy | All 3 clients' render gate changed from `fresh_tyre_gain_per_lap > 0` to `remaining_laps > 0` (the sign is no longer what decides whether to show the line) and the copy rewritten to a `isFasterOnFreshTyre`-branched sentence — "X s/lap faster... recovering ~Ys" vs. "X s/lap SLOWER... this pit adds ~Ys". |
+| 3 | Part 2: `race_simulator` surfaces real per-driver simulation data | `DriverPositionDistribution` gained `projected_pit_laps` (a driver's own per-lap pit probability across all sims, captured from the SAME `pit_flags` array that already fires each simulated pit stop — captured AFTER the forced-pit override, so a what-if's forced lap correctly shows `1.0`) and `finish_ahead_probability` (P(this driver finishes ahead of each other driver), from the same final `cumulative_time` array `position_probabilities` is already built from). Both additive dataclass fields with empty defaults — no existing call site needed updating. **Caught a real test-tolerance bug, not a code bug:** an SC lap on the simulated FINAL lap can bunch two drivers to an identical value, a genuine exact tie that makes the two directions' `finish_ahead_probability` sum to just under 1.0 by design — the first version of this checkpoint's own test asserted exact 1.0 and failed; fixed by isolating the property with a zero-probability SC mock rather than loosening the tolerance to paper over an unexplained number. |
+| 4 | `_build_plan_explanation` consumes it | `OvertakingDriver` gained 3 nullable fields — the requester's real `finish_ahead_probability` for that specific rival, and that rival's own peak `projected_pit_laps` entry (lap + probability, via a new `_peak_projected_pit_lap` helper; ties resolve to the earliest lap). The list's SELECTION criterion (who appears in `drivers_overtaken`) is deliberately unchanged — this checkpoint enriches each row's DATA only, per this document's own §7 scope decision above. `driver_distributions_by_id` (built once per scenario from `result.driver_distributions`) threads through `_run_one_scenario`. |
+| 5 | Frontend render (3 clients) | Each `drivers_overtaken` row gained a second, compact muted line — e.g. "62% chance you finish ahead · pits ~lap 34 (71%)" — via a `formatOvertakingEnrichment` helper, rendering only whichever piece(s) are non-null (never a fabricated placeholder). |
+| 6 | Verification + docs | This completion summary; CLAUDE.md's Deferred Wiring entry updated to `[✅ done]` in place, plus one new deferred item (below). |
+
+**Verified:** 27 new/updated backend unit tests (`tire_deg_model.
+project_stint_delta`, `prediction_worker`'s degradation projection and
+`drivers_overtaken` enrichment, `race_simulator`'s new fields). Full backend
+unit suite 324 passed; integration suite (`test_race_simulation_
+serialization`/`test_strategy_endpoint`/`test_live_prediction_pipeline`) 14
+passed; `tsc`/`oxlint` clean on web/desktop/mobile; production `vite build`
+succeeds on web/desktop.
+
+**End-to-end against the real running stack** (Belgian GP 2026 R10 via
+`GET /strategy/last-ingested-session` — no live race was ingested/testable
+at verification time; Demo Replay was explicitly OUT of scope per this
+session's own corrected instruction — the Simulator was already
+deliberately scoped, in the original §1-§6 rebuild, to not sync with an
+active Demo Replay, so replay-mode verification was never required here):
+a real what-if for NOR (pit lap 30 onto HARD, Belgian GP R10) returned 5
+real `drivers_overtaken` rows, each with a real `finish_ahead_probability`
+— cross-checked directly: the one rival showing `0.976` was indeed the only
+rival the response's own `position_probabilities` showed the requester
+finishing immediately ahead of in the vast majority of simulations, the
+other 4 (all ahead of the requester's own likely finishing position) showed
+`0.0`. `rival_projected_pit_lap`/`rival_pit_probability` came back `null`
+for every non-forced rival tried across several real lap windows, including
+one built specifically around a real driver's (COL's) own actual lap-16 pit
+stop in this session — investigated rather than dismissed (see the new
+Deferred Wiring item below) and confirmed to be a genuine, pre-existing
+`tire_deg_model` characteristic unrelated to this fix's own code, not a
+wiring defect: a forced pit lap in the same verification session correctly
+showed probability exactly `1.0` at the forced lap, proving the mechanism
+itself works.
+
+**One real environment gotcha hit and fixed during verification, not a code
+bug:** the `backend` container's `uvicorn --reload` had not picked up the
+`simulate_schema.py` change (no reload logged) despite being up for over an
+hour after the edit, so the first live verification attempt got back
+`drivers_overtaken` rows with all 3 new fields silently absent (Pydantic
+dropping unrecognized dict keys, not an error — the WORKER container,
+already restarted per this project's own documented Celery convention, was
+computing and returning them correctly). Resolved with an explicit
+`docker compose restart backend`. Worth remembering for any future
+verification: a schema-only change needs the backend container restarted
+too, not just the worker, if `--reload` doesn't visibly log a reload.
+
+**New deferred item this verification surfaced** (added to CLAUDE.md's
+Deferred Wiring, same class as the existing `tire_deg_hard.pkl` first-lap
+entry — real ML work, not attempted): `tire_deg_model.
+predict_life_remaining_batch` returns `MAX_LOOKAHEAD_LAPS` (40) for
+SOFT/HARD/WET across almost the entire realistic tyre-age range (and past
+`tyre_age_laps≈2` on MEDIUM) for this exact promoted model set — confirmed
+via a direct sweep of each pipeline's raw predictions, not assumed. Since
+`predicted_life_remaining` feeds `pit_predictor`'s feature vector, this
+makes `race_simulator`'s organic (non-forced) pit decisions — and therefore
+`projected_pit_laps` — read as near-permanently "don't pit" in a
+short-horizon forward replay of already-past historical data, regardless of
+real gap/position context. Does not reduce the value of this session's own
+fix: `finish_ahead_probability` (the half of the enrichment actually
+exercised in every real scenario tried) is unaffected, and a `null` pit
+projection is the field's own documented, correctly-handled "no signal"
+contract — but it does mean `rival_projected_pit_lap` will likely stay
+`null` in most real usage until that underlying model characteristic is
+addressed.

@@ -1357,6 +1357,177 @@ class _OvertakingDriverEntry(TypedDict):
     position: int
     driver_id: str
     gap_seconds: float
+    # Added for the What-If Simulator rebuild part (b) — see
+    # docs/core-feature-rebuild-whatif-simulator.md §7 and
+    # _build_plan_explanation's own docstring for the full rationale. Both
+    # None when the simulation has no data for this rival (should not happen
+    # for a driver who actually raced in the same simulate_race call, but
+    # None is a genuine "unknown," never coerced to a misleading 0.0).
+    finish_ahead_probability: float | None
+    rival_projected_pit_lap: int | None
+    rival_pit_probability: float | None
+
+
+def _project_pit_stop_degradation(
+    race_state: RaceSimulationInput,
+    requester_state: DriverRaceState,
+    pit_laps: list[int],
+    compounds: list[str],
+    total_laps: int,
+    tire_deg_pipelines: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    laps_after_pit: int,
+) -> tuple[float, float]:
+    """Real tire_deg-derived (fresh_tyre_gain_per_lap, total_recoverable_seconds).
+
+    What-If Simulator rebuild part (a) — see
+    docs/core-feature-rebuild-whatif-simulator.md §7. Compares, for the
+    plan's LAST forced pit stop, the OLD compound continuing to degrade (tyre
+    age growing from its real value at that pit lap — "what if the driver had
+    stayed out instead") against the NEW compound starting fresh at
+    tyre_age=0 (what the plan actually does), both projected over
+    laps_after_pit laps via tire_deg_model.project_stint_delta — the same
+    shared projection strategy_service's undercut/overcut math uses. This
+    replaces the previous hardcoded _FRESH_TYRE_GAIN_PER_LAP_SECONDS lookup
+    with a real model-derived number.
+
+    Only called from the pit_laps' truthy branch — the caller (this module's
+    _build_plan_explanation) already guarantees pit_laps/compounds are
+    non-empty.
+
+    Args:
+        race_state, requester_state: See _build_plan_explanation.
+        pit_laps, compounds: This plan's forced pit schedule.
+        total_laps: current_lap + remaining_laps from the request.
+        tire_deg_pipelines: Fitted tire_deg pipelines keyed by compound name
+            (same dict _run_one_scenario already threads into simulate_race).
+        maps_cache: Output of _load_encoding_maps() — resolves driver_id_encoded/
+            circuit_id_encoded per compound, same convention as _build_race_state.
+        laps_after_pit: Laps remaining after the last forced pit stop
+            (total_laps - pit_laps[-1], already computed by the caller).
+    Returns:
+        (fresh_tyre_gain_per_lap, total_recoverable_seconds). The name
+        fresh_tyre_gain_per_lap is kept from before this fix (avoiding
+        schema/client churn — see the What-If Simulator rebuild CP1 decision)
+        despite the value no longer being a fixed positive constant: it can
+        now be NEGATIVE when the new compound is genuinely a worse choice for
+        the remaining laps (e.g. a dry-track INTERMEDIATE pit — see CLAUDE.md's
+        "no track-condition input" tyre-model limitation) — a real signal the
+        old constant could never produce.
+
+        Falls back to the ORIGINAL hardcoded _FRESH_TYRE_GAIN_PER_LAP_SECONDS
+        constant (non-regressive — an approximate number, not a lost line)
+        whenever either compound's projection can't be made: a missing
+        pipeline, a schema-mismatched pipeline, or predict() failing (see
+        project_stint_delta's own docstring), or laps_after_pit <= 0 (nothing
+        to project — also this function's own guard against a division by
+        zero below).
+    """
+    if laps_after_pit <= 0:
+        return 0.0, 0.0
+
+    new_compound = compounds[-1]
+    last_pit_lap = pit_laps[-1]
+
+    if len(pit_laps) >= 2:
+        # A later stint in a multi-stop plan: tyre age reset to 0 at the
+        # PREVIOUS forced pit stop, so the old compound's age at last_pit_lap
+        # is laps since that stop, and the old compound is whatever this plan
+        # set at that earlier stop (compounds[-2]) — NOT requester_state.compound,
+        # which is only the plan's STARTING compound (see _build_race_state's
+        # docstring: requester_state is overridden from the request's own
+        # current_compound, not re-derived per stint).
+        stint_start_lap = pit_laps[-2]
+        old_compound = compounds[-2]
+    else:
+        # The plan's only forced pit stop: the old compound is whatever the
+        # requester started the simulation on, and their tyre age grows from
+        # current_tyre_age (requester_state.tyre_age_laps) starting at
+        # race_state.current_lap.
+        stint_start_lap = race_state.current_lap
+        old_compound = requester_state.compound
+
+    # max(..., 0): pit_laps has no enforced chronological ordering beyond each
+    # entry individually falling within (current_lap, horizon_end] (see
+    # SimulateStrategyRequest._validate_pit_plan) — an out-of-order multi-stop
+    # plan (unlikely from the UI's own "+ Add Pit Stop" flow, which always
+    # appends, but not rejected by the schema) could otherwise make this
+    # negative. Clamping degrades to "assume a fresh-ish tyre" rather than
+    # feeding project_stint_delta a nonsensical negative tyre age.
+    old_tyre_age_at_pit = max(last_pit_lap - stint_start_lap, 0)
+    if stint_start_lap == race_state.current_lap:
+        old_tyre_age_at_pit += requester_state.tyre_age_laps
+
+    old_pipeline = tire_deg_pipelines.get(old_compound)
+    new_pipeline = tire_deg_pipelines.get(new_compound)
+    old_maps = _encoding_maps_for_compound(maps_cache, old_compound)
+    new_maps = _encoding_maps_for_compound(maps_cache, new_compound)
+    old_compound_encoded = _COMPOUND_ENCODING.get(old_compound, _COMPOUND_ENCODING["MEDIUM"])
+    new_compound_encoded = _COMPOUND_ENCODING.get(new_compound, _COMPOUND_ENCODING["MEDIUM"])
+    old_driver_code = tire_deg_model.resolve_driver_code(old_maps, requester_state.driver_id)
+    new_driver_code = tire_deg_model.resolve_driver_code(new_maps, requester_state.driver_id)
+    old_circuit_code = tire_deg_model.resolve_circuit_code(old_maps, race_state.circuit_name)
+    new_circuit_code = tire_deg_model.resolve_circuit_code(new_maps, race_state.circuit_name)
+
+    stay_out_sum = tire_deg_model.project_stint_delta(
+        old_pipeline,
+        old_compound_encoded,
+        old_driver_code,
+        old_circuit_code,
+        start_lap=last_pit_lap + 1,
+        n_laps=laps_after_pit,
+        start_tyre_age=old_tyre_age_at_pit,
+        total_laps=total_laps,
+    )
+    fresh_sum = tire_deg_model.project_stint_delta(
+        new_pipeline,
+        new_compound_encoded,
+        new_driver_code,
+        new_circuit_code,
+        start_lap=last_pit_lap + 1,
+        n_laps=laps_after_pit,
+        start_tyre_age=0,
+        total_laps=total_laps,
+    )
+
+    if stay_out_sum is None or fresh_sum is None:
+        fallback_gain = _FRESH_TYRE_GAIN_PER_LAP_SECONDS.get(new_compound, 0.0)
+        return fallback_gain, fallback_gain * laps_after_pit
+
+    total_recoverable_seconds = stay_out_sum - fresh_sum
+    fresh_tyre_gain_per_lap = total_recoverable_seconds / laps_after_pit
+    return fresh_tyre_gain_per_lap, total_recoverable_seconds
+
+
+def _peak_projected_pit_lap(
+    distribution: race_simulator.DriverPositionDistribution | None,
+) -> tuple[int | None, float | None]:
+    """The single most likely pit lap for a driver, from their own projected_pit_laps.
+
+    Summarizes race_simulator.DriverPositionDistribution.projected_pit_laps (a
+    full per-lap probability list across the simulated remainder) down to one
+    (lap, probability) pair for display in a drivers_overtaken row — see
+    _build_plan_explanation. Both the lap AND its probability are returned
+    together (never just the lap) so a caller can judge confidence rather than
+    the peak lap alone implying more certainty than the distribution actually
+    has. Ties resolve to the EARLIEST lap: Python's max() keeps the first-seen
+    maximum, and projected_pit_laps is already sorted by lap ascending.
+
+    Args:
+        distribution: That driver's DriverPositionDistribution from this
+            scenario's simulate_race call, or None if unavailable (looked up
+            by driver_id from a separate dict — should always be present for
+            a driver who actually raced in the same simulate_race call, but
+            handled defensively since it's a separate lookup, not a direct
+            reference).
+    Returns:
+        (lap, probability) of the highest pit-probability lap, or (None, None)
+        if distribution is None or no lap has any nonzero pit probability.
+    """
+    if distribution is None or not distribution.projected_pit_laps:
+        return None, None
+    lap, probability = max(distribution.projected_pit_laps, key=lambda entry: entry[1])
+    return lap, probability
 
 
 def _build_plan_explanation(
@@ -1366,16 +1537,32 @@ def _build_plan_explanation(
     compounds: list[str],
     total_laps: int,
     remaining_laps: int,
+    tire_deg_pipelines: dict[str, Any],
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    driver_distributions_by_id: dict[str, race_simulator.DriverPositionDistribution],
 ) -> dict[str, Any]:
     """Explain why a plan's position_gain_loss came out the way it did.
 
     drivers_overtaken lists every OTHER driver currently behind the requester
     (higher cumulative_race_time_seconds) whose gap is less than
     race_simulator.PIT_STOP_SECONDS — close enough to leapfrog the requester
-    on a full pit-stop time loss. This is a static property of the field's
-    gaps at current_lap, computed the same way regardless of whether this
-    plan has a forced pit stop — the frontend relabels the same list
-    ("overtake you" vs "you overtake") based on position_gain_loss's sign.
+    on a full pit-stop time loss. This SELECTION criterion is a static
+    property of the field's gaps at current_lap, computed the same way
+    regardless of whether this plan has a forced pit stop — the frontend
+    relabels the same list ("overtake you" vs "you overtake") based on
+    position_gain_loss's sign. Deliberately UNCHANGED by either part of the
+    What-If Simulator rebuild fix — see docs/core-feature-rebuild-whatif-
+    simulator.md §7's own scope decision: part (a) enriched fresh_tyre_
+    gain_per_lap/total_recoverable_seconds only, and this part (b) enriches
+    each row's DATA (finish_ahead_probability/rival_projected_pit_lap/
+    rival_pit_probability, all real Monte Carlo outputs from THIS SAME
+    simulate_race call) without touching which drivers appear in the list or
+    why.
+
+    fresh_tyre_gain_per_lap/total_recoverable_seconds are a real
+    tire_deg-model-derived comparison — see _project_pit_stop_degradation's
+    own docstring for the full rationale and the fallback behaviour when a
+    real projection can't be made.
 
     Args:
         race_state: The built field state (post _build_race_state).
@@ -1384,9 +1571,36 @@ def _build_plan_explanation(
         total_laps: current_lap + remaining_laps from the request.
         remaining_laps: The request's own remaining_laps — used verbatim only
             when pit_laps is empty (no forced stop to measure "after" from).
+        tire_deg_pipelines, maps_cache: See _project_pit_stop_degradation.
+        driver_distributions_by_id: Every driver in this SAME simulate_race
+            call's result.driver_distributions, keyed by driver_id (built once
+            by _run_one_scenario, not re-derived here). Used for two things:
+            (1) requester_state's own DriverPositionDistribution.
+            finish_ahead_probability, read per rival to answer "do I actually
+            end up ahead of this specific rival?" with the real simulated
+            probability, replacing what used to be an implicit assumption a
+            reader could only infer from position_gain_loss overall; (2) each
+            rival's OWN DriverPositionDistribution.projected_pit_laps
+            (summarized via _peak_projected_pit_lap), extracted from the same
+            per-lap pit_flags array simulate_race already computes for every
+            driver — not a fresh assumption, unlike the frozen "rivals never
+            pit" premise this explanation used to (and, per fresh_tyre_gain_
+            per_lap/total_recoverable_seconds's OWN remaining static-pace
+            assumption, still partly does) rely on.
     Returns:
         PlanExplanation-shaped dict.
     """
+    requester_distribution = driver_distributions_by_id.get(requester_state.driver_id)
+    requester_finish_ahead = (
+        requester_distribution.finish_ahead_probability
+        if requester_distribution is not None
+        else {}
+    )
+    peak_pit_by_driver_id = {
+        driver.driver_id: _peak_projected_pit_lap(driver_distributions_by_id.get(driver.driver_id))
+        for driver in race_state.drivers
+    }
+
     drivers_overtaken: list[_OvertakingDriverEntry] = sorted(
         (
             _OvertakingDriverEntry(
@@ -1394,6 +1608,9 @@ def _build_plan_explanation(
                 driver_id=driver.driver_id,
                 gap_seconds=driver.cumulative_race_time_seconds
                 - requester_state.cumulative_race_time_seconds,
+                finish_ahead_probability=requester_finish_ahead.get(driver.driver_id),
+                rival_projected_pit_lap=peak_pit_by_driver_id[driver.driver_id][0],
+                rival_pit_probability=peak_pit_by_driver_id[driver.driver_id][1],
             )
             for driver in race_state.drivers
             if driver.driver_id != requester_state.driver_id
@@ -1406,17 +1623,27 @@ def _build_plan_explanation(
 
     if pit_laps:
         laps_after_pit = max(total_laps - pit_laps[-1], 0)
-        fresh_tyre_gain_per_lap = _FRESH_TYRE_GAIN_PER_LAP_SECONDS.get(compounds[-1], 0.0)
+        fresh_tyre_gain_per_lap, total_recoverable_seconds = _project_pit_stop_degradation(
+            race_state,
+            requester_state,
+            pit_laps,
+            compounds,
+            total_laps,
+            tire_deg_pipelines,
+            maps_cache,
+            laps_after_pit,
+        )
     else:
         laps_after_pit = remaining_laps
         fresh_tyre_gain_per_lap = 0.0
+        total_recoverable_seconds = 0.0
 
     return {
         "pit_cost_seconds": race_simulator.PIT_STOP_SECONDS,
         "drivers_overtaken": drivers_overtaken,
         "remaining_laps": laps_after_pit,
         "fresh_tyre_gain_per_lap": fresh_tyre_gain_per_lap,
-        "total_recoverable_seconds": fresh_tyre_gain_per_lap * laps_after_pit,
+        "total_recoverable_seconds": total_recoverable_seconds,
     }
 
 
@@ -1454,6 +1681,7 @@ def _run_one_scenario(
     tire_deg_pipelines: dict[str, Any],
     pit_model: Any,
     sc_model: Any,
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
     pit_laps: list[int],
     compounds: list[str],
     total_laps: int,
@@ -1479,6 +1707,10 @@ def _run_one_scenario(
             in this request (not something simulate_race's outcome affects).
         requesting_driver_id: The driver running the what-if.
         tire_deg_pipelines, pit_model, sc_model: Loaded ML models.
+        maps_cache: Output of _load_encoding_maps() — threaded into
+            _build_plan_explanation for its real tire_deg-derived degradation
+            comparison (What-If Simulator rebuild part (a), see
+            docs/core-feature-rebuild-whatif-simulator.md §7).
         pit_laps, compounds: This scenario's forced pit plan — may be empty
             (that scenario's pit timing is left fully model-driven).
         total_laps, remaining_laps: Request-level race-length context,
@@ -1522,14 +1754,26 @@ def _run_one_scenario(
         )
 
     requester_id_str = str(requesting_driver_id)
-    requesting_distribution = next(
-        d for d in result.driver_distributions if d.driver_id == requester_id_str
-    )
+    # Built once per scenario, keyed by driver_id — feeds _build_plan_
+    # explanation's finish_ahead_probability/projected-pit-lap enrichment
+    # (What-If Simulator rebuild part (b), see docs/core-feature-rebuild-
+    # whatif-simulator.md §7): every driver's own DriverPositionDistribution
+    # from THIS scenario's simulate_race call, not a fresh computation.
+    driver_distributions_by_id = {d.driver_id: d for d in result.driver_distributions}
+    requesting_distribution = driver_distributions_by_id[requester_id_str]
     position_gain_loss = round(
         requester_state.starting_position - requesting_distribution.mean_position
     )
     explanation = _build_plan_explanation(
-        race_state, requester_state, pit_laps, compounds, total_laps, remaining_laps
+        race_state,
+        requester_state,
+        pit_laps,
+        compounds,
+        total_laps,
+        remaining_laps,
+        tire_deg_pipelines,
+        maps_cache,
+        driver_distributions_by_id,
     )
 
     return {
@@ -1645,6 +1889,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                 tire_deg_pipelines,
                 pit_model,
                 sc_model,
+                maps_cache,
                 pit_laps=[int(lap) for lap in scenario.get("pit_laps", [])],
                 compounds=[str(c).upper() for c in scenario.get("compounds", [])],
                 total_laps=total_laps,
@@ -1663,6 +1908,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                 tire_deg_pipelines,
                 pit_model,
                 sc_model,
+                maps_cache,
                 pit_laps=pit_laps,
                 compounds=compounds,
                 total_laps=total_laps,

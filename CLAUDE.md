@@ -507,31 +507,44 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Core feature rebuild — What-If Strategy Simulator (multi-scenario compare)
-Status:   All 6 checkpoints of docs/core-feature-rebuild-whatif-simulator.md
-          complete (see that doc's §6 and this file's own ✅ Notes entry for
-          full detail): CP1 memoized _tire_deg_predictions (~50s -> ~7-10s
-          per simulate_race call, bit-identical output), CP2 exposed
-          position_probabilities/mean_position on the response, CP3 added
-          server-orchestrated multi-scenario compare (SimulateStrategyRequest
-          .scenarios, shared-seed common random numbers) + starting_position,
-          CP4 built PositionDistributionChart.tsx + a Single Plan/Compare
-          Scenarios mode toggle, CP5 ported desktop in full and mobile's data
-          layer only (native chart deferred, disclosed in mobile/src/
-          README.md), CP6 is this doc update. Validated end-to-end against
-          the real running stack (3-scenario compare, 34s total, genuinely
-          distinguishable outcomes). Along the way, discovered (and
-          partially fixed) that PlanExplanationCard's narrative text can
-          contradict the real Monte Carlo position_gain_loss it explains —
-          see the _build_plan_explanation entry in Deferred Wiring above
-          (Option 3 wording mitigation shipped to all 3 clients; the full
-          fix — real tire_deg-derived degradation + per-lap rival pit
-          events extracted from the simulation itself — is deferred to a
-          dedicated future session, NOT started).
-Next:     A dedicated session for the _build_plan_explanation full fix
-          (two parts — see Deferred Wiring's own entry for the exact scope),
-          or mobile's deferred Compare Scenarios UI/native chart, or return
-          to docs/day-deferred-fixes-session2-handoff.md's remaining 3 items
+Day:      _build_plan_explanation full fix — What-If Simulator part (a)+(b)
+          (2026-09-07, dedicated follow-on to the 2026-09-06 multi-scenario
+          compare rebuild)
+Status:   Both parts of the _build_plan_explanation narrative-can-contradict-
+          the-real-simulation fix are done (see the now-✅ Deferred Wiring
+          entry for full detail), 6 checkpoints: CP1 replaced the hardcoded
+          _FRESH_TYRE_GAIN_PER_LAP_SECONDS constant with a real two-branch
+          tire_deg_model projection (new shared project_stint_delta,
+          strategy_service's own stint projection now delegates to it too) —
+          caught and fixed a real multi-stop old-compound-resolution bug not
+          in the original plan along the way. CP2 updated all 3 clients'
+          render gate/copy to be sign-aware (the value can now be genuinely
+          negative). CP3 added race_simulator.DriverPositionDistribution
+          .projected_pit_laps/finish_ahead_probability, both captured from
+          arrays simulate_race's loop already computes, not new computation
+          — a test-tolerance bug caught and fixed here too (an SC-lap exact
+          tie makes two directions' probabilities sum to just under 1.0 by
+          design). CP4 threads both into _build_plan_explanation, enriching
+          (not changing the selection of) each drivers_overtaken row — 3 new
+          nullable OvertakingDriver fields. CP5 rendered the enrichment in
+          all 3 clients. CP6 verified end-to-end against the real running
+          stack (Belgian GP 2026 R10 via last-ingested-session — no live
+          race was testable; Demo Replay deliberately out of scope, per the
+          Simulator's own already-documented non-live-mode design) and
+          updated docs. Real finding along the way, not a bug in this fix:
+          predicted_life_remaining is pegged at MAX_LOOKAHEAD_LAPS for most
+          of the realistic tyre-age range on this exact promoted model set,
+          so organic (non-forced) projected_pit_laps came back empty in
+          every real scenario tried — root-caused to tire_deg_model itself
+          (confirmed via a direct pipeline sweep), tracked as its own new
+          deferred item, same class as the existing tire_deg_hard.pkl
+          first-lap entry. 27 new/updated backend unit tests, full unit
+          suite 324 passed, integration suite 14 passed, tsc/oxlint clean on
+          all 3 clients.
+Next:     Mobile's deferred Compare Scenarios UI/native chart, the new
+          predicted_life_remaining-pegged-at-cap deferred item (real ML
+          work, same class as the tire_deg_hard.pkl entry), or return to
+          docs/day-deferred-fixes-session2-handoff.md's remaining 3 items
           (6: strategic adaptation research-first, 8: WET model retrain,
           10: track-condition input). Fly.io deployment (Day 40 A4) still
           pending behind whichever of the above gets picked up first. Note:
@@ -746,25 +759,25 @@ each item below is tagged genuinely deferred (real future work), out of
 scope for this portfolio project (documented and closed, not going to
 happen), or was found already fixed and moved into ### Notes below instead.
 
-- **[deferred, real architectural work] `prediction_worker._build_plan_explanation`'s
-  narrative can contradict the real Monte Carlo `position_gain_loss` it's
+- **[✅ done 2026-09-07] `prediction_worker._build_plan_explanation`'s
+  narrative could contradict the real Monte Carlo `position_gain_loss` it's
   supposed to be explaining.** `drivers_overtaken` is a frozen gap snapshot
-  at `current_lap`, and `fresh_tyre_gain_per_lap` comes from a hardcoded
-  per-compound constant (`_FRESH_TYRE_GAIN_PER_LAP_SECONDS = {"HARD": 0.3,
-  "MEDIUM": 0.5, "SOFT": 0.8}`) — `total_recoverable_seconds` then assumes
-  every rival in that list holds their exact current pace for the rest of
-  the race, never pitting again, tyres never degrading. This is a real
-  divergence from the actual simulation: `race_simulator.simulate_race`'s
-  per-lap loop gives every OTHER driver the pit_predictor model's own
-  autonomous pit decision every lap for the whole simulated remainder
-  (`forced_pit_laps` only ever overrides the requester's own flag), and
-  every rival's tyre degradation is modelled too — so `position_gain_loss`/
-  `mean_position` already account for rivals eventually pitting and losing
-  time, while the narrative explaining that number does not, and can
-  flatly contradict it. Discovered 2026-09-06 building the What-If
-  Simulator's multi-scenario compare feature (see
-  docs/core-feature-rebuild-whatif-simulator.md §7 for the full writeup)
-  — the SAME misleading "not enough to recover on fresh tyres" text
+  at `current_lap` (this SELECTION criterion is unchanged by this fix — see
+  below), and `fresh_tyre_gain_per_lap` came from a hardcoded per-compound
+  constant (`_FRESH_TYRE_GAIN_PER_LAP_SECONDS = {"HARD": 0.3, "MEDIUM": 0.5,
+  "SOFT": 0.8}`) — `total_recoverable_seconds` then assumed every rival in
+  that list holds their exact current pace for the rest of the race, never
+  pitting again, tyres never degrading. This was a real divergence from the
+  actual simulation: `race_simulator.simulate_race`'s per-lap loop gives
+  every OTHER driver the pit_predictor model's own autonomous pit decision
+  every lap for the whole simulated remainder (`forced_pit_laps` only ever
+  overrides the requester's own flag), and every rival's tyre degradation is
+  modelled too — so `position_gain_loss`/`mean_position` already accounted
+  for rivals eventually pitting and losing time, while the narrative
+  explaining that number did not, and could flatly contradict it. Discovered
+  2026-09-06 building the What-If Simulator's multi-scenario compare feature
+  (see docs/core-feature-rebuild-whatif-simulator.md §7 for the full
+  writeup) — the SAME misleading "not enough to recover on fresh tyres" text
   repeating almost verbatim across two different candidate pit laps, side
   by side in the new Compare Scenarios view, made the disconnect from the
   real simulation obvious in a way a single-scenario view never had.
@@ -772,32 +785,114 @@ happen), or was found already fixed and moved into ### Notes below instead.
     clients):** removed the "sufficient"/"not enough to recover" verdict
     language entirely from `PlanExplanationCard` (web/desktop's inline copy
     in `SimulatorPage.tsx`, mobile's `components/strategy/
-    PlanExplanationCard.tsx`) — the remaining text states the assumption
-    explicitly ("this is a simplified snapshot that assumes rivals hold
-    their current pace with no further pit stops of their own — the Monte
-    Carlo position change above already accounts for rivals' own tyre wear
-    and pit stops") instead of asserting a conclusion the real number can
-    contradict. Copy-only — no model/data changes, and it doesn't make the
-    narrative a genuine explanation of the real number, only stops it from
-    actively contradicting one.
-  - **Full fix, NOT done — two parts, real engineering effort:**
-    (a) Replace the hardcoded constants with a real tire_deg model call —
-    predict the OLD compound's degradation delta at its current/growing
-    tyre age vs. the NEW compound at `tyre_age=0`, for the requester
-    specifically. Removes the "magic number," still doesn't model rivals
-    pitting. Smaller, contained change (~30-60 min).
-    (b) Extract real per-lap pit events for every rival from the actual
-    simulation run and build the narrative from that — the real fix.
-    `race_simulator.simulate_race`/`RaceSimulationResult` currently returns
-    only FINAL AGGREGATED distributions per driver
-    (`DriverPositionDistribution`), no per-lap history survives the call at
-    all. Needs a new return shape (e.g. per-driver per-lap `pit_flags`/
-    compound/position across some or all of the 1000 sims, or a
-    representative summary) threaded through `_run_one_scenario`/
-    `_build_plan_explanation`. Likely several hours on its own — not a
-    quick follow-on to (a). Held for a dedicated future session per
-    explicit user decision 2026-09-06 — do not fold into an unrelated
-    change.
+    PlanExplanationCard.tsx`) — the remaining text stated the assumption
+    explicitly instead of asserting a conclusion the real number could
+    contradict. Copy-only — no model/data changes.
+  - **Full fix done 2026-09-07, 6 checkpoints, both parts:**
+    **Part (a)** replaced the hardcoded constants with a real two-branch
+    `tire_deg_model` projection: the OLD compound continuing to degrade
+    (tyre age growing from its real value at the plan's last forced pit lap)
+    vs. the NEW compound starting fresh at `tyre_age=0`, both projected over
+    the laps remaining after that pit, via a new shared
+    `tire_deg_model.project_stint_delta` (CP1) — the single implementation
+    now behind both this and `strategy_service`'s undercut/overcut stint
+    projection (`_project_stint_delta` there is now a thin delegating
+    wrapper). Correctly resolves the "old compound" for a multi-stop plan's
+    LAST pit from `compounds[-2]`/tyre-age-since-`pit_laps[-2]` (a real bug
+    caught during implementation, not in the original plan — the plan's
+    STARTING compound would have been wrong for stint 3+). Falls back to the
+    original hardcoded constant (non-regressive) when a real projection
+    can't be made (missing/schema-mismatched pipeline, or `predict()`
+    failing). The value can now be genuinely NEGATIVE (the new compound
+    projected slower than staying out — e.g. a dry-track INTERMEDIATE pit,
+    see the "no track-condition input" entry below) — a real signal the old
+    constant could never produce; CP2 updated all 3 clients' `>0` render
+    gate to `remaining_laps > 0` and rewrote the copy to a sign-aware
+    faster/slower sentence. Also incidentally fixed: INTERMEDIATE/WET
+    previously had no entry in the constant dict at all (silently rendered
+    nothing) — now get a real projected value like every other compound.
+    **Part (b)**: `race_simulator.DriverPositionDistribution` gained
+    `projected_pit_laps` (a driver's own per-lap pit probability across all
+    simulations, captured from the SAME `pit_flags` array that already
+    fires each simulated pit stop — not a separate computation) and
+    `finish_ahead_probability` (P(this driver finishes ahead of each other
+    driver), from the same final `cumulative_time` array
+    `position_probabilities` is built from) (CP3) — both real Monte Carlo
+    outputs already available inside `simulate_race`'s existing loop, just
+    never surfaced before. `_build_plan_explanation` (CP4) now enriches each
+    `drivers_overtaken` row with the requester's real
+    `finish_ahead_probability` for that specific rival and that rival's own
+    peak projected pit lap/probability (`OvertakingDriver` gained 3 nullable
+    fields) — the SELECTION criterion (who appears in the list) is
+    deliberately unchanged, only each row's DATA. All 3 clients (CP5) render
+    a new compact line under each `drivers_overtaken` row ("62% chance you
+    finish ahead · pits ~lap 34 (71%)"), showing only whichever piece(s) are
+    available (both independently nullable) rather than a fabricated
+    placeholder.
+  - **A real, useful finding surfaced verifying part (b) against the real
+    running stack (Belgian GP 2026 R10, several real driver/lap windows,
+    including right before COL's own real lap-16 pit stop) that is NOT a bug
+    in this fix:** `finish_ahead_probability` renders correctly with real,
+    internally-consistent values every time (cross-checked: a rival whose
+    `finish_ahead_probability` was 0.976 was indeed the one rival the
+    requester's own `position_probabilities` showed finishing immediately
+    ahead of in the vast majority of sims) — but `rival_projected_pit_lap`/
+    `rival_pit_probability` came back `null` for every non-forced rival in
+    every real scenario tried. Root-caused, not assumed: `tire_deg_model
+    .predict_life_remaining_batch` returns `MAX_LOOKAHEAD_LAPS` (40) for
+    SOFT/HARD/WET across virtually the entire realistic tyre-age range for
+    this exact promoted model set (confirmed via a direct sweep — predicted
+    `lap_time_delta` never re-crosses `DEGRADATION_THRESHOLD_SECONDS=1.5`
+    past the first lap or two of a stint), and MEDIUM behaves the same past
+    tyre_age≈2. `predicted_life_remaining` feeds directly into
+    `pit_predictor`'s 8-feature vector — a value of "40 laps of life left"
+    is a strong, correctly-learned "don't pit" signal to that classifier, so
+    `pit_scores` stay far below `ALERT_THRESHOLD=0.65` for the whole
+    simulated remainder in a short-horizon forward replay of already-past
+    historical data. This is a pre-existing characteristic of the deployed
+    tire_deg models (confirmed unrelated to this fix: `predict_life_
+    remaining_batch` and `_pit_scores` were not touched by any of this
+    session's changes), not a wiring defect in `projected_pit_laps` itself
+    — proven separately via a forced-pit direct call in the SAME session,
+    which correctly showed probability exactly `1.0` at the forced lap. Both
+    `null` fields are the field's own documented, correctly-handled "no
+    signal" contract, not a failure — but the underlying tire_deg behavior
+    is a real, new, related item, tracked below rather than fixed here (out
+    of scope for this checkpoint, same class of issue as the existing
+    HARD-tyre-first-lap entry).
+  - **Verified:** 27 new/updated backend unit tests across `tire_deg_model`
+    (`project_stint_delta`: naive-reference equivalence, zero/negative laps,
+    missing/schema-mismatched pipeline, raising `predict()`),
+    `prediction_worker` (real-projection-vs-constant, negative-value case,
+    multi-stop old-compound resolution, pipeline-missing/schema-mismatch
+    fallback, pit-on-last-lap zero-division guard, out-of-order-pit-laps
+    clamp, `drivers_overtaken` enrichment with real and missing distribution
+    data, `_peak_projected_pit_lap`'s tie-resolution), and `race_simulator`
+    (defaults-when-omitted, forced-pit-lap shows probability 1.0,
+    complementary-probability + large-gap correctness — the last of these
+    caught and fixed a test tolerance bug, not a code bug: an SC lap on the
+    simulated final lap can produce a genuine exact tie between two drivers,
+    making the two directions' probabilities sum to slightly under 1.0 by
+    design, not exactly 1.0). Full backend unit suite 324 passed; integration
+    suite (`test_race_simulation_serialization`/`test_strategy_endpoint`/
+    `test_live_prediction_pipeline`) 14 passed; `tsc`/`oxlint` clean on web/
+    desktop/mobile; production `vite build` succeeds on web/desktop.
+    End-to-end against the real running stack (Belgian GP 2026 R10 — no live
+    race was ingested/testable at verification time, so this used
+    `last-ingested-session` per the Simulator's own documented non-live-mode
+    behaviour, not Demo Replay — the Simulator was already deliberately
+    scoped to not sync with an active replay, see the multi-scenario
+    rebuild's own §6 completion note above): a real NOR what-if (pit lap 30
+    onto HARD) returned 5 real `drivers_overtaken` rows with correct
+    `finish_ahead_probability` values, internally consistent with the
+    response's own `position_probabilities`. One real environment gotcha hit
+    and fixed along the way, not a code bug: the `backend` container's
+    `uvicorn --reload` had not actually picked up the `simulate_schema.py`
+    change (no reload logged), so the first verification attempt silently
+    dropped the 3 new `OvertakingDriver` fields entirely (Pydantic dropping
+    unrecognized dict keys, not an error) — resolved with an explicit
+    `docker compose restart backend`, same convention CLAUDE.md already
+    documents for the worker container.
 
 - **[✅ done 2026-09-02] Cumulative-sum gap/race-time reconstruction (`SUM(lap_time_
   seconds) ... WHERE lap_time_seconds IS NOT NULL`) silently produced
@@ -1044,6 +1139,83 @@ happen), or was found already fixed and moved into ### Notes below instead.
   with better `tyre_age_laps=1` coverage (or auditing whether HARD out-laps
   are being systematically filtered from the training corpus) — real ML
   work, not attempted today; genuinely deferred to a future day.
+
+- **[deferred — full writeup: `docs/tire-deg-model-quality-and-rival-pit-
+  behavior.md`] `predicted_life_remaining` is pegged at `MAX_LOOKAHEAD_LAPS`
+  (40) for almost the entire realistic tyre-age range on SOFT/HARD/WET (and
+  past `tyre_age_laps≈2` on MEDIUM), for this exact promoted model set —
+  making `race_simulator.simulate_race`'s organic (non-forced)
+  `projected_pit_laps` output usually empty for every non-forced driver in a
+  short-horizon forward replay of already-past historical data.** That
+  document is the authoritative, fuller writeup (real per-compound sweep
+  tables, a full Gap Analysis, and a dedicated anchor prompt for the future
+  session) — this entry is kept as a shorter in-context pointer, not
+  duplicated in full. Discovered 2026-09-07 verifying the What-If Simulator
+  rebuild part (b) fix (see the now-✅-done `_build_plan_explanation` entry
+  above) against the real running stack — every real `rival_projected_pit_
+  lap`/`rival_pit_probability` came back `null`, including in a window built
+  specifically around COL's own real lap-16 pit stop (Belgian GP 2026 R10).
+  Root-caused via a direct sweep
+  of `tire_deg_model.predict_life_remaining_batch`/each pipeline's raw
+  `predict()` output across `tyre_age_laps` 0-38: SOFT/HARD/WET's predicted
+  `lap_time_delta` never re-crosses `DEGRADATION_THRESHOLD_SECONDS=1.5` past
+  the first lap or two of a stint (confirmed directly inside the worker
+  container, real promoted pipelines, not a mock), so
+  `predict_life_remaining_batch`'s threshold-crossing search finds nothing
+  and correctly returns the cap. `predicted_life_remaining` feeds directly
+  into `pit_predictor`'s 8-feature vector — "40 laps of life left" is a
+  strong, correctly-learned "don't pit" signal to that classifier, so
+  `_pit_scores` stays far below `ALERT_THRESHOLD=0.65` for the whole
+  simulated remainder regardless of real gap/position context. **Confirmed
+  NOT a bug in `projected_pit_laps`/`finish_ahead_probability` themselves**
+  (see that entry's own verification note) — a forced pit lap in the SAME
+  session correctly showed probability exactly `1.0`, and
+  `finish_ahead_probability` rendered real, internally-consistent
+  probabilities throughout; this is a pre-existing characteristic of
+  `tire_deg_model.predict_life_remaining_batch` and the deployed pipelines
+  it's fed, untouched by that fix. Same general class of issue as the
+  `tire_deg_hard.pkl` first-lap entry directly above (a tire_deg model's
+  predicted degradation curve not matching real-world tyre life across part
+  of its input range) but a DIFFERENT mechanism and DIFFERENT compounds
+  affected (this one spans SOFT/HARD/WET/MEDIUM broadly across most tyre
+  ages, not just HARD's specific `tyre_age_laps=1` spike) — likely explains
+  why `race_simulator`'s organic pit decisions look conservative across many
+  of this project's other What-If Simulator verifications, not only this
+  session's. Fix requires the same class of real ML work as the entry
+  above — auditing/retraining `predict_life_remaining_batch`'s degradation
+  curves against real historical pit timing, not attempted today; genuinely
+  deferred to a future day.
+  - **A second, unresolved anomaly surfaced in the same investigation (full
+    detail: `docs/tire-deg-model-quality-and-rival-pit-behavior.md` §2c):**
+    calling the LIVE inference path directly for LEC/COL/GAS — the exact
+    three drivers CLAUDE.md's own Day-43 pit-window checkpoint names as
+    validated with the `pit_within_k_laps` advance-warning label fix
+    ("elevated 0.73-0.92 for the 5 laps approaching each pit") — against the
+    CURRENTLY deployed `pit_predictor.pkl` instead showed near-zero
+    probability approaching each driver's real pit and a ~0.9999 spike
+    exactly ON their real out-lap (COL: 0.000059 at lap 15 → 0.999904 at lap
+    16, their real first HARD lap). That is the PRE-fix same-lap-detector
+    shape the label fix's own docstring describes as already solved, for
+    the exact drivers that fix was validated against — not the post-fix
+    shape. Two explanations were considered and NEITHER was confirmed
+    (no local metrics sidecar exists for `pit_predictor.pkl` to check
+    training provenance): either the currently-deployed `:production` model
+    predates the fix's promotion (plausible given `train-models.yml`'s own
+    already-tracked "fetches zero 2026 laps" problem), or something
+    genuinely regressed since the Day-43 validation. Directly explained by
+    the SAME already-documented `tire_deg_hard.pkl` fresh-tyre-`age=1`
+    misprediction (immediately above this entry) driving `predicted_life_
+    remaining` to `0.0` the instant a driver is on a brand-new HARD tyre —
+    but WHY the currently-deployed model shows this shape for these
+    specific drivers, when a prior validation recorded the opposite, is
+    unresolved and needs independent reconciliation before the future
+    session assumes either direction.
+  Does not block or reduce the value of the
+  What-If Simulator rebuild's own fix: `finish_ahead_probability` (the more
+  informative half of the new `drivers_overtaken` enrichment, and the one
+  actually exercised in every real scenario tried) is unaffected, and a
+  `null` pit projection is the field's own documented, correctly-handled
+  "no meaningful signal" contract, not a rendering failure.
 
 - **[deferred] `StrategyPrediction.tire_life_remaining` stores the wrong
   value — the tire_deg model's raw `lap_time_delta` prediction instead of
@@ -1542,13 +1714,14 @@ client timeout), each scenario producing genuinely different, plausible
 outcomes (mean position 6.83/6.55/6.11). 302 backend unit + 3 relevant
 integration tests, 54 web vitest tests, `tsc` clean on web/desktop/mobile,
 production `vite build` succeeds on web/desktop. Also fixed along the way
-(Option 3 wording mitigation, all 3 clients) — see the
-`_build_plan_explanation` entry in Deferred Wiring above for the fuller,
-NOT-yet-fixed issue this surfaced: `PlanExplanationCard`'s narrative no
-longer asserts a "sufficient"/"not enough to recover" verdict that could
-contradict the real Monte Carlo `position_gain_loss` displayed right above
-it. Full checkpoint-by-checkpoint detail:
-docs/core-feature-rebuild-whatif-simulator.md §6-§7.
+(Option 3 wording mitigation, all 3 clients): `PlanExplanationCard`'s
+narrative no longer asserted a "sufficient"/"not enough to recover" verdict
+that could contradict the real Monte Carlo `position_gain_loss` displayed
+right above it — this was a cheap mitigation at the time, not the full fix;
+see the `_build_plan_explanation` entry in Deferred Wiring above for that
+full fix, completed 2026-09-07 in a dedicated follow-on session. Full
+checkpoint-by-checkpoint detail: docs/core-feature-rebuild-whatif-simulator
+.md §6-§7.
 
 **Core feature rebuild — pit-window recommendation engine (✅ fixed
 2026-09-04, 7 checkpoints):** Before: `/pit-window` returned the

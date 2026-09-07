@@ -36,10 +36,25 @@ export interface SimulateStrategyRequest {
 
 // driver_id, not driver_code — the frontend resolves id -> code/team color via
 // useDrivers, same pattern as DriverChip/LiveTimingTower.
+// finish_ahead_probability/rival_projected_pit_lap/rival_pit_probability are
+// real outputs of the SAME 1000-run Monte Carlo simulate_race call behind
+// position_gain_loss/position_probabilities — added for the What-If
+// Simulator rebuild part (b) (see
+// docs/core-feature-rebuild-whatif-simulator.md §7). All three are null only
+// when the simulation genuinely has no data for this rival (should not
+// happen in practice), never coerced to a misleading 0.
 export interface OvertakingDriver {
   position: number
   driver_id: string
   gap_seconds: number
+  // P(the requester finishes ahead of THIS rival specifically).
+  finish_ahead_probability: number | null
+  // This rival's own single most likely pit lap, from that rival's own
+  // per-lap pit probability across all simulations, summarized to its peak.
+  rival_projected_pit_lap: number | null
+  // The pit probability AT rival_projected_pit_lap — always present together
+  // with rival_projected_pit_lap (both null or both set).
+  rival_pit_probability: number | null
 }
 
 // drivers_overtaken is always "drivers behind the requester within

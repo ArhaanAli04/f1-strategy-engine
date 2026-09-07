@@ -18,7 +18,12 @@ import { exportStrategiesAsCsv } from "@/utils/csvExport"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
 import { formatRaceTime } from "@/utils/formatters"
-import type { DriverResponse, SimulatedRaceOutcome, SimulateStrategyRequest } from "@/types"
+import type {
+  DriverResponse,
+  OvertakingDriver,
+  SimulatedRaceOutcome,
+  SimulateStrategyRequest,
+} from "@/types"
 
 type Step = 1 | 2 | 3 | 4
 
@@ -101,6 +106,26 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${Math.abs(count) === 1 ? "" : "s"}`
 }
 
+// Summarizes an OvertakingDriver row's real Monte Carlo enrichment fields
+// (What-If Simulator rebuild part (b), see docs/core-feature-rebuild-whatif-
+// simulator.md §7) into one short line. Each piece is independently optional
+// (see OvertakingDriver's own docstring — both null together, never one set
+// without the other for the pit-lap pair) — renders whichever pieces are
+// available, joined by " · ", or "" (falsy, so the caller can skip rendering
+// entirely) when neither is available.
+function formatOvertakingEnrichment(entry: OvertakingDriver): string {
+  const parts: string[] = []
+  if (entry.finish_ahead_probability != null) {
+    parts.push(`${Math.round(entry.finish_ahead_probability * 100)}% chance you finish ahead`)
+  }
+  if (entry.rival_projected_pit_lap != null && entry.rival_pit_probability != null) {
+    parts.push(
+      `pits ~lap ${entry.rival_projected_pit_lap} (${Math.round(entry.rival_pit_probability * 100)}%)`,
+    )
+  }
+  return parts.join(" · ")
+}
+
 interface PlanExplanationCardProps {
   planLabel: string
   strategy: SimulatedRaceOutcome
@@ -115,6 +140,19 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
   const isGain = position_gain_loss > 0
   const isLoss = position_gain_loss < 0
   const freshCompound = strategy.compounds.at(-1)
+
+  // fresh_tyre_gain_per_lap is now a real tire_deg-model projection (backend
+  // What-If Simulator rebuild part (a) — see docs/core-feature-rebuild-
+  // whatif-simulator.md §7), not the old hardcoded per-compound constant —
+  // it can legitimately come out NEGATIVE when the new compound is a worse
+  // choice for the remaining laps than staying out would have been (e.g. a
+  // dry-track INTERMEDIATE pit). isFasterOnFreshTyre picks which half of the
+  // sentence applies; >= 0 (not > 0) so an exact-zero projection still reads
+  // as a (trivial) "faster" statement rather than needing a third branch.
+  const isFasterOnFreshTyre = explanation.fresh_tyre_gain_per_lap >= 0
+  const degradationMessage = isFasterOnFreshTyre
+    ? `Fresh ${freshCompound} tyre pace: ~${explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap faster than staying out over ${pluralize(explanation.remaining_laps, "lap")}, recovering ~${explanation.total_recoverable_seconds.toFixed(1)}s of the ${explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost.`
+    : `Fresh ${freshCompound} tyre pace: ~${Math.abs(explanation.fresh_tyre_gain_per_lap).toFixed(1)}s/lap SLOWER than staying out over ${pluralize(explanation.remaining_laps, "lap")} — this pit adds ~${Math.abs(explanation.total_recoverable_seconds).toFixed(1)}s on top of the ${explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost, instead of recovering it.`
 
   const heading = isGain
     ? `Why ${planLabel} gains ${pluralize(position_gain_loss, "position")}`
@@ -150,24 +188,38 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
       ) : (
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">{driverListLabel}</p>
-          <div className="space-y-0.5">
+          <div className="space-y-1">
             {explanation.drivers_overtaken.map((entry) => {
               const driver = driversById.get(entry.driver_id)
               const teamColor = driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR
+              const enrichmentText = formatOvertakingEnrichment(entry)
               return (
-                <div
-                  key={entry.driver_id}
-                  className="flex items-center gap-2 py-0.5 font-mono text-xs tabular-nums"
-                >
-                  <span className="w-7 text-muted-foreground">P{entry.position}</span>
-                  <span
-                    className="h-3 w-1 flex-shrink-0 rounded-full"
-                    style={{ backgroundColor: teamColor }}
-                  />
-                  <span className="w-10 font-semibold text-foreground">{driver?.code ?? "???"}</span>
-                  <span className="text-muted-foreground">
-                    +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
-                  </span>
+                <div key={entry.driver_id} className="py-0.5">
+                  <div className="flex items-center gap-2 font-mono text-xs tabular-nums">
+                    <span className="w-7 text-muted-foreground">P{entry.position}</span>
+                    <span
+                      className="h-3 w-1 flex-shrink-0 rounded-full"
+                      style={{ backgroundColor: teamColor }}
+                    />
+                    <span className="w-10 font-semibold text-foreground">
+                      {driver?.code ?? "???"}
+                    </span>
+                    <span className="text-muted-foreground">
+                      +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
+                    </span>
+                  </div>
+                  {/* Real Monte Carlo outputs from the SAME simulate_race call
+                      behind position_gain_loss above — What-If Simulator
+                      rebuild part (b), see docs/core-feature-rebuild-whatif-
+                      simulator.md §7. Rendered only when at least one piece
+                      is available (both fields can independently be null —
+                      see OvertakingDriver's own docstring), never a
+                      fabricated placeholder. */}
+                  {enrichmentText && (
+                    <p className="pl-9 font-mono text-[10px] text-muted-foreground/80">
+                      {enrichmentText}
+                    </p>
+                  )}
                 </div>
               )
             })}
@@ -175,22 +227,28 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
         </div>
       )}
 
-      {/* Deliberately does NOT assert a "sufficient"/"not enough to recover"
-          verdict — mirrors web/src/pages/SimulatorPage.tsx's Option 3 fix
-          (see docs/core-feature-rebuild-whatif-simulator.md). See that
-          file's own comment for the full reasoning: fresh_tyre_gain_per_lap
-          is a hardcoded constant and total_recoverable_seconds assumes
-          rivals hold their current pace forever, which the real Monte Carlo
-          simulation behind position_gain_loss does NOT assume. */}
-      {explanation.fresh_tyre_gain_per_lap > 0 && freshCompound && (
+      {/* fresh_tyre_gain_per_lap/total_recoverable_seconds are a real
+          tire_deg-model projection as of the What-If Simulator rebuild part
+          (a) fix (see docs/core-feature-rebuild-whatif-simulator.md §7) —
+          the OLD compound continuing to degrade vs. the NEW compound
+          starting fresh, both projected over the laps remaining after this
+          plan's last pit stop. This can genuinely come out negative (the
+          new compound projected SLOWER than staying out — see
+          isFasterOnFreshTyre above), which the old hardcoded constant could
+          never represent. Still deliberately does NOT assert a "sufficient"/
+          "not enough to recover" verdict about POSITION — mirrors web/src/
+          pages/SimulatorPage.tsx's Option 3 fix: drivers_overtaken above is
+          a frozen current-lap snapshot, and this line's rival-pace
+          assumption (see the trailing sentence below) is unchanged by this
+          fix — the real Monte Carlo simulation behind position_gain_loss
+          models every rival's own tyre wear and pit decisions lap by lap,
+          which this simplified pace comparison does not. */}
+      {explanation.remaining_laps > 0 && freshCompound && (
         <p className="text-xs text-muted-foreground">
-          Fresh {freshCompound} tyre advantage: ~{explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap over{" "}
-          {pluralize(explanation.remaining_laps, "lap")} recovers ~
-          {explanation.total_recoverable_seconds.toFixed(1)}s of the{" "}
-          {explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost. This is a simplified snapshot that
-          assumes rivals hold their current pace with no further pit stops of their own — the Monte Carlo
-          position change above already accounts for rivals' own tyre wear and pit stops, so treat that as
-          the number to trust and this line as partial context, not the full picture.
+          {degradationMessage} This is a simplified snapshot that assumes rivals hold their current pace
+          with no further pit stops of their own — the Monte Carlo position change above already accounts
+          for rivals' own tyre wear and pit stops, so treat that as the number to trust and this line as
+          partial context, not the full picture.
         </p>
       )}
     </div>
