@@ -925,3 +925,480 @@ def test_shape_position_probabilities_empty_when_all_zero() -> None:
     )
 
     assert prediction_worker._shape_position_probabilities(distribution) == []
+
+
+# --- _build_plan_explanation / _project_pit_stop_degradation (What-If
+# Simulator rebuild part (a): replacing the hardcoded
+# _FRESH_TYRE_GAIN_PER_LAP_SECONDS constant with a real tire_deg-model
+# projection — see docs/core-feature-rebuild-whatif-simulator.md §7). ---
+
+
+def _fit_pipeline_with_slope(slope: float, seed: int) -> Any:
+    """A synthetic tire_deg pipeline where predicted delta grows ~linearly with
+    tyre_age_laps — same construction as test_tire_deg_model.py's identical
+    private helper, duplicated here since it isn't exported.
+    """
+    rng = np.random.default_rng(seed)
+    n_samples = 150
+    tyre_age_col = tire_deg_model.FEATURE_COLUMNS.index("tyre_age_laps")
+    features = rng.random((n_samples, len(tire_deg_model.FEATURE_COLUMNS)))
+    features[:, tyre_age_col] = rng.uniform(0, 45, n_samples)
+    target = slope * features[:, tyre_age_col] + rng.normal(0, 0.02, n_samples)
+    pipeline = tire_deg_model._build_pipeline()
+    pipeline.fit(features, target)
+    return pipeline
+
+
+def _requester_and_race_state(
+    compound: str, tyre_age_laps: int, current_lap: int, total_laps: int
+) -> tuple[Any, Any]:
+    requester = race_simulator.DriverRaceState(
+        driver_id="requester",
+        starting_position=5,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=1,
+        cumulative_race_time_seconds=1000.0,
+    )
+    race_state = race_simulator.RaceSimulationInput(
+        circuit_name="Monza",
+        circuit_id_encoded=0,
+        current_lap=current_lap,
+        total_laps=total_laps,
+        wet_track=False,
+        track_temp=30.0,
+        air_temp=20.0,
+        drivers=[requester],
+    )
+    return requester, race_state
+
+
+def _requester_and_rival_race_state(
+    compound: str, tyre_age_laps: int, current_lap: int, total_laps: int, gap_seconds: float
+) -> tuple[Any, Any, Any]:
+    """Two-driver race_state — requester + one rival at the given gap (rival's
+    cumulative_race_time_seconds minus the requester's) — for testing
+    drivers_overtaken's real-simulation enrichment (What-If Simulator rebuild
+    part (b)). _requester_and_race_state above has only one driver, so
+    drivers_overtaken is always empty there — not useful for these tests.
+    """
+    requester = race_simulator.DriverRaceState(
+        driver_id="requester",
+        starting_position=5,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=1,
+        cumulative_race_time_seconds=1000.0,
+    )
+    rival = race_simulator.DriverRaceState(
+        driver_id="rival",
+        starting_position=6,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=2,
+        cumulative_race_time_seconds=1000.0 + gap_seconds,
+    )
+    race_state = race_simulator.RaceSimulationInput(
+        circuit_name="Monza",
+        circuit_id_encoded=0,
+        current_lap=current_lap,
+        total_laps=total_laps,
+        wet_track=False,
+        track_temp=30.0,
+        air_temp=20.0,
+        drivers=[requester, rival],
+    )
+    return requester, rival, race_state
+
+
+@pytest.mark.unit
+def test_build_plan_explanation_no_pit_laps_leaves_gain_at_zero() -> None:
+    """Unchanged from before this fix: no forced pit stop means nothing to
+    compare degradation across."""
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] == 0.0
+    assert explanation["total_recoverable_seconds"] == 0.0
+    assert explanation["remaining_laps"] == 33
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_uses_real_projection_not_hardcoded_constant() -> None:
+    """A steeply-degrading OLD compound vs. a near-flat NEW compound must produce a
+    real projected recovery that differs from _FRESH_TYRE_GAIN_PER_LAP_SECONDS's
+    hardcoded 0.3s/lap for HARD — the whole point of this fix.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=400)  # MEDIUM, degrading fast
+    new_pipeline = _fit_pipeline_with_slope(slope=0.02, seed=401)  # HARD, nearly flat
+    requester, race_state = _requester_and_race_state("MEDIUM", 15, 20, 53)
+    tire_deg_pipelines = {"MEDIUM": old_pipeline, "HARD": new_pipeline}
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    hardcoded_constant = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] != pytest.approx(hardcoded_constant)
+    # Old compound degrades far faster than the new one, so the real projected
+    # recovery must be noticeably larger than the old flat constant.
+    assert explanation["fresh_tyre_gain_per_lap"] > hardcoded_constant
+    assert explanation["remaining_laps"] == 53 - 30
+    assert explanation["total_recoverable_seconds"] == pytest.approx(
+        explanation["fresh_tyre_gain_per_lap"] * explanation["remaining_laps"]
+    )
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_can_be_negative_when_new_compound_worse() -> None:
+    """The real projection can show a NEGATIVE fresh_tyre_gain_per_lap when the
+    new compound degrades faster than the old one even from a fresh tyre — e.g.
+    a dry-track INTERMEDIATE pit (see CLAUDE.md's tyre-model track-condition
+    limitation). The old hardcoded constant could never be negative — this is
+    a real signal only the model-derived projection can produce.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=402)  # old: barely degrades
+    new_pipeline = _fit_pipeline_with_slope(slope=0.8, seed=403)  # new: degrades fast, even fresh
+    requester, race_state = _requester_and_race_state("HARD", 5, 20, 53)
+    tire_deg_pipelines = {"HARD": old_pipeline, "INTERMEDIATE": new_pipeline}
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[25],
+        compounds=["INTERMEDIATE"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] < 0.0
+    assert explanation["total_recoverable_seconds"] < 0.0
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_multi_stop_uses_previous_stop_as_old_compound() -> None:
+    """For a multi-stop plan's LAST forced pit, the 'old' compound/tyre-age must
+    be resolved from the PREVIOUS forced stop (compounds[-2]/pit_laps[-2]), not
+    the plan's STARTING compound (requester_state.compound) — the tyre was reset
+    to 0 at that earlier forced stop, not at race start. Verified by comparing
+    against a hand-built reference using project_stint_delta directly with the
+    EXPECTED (stint-2) pipeline/age — if the wiring instead used the starting
+    SOFT compound/pipeline, the two would diverge sharply (very different slopes).
+    """
+    starting_pipeline = _fit_pipeline_with_slope(slope=0.9, seed=406)  # SOFT — must NOT be used
+    stint2_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=404)  # MEDIUM — old for the last pit
+    stint3_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=405)  # HARD — new compound
+    requester, race_state = _requester_and_race_state("SOFT", 8, 10, 53)
+    tire_deg_pipelines = {
+        "SOFT": starting_pipeline,
+        "MEDIUM": stint2_pipeline,
+        "HARD": stint3_pipeline,
+    }
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[20, 35],
+        compounds=["MEDIUM", "HARD"],
+        total_laps=53,
+        remaining_laps=43,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 35
+    old_code = tire_deg_model.resolve_driver_code(None, requester.driver_id)
+    circuit_code = tire_deg_model.resolve_circuit_code(None, race_state.circuit_name)
+    # Tyre age at the second pit (lap 35) is laps since the FIRST forced pit
+    # (lap 20) — 15 — not since race start (lap 10).
+    expected_stay_out = tire_deg_model.project_stint_delta(
+        stint2_pipeline,
+        prediction_worker._COMPOUND_ENCODING["MEDIUM"],
+        old_code,
+        circuit_code,
+        start_lap=36,
+        n_laps=laps_after_pit,
+        start_tyre_age=15,
+        total_laps=53,
+    )
+    expected_fresh = tire_deg_model.project_stint_delta(
+        stint3_pipeline,
+        prediction_worker._COMPOUND_ENCODING["HARD"],
+        old_code,
+        circuit_code,
+        start_lap=36,
+        n_laps=laps_after_pit,
+        start_tyre_age=0,
+        total_laps=53,
+    )
+    assert expected_stay_out is not None
+    assert expected_fresh is not None
+    expected_total_recoverable = expected_stay_out - expected_fresh
+    expected_gain_per_lap = expected_total_recoverable / laps_after_pit
+
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected_gain_per_lap)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected_total_recoverable)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_falls_back_when_pipeline_missing() -> None:
+    """No tire_deg pipeline loaded for either compound must fall back to the
+    original hardcoded constant (non-regressive — decision #1 from the What-If
+    Simulator rebuild plan), not error or silently drop to 0.0.
+    """
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},  # nothing loaded at all
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 30
+    expected = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected * laps_after_pit)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_falls_back_on_schema_mismatched_pipeline() -> None:
+    """Same schema-drift guard as race_simulator._tire_deg_predictions and
+    tire_deg_model.project_stint_delta — a pipeline fitted on a different
+    feature count (e.g. the stale 8-feature WET model) must degrade to the
+    hardcoded fallback, not raise or silently predict on a misaligned vector.
+    """
+    mismatched = _fit_pipeline_with_n_features(n_features=8, seed=411)
+    good = _fit_pipeline_with_slope(slope=0.05, seed=412)
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={"MEDIUM": mismatched, "HARD": good},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 30
+    expected = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected * laps_after_pit)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_zero_when_pit_on_last_lap() -> None:
+    """Pitting on the very last simulated lap leaves zero laps to project after
+    it — must not raise a ZeroDivisionError."""
+    old_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=407)
+    new_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=408)
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[53],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={"MEDIUM": old_pipeline, "HARD": new_pipeline},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] == 0.0
+    assert explanation["total_recoverable_seconds"] == 0.0
+    assert explanation["remaining_laps"] == 0
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_clamps_negative_tyre_age_from_out_of_order_pit_laps() -> None:
+    """pit_laps has no enforced chronological ordering beyond each entry's own
+    (current_lap, horizon_end] bound (see SimulateStrategyRequest._validate_pit_plan)
+    — an out-of-order multi-stop plan must not feed project_stint_delta a
+    negative tyre age. This is a defensive guard against an already-possible
+    (if unlikely) input shape, not new behaviour this fix is meant to support.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.3, seed=409)
+    new_pipeline = _fit_pipeline_with_slope(slope=0.1, seed=410)
+    requester, race_state = _requester_and_race_state("SOFT", 5, 10, 53)
+    tire_deg_pipelines = {"MEDIUM": old_pipeline, "HARD": new_pipeline}
+
+    # Out-of-order: pit_laps[-1]=25 is chronologically BEFORE pit_laps[-2]=40.
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[40, 25],
+        compounds=["MEDIUM", "HARD"],
+        total_laps=53,
+        remaining_laps=43,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert np.isfinite(explanation["fresh_tyre_gain_per_lap"])
+    assert np.isfinite(explanation["total_recoverable_seconds"])
+
+
+# --- drivers_overtaken enrichment (What-If Simulator rebuild part (b): see
+# docs/core-feature-rebuild-whatif-simulator.md §7 and
+# race_simulator.DriverPositionDistribution.projected_pit_laps/
+# finish_ahead_probability's own docstrings) ---
+
+
+@pytest.mark.unit
+def test_drivers_overtaken_enriched_with_finish_ahead_and_rival_pit_projection() -> None:
+    """drivers_overtaken rows must carry real Monte Carlo outputs from THIS
+    scenario's simulate_race result — the requester's own finish_ahead_probability
+    for that specific rival, and that rival's OWN peak projected pit lap/
+    probability — not just the static current-lap gap snapshot the selection
+    criterion itself still uses unchanged (CP1's decision #3).
+    """
+    requester, rival, race_state = _requester_and_rival_race_state(
+        "MEDIUM", 10, 20, 53, gap_seconds=5.0
+    )
+
+    requester_distribution = race_simulator.DriverPositionDistribution(
+        driver_id=requester.driver_id,
+        position_probabilities={5: 1.0},
+        mean_position=5.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+        finish_ahead_probability={rival.driver_id: 0.73},
+    )
+    rival_distribution = race_simulator.DriverPositionDistribution(
+        driver_id=rival.driver_id,
+        position_probabilities={6: 1.0},
+        mean_position=6.0,
+        mean_finish_time_seconds=5005.0,
+        finish_time_p5_seconds=4995.0,
+        finish_time_p95_seconds=5015.0,
+        projected_pit_laps=[(30, 0.2), (34, 0.71), (35, 0.1)],
+    )
+    driver_distributions_by_id = {
+        requester.driver_id: requester_distribution,
+        rival.driver_id: rival_distribution,
+    }
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id=driver_distributions_by_id,
+    )
+
+    assert len(explanation["drivers_overtaken"]) == 1
+    entry = explanation["drivers_overtaken"][0]
+    assert entry["driver_id"] == rival.driver_id
+    assert entry["finish_ahead_probability"] == pytest.approx(0.73)
+    assert entry["rival_projected_pit_lap"] == 34
+    assert entry["rival_pit_probability"] == pytest.approx(0.71)
+
+
+@pytest.mark.unit
+def test_drivers_overtaken_enrichment_none_when_no_distribution_data() -> None:
+    """A rival present in drivers_overtaken but absent from
+    driver_distributions_by_id (should not happen in practice — every rival in
+    the list raced in the same simulate_race call — but defensive since it's a
+    separate dict lookup) must get None for all three enrichment fields, never
+    a misleading fabricated default like 0.0.
+    """
+    requester, rival, race_state = _requester_and_rival_race_state(
+        "MEDIUM", 10, 20, 53, gap_seconds=5.0
+    )
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id={},  # nothing available at all
+    )
+
+    assert len(explanation["drivers_overtaken"]) == 1
+    entry = explanation["drivers_overtaken"][0]
+    assert entry["driver_id"] == rival.driver_id
+    assert entry["finish_ahead_probability"] is None
+    assert entry["rival_projected_pit_lap"] is None
+    assert entry["rival_pit_probability"] is None
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_none_for_none_distribution() -> None:
+    assert prediction_worker._peak_projected_pit_lap(None) == (None, None)
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_none_for_empty_projected_pit_laps() -> None:
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="d1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+    )
+    assert prediction_worker._peak_projected_pit_lap(distribution) == (None, None)
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_ties_resolve_to_earliest_lap() -> None:
+    """Python's max() keeps the FIRST-seen maximum, and projected_pit_laps is
+    already sorted by lap ascending (see race_simulator.simulate_race's own
+    construction) — so a tie must resolve to the earliest lap."""
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="d1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+        projected_pit_laps=[(20, 0.5), (25, 0.5)],
+    )
+    assert prediction_worker._peak_projected_pit_lap(distribution) == (20, 0.5)

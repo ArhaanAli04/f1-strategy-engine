@@ -15,7 +15,9 @@ import pytest
 from sklearn.pipeline import Pipeline
 
 from backend.services.ml.tire_deg_model import (
+    ASSUMED_START_FUEL_KG,
     FEATURE_COLUMNS,
+    FUEL_TIME_PENALTY_PER_KG,
     MAX_LOOKAHEAD_LAPS,
     CategoricalEncodingMaps,
     _build_pipeline,
@@ -25,6 +27,7 @@ from backend.services.ml.tire_deg_model import (
     encoding_maps_from_metrics,
     pipeline_feature_count,
     predict_life_remaining_batch,
+    project_stint_delta,
     resolve_circuit_code,
     resolve_driver_code,
     train_tire_degradation_model,
@@ -395,3 +398,101 @@ def test_resolve_circuit_code_falls_back_when_circuit_missing_from_map() -> None
     maps = CategoricalEncodingMaps(driver_id_to_code={}, circuit_name_to_code={"Monza": 9})
     expected = zlib.crc32(b"Unknown Circuit") % 1000
     assert resolve_circuit_code(maps, "Unknown Circuit") == expected
+
+
+# --- project_stint_delta ---
+# The shared implementation behind both strategy_service._project_stint_delta
+# (undercut/overcut projection) and prediction_worker._build_plan_explanation
+# (What-If Simulator rebuild part (a) — see
+# docs/core-feature-rebuild-whatif-simulator.md §7). These tests exercise the
+# function directly rather than through either caller.
+
+
+def _naive_stint_delta(
+    pipeline: Pipeline,
+    compound_encoded: int,
+    driver_code: int,
+    circuit_code: int,
+    start_lap: int,
+    n_laps: int,
+    start_tyre_age: int,
+    total_laps: int,
+) -> float:
+    """Hand-built reference sum, independent of project_stint_delta's own code path."""
+    laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
+    tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
+    fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
+    fuel_adjusted_time = -FUEL_TIME_PENALTY_PER_KG * (ASSUMED_START_FUEL_KG - fuel_at_lap)
+    features = np.column_stack(
+        [
+            laps,
+            np.full(n_laps, float(compound_encoded)),
+            tyre_age,
+            fuel_adjusted_time,
+            np.full(n_laps, float(circuit_code)),
+            np.full(n_laps, float(driver_code)),
+        ]
+    )
+    return float(pipeline.predict(features).sum())
+
+
+@pytest.mark.unit
+def test_project_stint_delta_matches_naive_reference() -> None:
+    pipeline = _fit_pipeline_with_slope(slope=0.4, seed=30)
+    kwargs: dict[str, int] = {"start_lap": 20, "n_laps": 10, "start_tyre_age": 2, "total_laps": 50}
+    result = project_stint_delta(pipeline, 1, 5, 3, **kwargs)
+    expected = _naive_stint_delta(pipeline, 1, 5, 3, **kwargs)
+    assert result == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_project_stint_delta_zero_for_zero_laps() -> None:
+    pipeline = _fit_pipeline_with_slope(slope=0.4, seed=31)
+    result = project_stint_delta(
+        pipeline, 1, 5, 3, start_lap=20, n_laps=0, start_tyre_age=2, total_laps=50
+    )
+    assert result == 0.0
+
+
+@pytest.mark.unit
+def test_project_stint_delta_zero_for_negative_laps() -> None:
+    pipeline = _fit_pipeline_with_slope(slope=0.4, seed=32)
+    result = project_stint_delta(
+        pipeline, 1, 5, 3, start_lap=20, n_laps=-3, start_tyre_age=2, total_laps=50
+    )
+    assert result == 0.0
+
+
+@pytest.mark.unit
+def test_project_stint_delta_none_for_none_pipeline() -> None:
+    result = project_stint_delta(
+        None, 1, 5, 3, start_lap=20, n_laps=10, start_tyre_age=2, total_laps=50
+    )
+    assert result is None
+
+
+@pytest.mark.unit
+def test_project_stint_delta_none_for_mismatched_pipeline() -> None:
+    """Same schema-drift guard as race_simulator._tire_deg_predictions — a pipeline
+    fitted on a different feature count (e.g. the stale 8-feature WET model) must
+    degrade to None, not raise or silently predict on a misaligned feature vector.
+    """
+    mismatched = _fit_pipeline_with_n_features(8, seed=33)
+    result = project_stint_delta(
+        mismatched, 1, 5, 3, start_lap=20, n_laps=10, start_tyre_age=2, total_laps=50
+    )
+    assert result is None
+
+
+@pytest.mark.unit
+def test_project_stint_delta_none_when_predict_raises() -> None:
+    class _RaisingPipeline:
+        named_steps: dict[str, Any] = {}
+
+        def predict(self, features: Any) -> Any:
+            raise RuntimeError("boom")
+
+    result = project_stint_delta(
+        _RaisingPipeline(), 1, 5, 3, start_lap=20, n_laps=10, start_tyre_age=2, total_laps=50
+    )
+    assert result is None

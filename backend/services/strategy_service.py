@@ -611,6 +611,20 @@ def _project_stint_delta(
 ) -> float:
     """Sum of tire_deg-predicted lap_time_delta over n_laps starting at start_lap.
 
+    Thin wrapper delegating to tire_deg_model.project_stint_delta — the single
+    shared implementation, also used by prediction_worker._build_plan_explanation
+    for the What-If Simulator's plan-explanation degradation comparison (see
+    docs/core-feature-rebuild-whatif-simulator.md §7). This module's only
+    caller (_undercut_overcut_probability) already guarantees `pipeline` is
+    non-None before reaching here (its own ModelNotLoadedError check above).
+    The shared helper additionally guards against a schema-mismatched pipeline
+    and a predict() exception, neither of which this function's original
+    inline version checked for — both degrade to 0.0 here (no projected
+    degradation for that segment) rather than propagating, matching this
+    codebase's existing "degrade this one thing, never crash the whole
+    computation" convention (race_simulator._tire_deg_predictions's identical
+    guard on the very same failure modes).
+
     Args:
         pipeline: Fitted tire_deg_model pipeline for the relevant compound.
         compound_encoded, driver_code, circuit_code: Encoded categorical features
@@ -620,28 +634,20 @@ def _project_stint_delta(
         start_tyre_age: Tyre age at start_lap.
         total_laps: Estimated race distance, for the fuel_adjusted_time feature.
     Returns:
-        Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0.
+        Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0 OR the
+        shared helper couldn't project (see its own docstring for why).
     """
-    if n_laps <= 0:
-        return 0.0
-    laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
-    tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
-    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    result = tire_deg_model.project_stint_delta(
+        pipeline,
+        compound_encoded,
+        driver_code,
+        circuit_code,
+        start_lap,
+        n_laps,
+        start_tyre_age,
+        total_laps,
     )
-    features = np.column_stack(
-        [
-            laps,
-            np.full(n_laps, float(compound_encoded)),
-            tyre_age,
-            fuel_adjusted_time,
-            np.full(n_laps, float(circuit_code)),
-            np.full(n_laps, float(driver_code)),
-        ]
-    )
-    result: float = float(pipeline.predict(features).sum())
-    return result
+    return result if result is not None else 0.0
 
 
 def _sampled_noise(rng: np.random.Generator, n_laps: int, n_samples: int) -> np.ndarray:

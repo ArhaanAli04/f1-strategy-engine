@@ -522,3 +522,80 @@ def predict_life_remaining_batch(
     first_cross[~crossed.any(axis=1)] = MAX_LOOKAHEAD_LAPS
     result: npt.NDArray[np.int64] = first_cross.astype(np.int64)
     return result
+
+
+def project_stint_delta(
+    pipeline: Any,
+    compound_encoded: int,
+    driver_code: int,
+    circuit_code: int,
+    start_lap: int,
+    n_laps: int,
+    start_tyre_age: int,
+    total_laps: int,
+) -> float | None:
+    """Sum of predicted lap_time_delta over n_laps of one stint segment.
+
+    The single implementation behind both strategy_service's undercut/overcut
+    stint projection (_project_stint_delta there now delegates here — see
+    that module) and prediction_worker's plan-explanation degradation
+    comparison (What-If Simulator rebuild part (a), see
+    docs/core-feature-rebuild-whatif-simulator.md §7). Callers supply
+    already-encoded categoricals resolved against THIS pipeline's own map
+    (see resolve_driver_code/resolve_circuit_code below) — this function does
+    no encoding itself, same contract as predict_life_remaining_batch above.
+
+    fuel_adjusted_time is derived per lap from the fuel-burn trend alone (the
+    training-time definition's lap_time_seconds term is unavailable in a
+    forward projection, same approximation race_simulator's module docstring
+    documents for its own identical feature construction).
+
+    Args:
+        pipeline: Fitted tire_deg pipeline for the compound being projected,
+            or None (e.g. no model loaded for that compound) — returns None.
+        compound_encoded, driver_code, circuit_code: Encoded categoricals,
+            resolved against this pipeline's own encoding maps.
+        start_lap: First lap number of this stint segment.
+        n_laps: Number of laps to project.
+        start_tyre_age: Tyre age at start_lap.
+        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+    Returns:
+        Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0 (no laps
+        to project — distinct from "couldn't project", which is None). None if
+        pipeline is missing, its fitted feature count doesn't match
+        FEATURE_COLUMNS (schema drift — the same backstop
+        race_simulator._tire_deg_predictions applies elsewhere), or predict()
+        itself raises — callers must have a non-crashing fallback for None.
+    """
+    if pipeline is None:
+        return None
+    n_features = pipeline_feature_count(pipeline)
+    if n_features is not None and n_features != len(FEATURE_COLUMNS):
+        logger.warning(
+            "tire_deg pipeline expects %d features, not %d — skipping stint projection",
+            n_features,
+            len(FEATURE_COLUMNS),
+        )
+        return None
+    if n_laps <= 0:
+        return 0.0
+
+    laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
+    tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
+    fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
+    fuel_adjusted_time = -FUEL_TIME_PENALTY_PER_KG * (ASSUMED_START_FUEL_KG - fuel_at_lap)
+    features = np.column_stack(
+        [
+            laps,
+            np.full(n_laps, float(compound_encoded)),
+            tyre_age,
+            fuel_adjusted_time,
+            np.full(n_laps, float(circuit_code)),
+            np.full(n_laps, float(driver_code)),
+        ]
+    )
+    try:
+        return float(pipeline.predict(features).sum())
+    except Exception:  # noqa: BLE001 — degrade to the caller's fallback, never crash
+        logger.warning("tire_deg stint projection failed", exc_info=True)
+        return None

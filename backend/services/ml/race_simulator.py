@@ -153,6 +153,31 @@ class DriverPositionDistribution:
     mean_finish_time_seconds: float
     finish_time_p5_seconds: float
     finish_time_p95_seconds: float
+    # Both added for the What-If Simulator rebuild part (b) — see
+    # docs/core-feature-rebuild-whatif-simulator.md §7 — so a caller can
+    # build a plan-explanation narrative from what the simulation itself
+    # actually did, instead of a static frozen-gap heuristic. Both default
+    # empty so every pre-existing DriverPositionDistribution(...) call site
+    # (real code and test fixtures) that doesn't pass them keeps working
+    # unchanged.
+    #
+    # projected_pit_laps: this driver's OWN per-lap pit probability across
+    # all simulations — (lap_number, probability) pairs, sparse (probability
+    # > 0.0 only) and sorted by lap ascending, same convention as
+    # position_probabilities/_shape_position_probabilities. A forced what-if
+    # pit lap (race_simulator.simulate_race's forced_pit_laps) shows
+    # probability 1.0 at that lap for the requesting driver — it isn't a
+    # special case, just what pit_flags already reflects every lap.
+    projected_pit_laps: list[tuple[int, float]] = field(default_factory=list)
+    # finish_ahead_probability: P(this driver finishes ahead of each OTHER
+    # driver), keyed by that other driver's driver_id — one entry per other
+    # driver in the field, from the same final cumulative_time array
+    # position_probabilities is built from. Two entries for the same pair of
+    # drivers are complementary by construction (P(i ahead of j) + P(j ahead
+    # of i) == 1.0, modulo the rare exact-tie sims described in
+    # simulate_race's own comment on this computation) — not independently
+    # estimated, so they always agree with mean_position's own ranking.
+    finish_ahead_probability: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -535,6 +560,12 @@ def simulate_race(
     compound_encoded_by_driver = np.array(
         [d.compound_encoded for d in race_state.drivers], dtype=np.int64
     )
+    # Per-lap, per-driver pit probability across all n_simulations — What-If
+    # Simulator rebuild part (b) (see docs/core-feature-rebuild-whatif-
+    # simulator.md §7 and DriverPositionDistribution.projected_pit_laps'
+    # own docstring). O(n_laps x n_drivers) floats, negligible next to the
+    # (n_sims x n_drivers) arrays already held for the whole loop.
+    pit_probability_by_lap: dict[int, npt.NDArray[np.float64]] = {}
 
     for lap_number in range(race_state.current_lap + 1, race_state.total_laps + 1):
         # Rebuilt every lap (not once) so a forced compound change is picked up
@@ -594,6 +625,13 @@ def simulate_race(
                 if idx is not None and lap_number in schedule:
                     pit_flags[:, idx] = True
 
+        # Captured AFTER the forced-pit override above, so a what-if's forced
+        # pit lap shows probability 1.0 for the requesting driver at that lap
+        # — pit_flags is already what actually fires the pit stop below, this
+        # is just recording the same array's per-driver mean across sims,
+        # not a separate computation that could disagree with it.
+        pit_probability_by_lap[lap_number] = pit_flags.mean(axis=0)
+
         _advance_lap(
             cumulative_time,
             tyre_age,
@@ -620,11 +658,35 @@ def simulate_race(
     order = np.argsort(cumulative_time, axis=1)
     finishing_positions = np.argsort(order, axis=1) + 1
 
+    # P(driver i finishes ahead of driver j) for every (i, j) pair, from the
+    # same final cumulative_time array position_probabilities is built from
+    # — What-If Simulator rebuild part (b) (see DriverPositionDistribution.
+    # finish_ahead_probability's own docstring). Lower cumulative_time is
+    # better (less elapsed race time), hence "<" not ">". An (n_sims,
+    # n_drivers, n_drivers) intermediate boolean array — for a real ~22-car
+    # field at n_simulations=1000, that's ~484K booleans, negligible next to
+    # this function's existing (n_sims, n_drivers) arrays. A sim where two
+    # drivers end on an EXACT tie (e.g. both bunched to the same SC time on
+    # the final lap) contributes to neither direction, so the pair's two
+    # probabilities can in principle sum to slightly under 1.0 rather than
+    # exactly 1.0 — an accurate reflection of a genuine tie, not a bug.
+    finish_ahead_matrix = (cumulative_time[:, :, None] < cumulative_time[:, None, :]).mean(axis=0)
+
     distributions = []
     for i, driver in enumerate(race_state.drivers):
         counts = np.bincount(finishing_positions[:, i], minlength=n_drivers + 1)[1 : n_drivers + 1]
         probabilities = counts / n_simulations
         driver_times = cumulative_time[:, i]
+        projected_pit_laps = [
+            (lap, float(probs[i]))
+            for lap, probs in sorted(pit_probability_by_lap.items())
+            if probs[i] > 0.0
+        ]
+        finish_ahead_probability = {
+            other.driver_id: float(finish_ahead_matrix[i, j])
+            for j, other in enumerate(race_state.drivers)
+            if j != i
+        }
         distributions.append(
             DriverPositionDistribution(
                 driver_id=driver.driver_id,
@@ -633,6 +695,8 @@ def simulate_race(
                 mean_finish_time_seconds=float(np.mean(driver_times)),
                 finish_time_p5_seconds=float(np.percentile(driver_times, 5)),
                 finish_time_p95_seconds=float(np.percentile(driver_times, 95)),
+                projected_pit_laps=projected_pit_laps,
+                finish_ahead_probability=finish_ahead_probability,
             )
         )
 
