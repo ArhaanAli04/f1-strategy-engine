@@ -40,6 +40,35 @@ WET_MULTIPLIER = 3.0
 STREET_MULTIPLIER = 1.8
 PREDICTION_HORIZONS = (1, 2, 3, 5, 10)
 
+# Same versioning contract as tire_deg_model.TRAINING_SCHEMA_VERSION /
+# pit_predictor.TRAINING_SCHEMA_VERSION — bump when a change to what build_lap_flags
+# is FED (not this module's own logic) makes holdout_mae non-comparable across
+# versions. train_models.serialize_evaluate_and_upload's promotion guard (CP2,
+# docs/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a candidate
+# over an incumbent recorded at a different version, regardless of MAE — the same
+# way it already force-promotes over a feature-count or feature-names mismatch.
+# This model has no feature vector at all (fitted_feature_count returns None for
+# it — see train_models.py), so neither of those checks can ever fire for it;
+# version is the ONLY mechanism that can flag a training-input change here.
+#
+# 1 (implicit, never recorded under this name): train_models.train_all/
+#   retrain_incremental.retrain fit this model on is_valid-filtered laps only
+#   (the same filter tire_deg_model correctly wants, for a genuinely different
+#   reason). That filter is wrong for THIS model: a lap run under an active
+#   SC/VSC period has an anomalous, non-representative lap time, so FastF1 marks
+#   almost all of them is_valid=False — filtering them out removes virtually the
+#   entire positive-class signal build_lap_flags depends on. Confirmed directly
+#   against the real 2018-2025 local corpus: 3832 laps carry track_status "4"
+#   (SC) before the is_valid filter, 0 after. The result was a production
+#   circuit_rates dict of all zeros and default_rate=0.0 — a model that always
+#   predicts P(SC)=0, with a holdout_mae of exactly 0.0 (every actual was also
+#   0 once filtered) that no honestly-trained model could ever beat under the
+#   old MAE-only guard.
+# 2 (2026-09-11): fit on ALL laps regardless of is_valid (same unfiltered input
+#   pit_predictor already uses, for the same reason — detecting an SC/VSC period
+#   is orthogonal to whether a lap's time is race-pace-representative).
+TRAINING_SCHEMA_VERSION = 2
+
 # Circuits with fewer than this many dry, non-lap-1 laps in the training
 # window fall back to default_rate rather than an unstable per-circuit estimate.
 MIN_LAPS_FOR_CIRCUIT_ESTIMATE = 200

@@ -342,12 +342,16 @@ mode complexity. Race day scaling: run 8+ worker pods, not 8 processes per pod.
 | pit_predictor.pkl       | LGBMClassifier| did_pit (binary)       | All        |
 | safety_car_model.pkl    | Poisson/scipy | P(SC in N laps)        | —          |
 
-Models are loaded lazily on first use per worker process (checking
-local disk cache, then S3's :production tag) and cached in memory
-for the process's lifetime — restart the worker to pick up a newly
-promoted model version. race_simulator.py is wired as of Day 11 via
-the run_race_simulation Celery task (prediction_queue), called by
-POST /strategy/{session_id}/simulate.
+Models are loaded lazily on first use per worker process, downloaded fresh
+from S3's :production tag every process start, and cached in memory for
+the process's lifetime — restart the worker to pick up a newly promoted
+model version. (Until 2026-09-11 this also checked a local disk cache
+first that never expired, so a plain restart silently did NOT pick up a
+new promotion unless that cache happened to be empty — see the Notes
+entry "Model artifact disk cache never invalidated" below. The sentence
+above is accurate again now that that's fixed.) race_simulator.py is
+wired as of Day 11 via the run_race_simulation Celery task
+(prediction_queue), called by POST /strategy/{session_id}/simulate.
 
 ---
 
@@ -507,50 +511,76 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      _build_plan_explanation full fix — What-If Simulator part (a)+(b)
-          (2026-09-07, dedicated follow-on to the 2026-09-06 multi-scenario
-          compare rebuild)
-Status:   Both parts of the _build_plan_explanation narrative-can-contradict-
-          the-real-simulation fix are done (see the now-✅ Deferred Wiring
-          entry for full detail), 6 checkpoints: CP1 replaced the hardcoded
-          _FRESH_TYRE_GAIN_PER_LAP_SECONDS constant with a real two-branch
-          tire_deg_model projection (new shared project_stint_delta,
-          strategy_service's own stint projection now delegates to it too) —
-          caught and fixed a real multi-stop old-compound-resolution bug not
-          in the original plan along the way. CP2 updated all 3 clients'
-          render gate/copy to be sign-aware (the value can now be genuinely
-          negative). CP3 added race_simulator.DriverPositionDistribution
-          .projected_pit_laps/finish_ahead_probability, both captured from
-          arrays simulate_race's loop already computes, not new computation
-          — a test-tolerance bug caught and fixed here too (an SC-lap exact
-          tie makes two directions' probabilities sum to just under 1.0 by
-          design). CP4 threads both into _build_plan_explanation, enriching
-          (not changing the selection of) each drivers_overtaken row — 3 new
-          nullable OvertakingDriver fields. CP5 rendered the enrichment in
-          all 3 clients. CP6 verified end-to-end against the real running
-          stack (Belgian GP 2026 R10 via last-ingested-session — no live
-          race was testable; Demo Replay deliberately out of scope, per the
-          Simulator's own already-documented non-live-mode design) and
-          updated docs. Real finding along the way, not a bug in this fix:
-          predicted_life_remaining is pegged at MAX_LOOKAHEAD_LAPS for most
-          of the realistic tyre-age range on this exact promoted model set,
-          so organic (non-forced) projected_pit_laps came back empty in
-          every real scenario tried — root-caused to tire_deg_model itself
-          (confirmed via a direct pipeline sweep), tracked as its own new
-          deferred item, same class as the existing tire_deg_hard.pkl
-          first-lap entry. 27 new/updated backend unit tests, full unit
-          suite 324 passed, integration suite 14 passed, tsc/oxlint clean on
-          all 3 clients.
-Next:     Mobile's deferred Compare Scenarios UI/native chart, the new
-          predicted_life_remaining-pegged-at-cap deferred item (real ML
-          work, same class as the tire_deg_hard.pkl entry), or return to
-          docs/day-deferred-fixes-session2-handoff.md's remaining 3 items
-          (6: strategic adaptation research-first, 8: WET model retrain,
-          10: track-condition input). Fly.io deployment (Day 40 A4) still
-          pending behind whichever of the above gets picked up first. Note:
-          train-models.yml (CI) still fetches zero 2026 laps (see the
-          escalated GitHub-Actions/FastF1 deferred item) — unrelated to this
-          session's work, still unresolved.
+Day:      Tire degradation model quality + rival pit behavior fix
+          (2026-09-09 root-cause session, 2026-09-11 fix session — dedicated
+          follow-on to the 2026-09-07 What-If Simulator rebuild verification
+          that surfaced the problem; see docs/tire-deg-model-quality-and-
+          rival-pit-behavior.md)
+Status:   CP1-CP5 of the doc's 6-checkpoint plan done (CP5 investigated, no
+          fix landed — see below); CP6 is the only one left. CP1 (2026-09-09): fixed an inverted
+          fuel-correction sign and a genuine target-leakage feature
+          (fuel_adjusted_time) in tire_deg_model — both root-caused via
+          direct measurement, not assumed. CP2 (2026-09-11): extended the
+          promotion guard with training_schema_version + feature_names
+          mismatch checks, since the leakage fix made honest MAE
+          numerically worse than the broken incumbent's; verified via a
+          dry run against the real S3 sidecars before trusting it. CP3
+          (2026-09-11): ran the real retrain (train_models.train_all()) —
+          all 7 models force-promoted to S3 production/* as CP2 predicted.
+          Two unplanned bugs found and fixed along the way, both now in
+          Notes: safety_car_model was fit on is_valid-filtered laps
+          (discarding virtually all real SC/VSC events — 3832 real
+          SC-status laps, 0 after the filter), and the model artifact disk
+          cache never invalidated across process restarts (meaning
+          "restart the worker" had never actually picked up a new
+          promotion) — found because a same-process verification showed
+          pre-fix numbers despite S3 already having the new models;
+          confirmed via file timestamps on both the host and the live
+          worker container. Fixed, then verified live: cleared both
+          containers' caches, restarted backend+worker, re-ran the COL/
+          Belgian-GP-2026-R10 advance-warning check INSIDE the running
+          worker process — pit_probability now correctly rises to 0.64-0.91
+          approaching COL/LEC/GAS's real pit stops and drops to 0.03-0.09
+          right after, crossing ALERT_THRESHOLD=0.65 well before each real
+          pit. CP4 (2026-09-11): re-ran the doc's exact §1 acceptance case
+          (LEC, Belgian GP 2026 R10, lap 15, 3-scenario compare) via the
+          real run_race_simulation task body — both headline findings from
+          §1 resolved: fresh_tyre_gain_per_lap's sign flipped negative to
+          positive in all 3 scenarios (was: fresh tyres projected slower
+          than staying out), and all 21 drivers_overtaken rows (7 per
+          scenario × 3) now carry a real non-null rival_projected_pit_lap
+          (was: 0/21). "Pit now" improved substantially (position_gain_loss
+          -5→-2, mean_position 8.000→5.163); the other two scenarios still
+          show a net loss, now for a physically grounded reason (every
+          rival's own projected pit lap clusters in the same 16-18 window
+          LEC's own candidate stops are in), not the frozen-field artifact
+          §1 found. CP5 (2026-09-11): investigated ALERT_THRESHOLD/
+          DEGRADATION_THRESHOLD_SECONDS/MIN_LAPS_BETWEEN_PITS — measured a
+          full threshold sweep against 89 real historical stints (3 real
+          2026 races) and found no clean fix: lower thresholds catch more
+          stints but predict earlier, higher does the reverse, and the bias
+          is compound-dependent (HARD 44%/SOFT 44% never signal at all
+          within the horizon, MEDIUM over-signals ~6-9 laps early) in a way
+          one global number can't fix. Tried the one real curve-shape fix
+          that seemed principled — a monotone_constraints retrain on
+          tyre_age_laps, to stop tire_deg_hard.pkl's measured plateau —
+          retrained tire_deg+pit_predictor together (in memory, no S3
+          writes) and re-measured against the same 89 stints: it made
+          things WORSE (HARD's never-crossed rate 44%→52%, SOFT's timing
+          accuracy -3.60→-6.20 laps early). Reverted; production untouched
+          throughout. Full unit suite 341 passed after both the change and
+          the revert (was 324 baseline + 17 new).
+Next:     CP6 (optional resilience layer in race_simulator, independent of
+          pit_predictor's own calibration) is the only checkpoint left —
+          CP5's negative result is real evidence to re-weigh whether it's
+          still "probably not needed" the way the 2026-09-09 pilot
+          concluded, given neither a threshold change nor a curve-shape fix
+          closed the compound-dependent gap CP5 measured. Separately still
+          open: the tire_deg_hard.pkl fresh-HARD-tyre-age=1 misprediction
+          (re-confirmed persisting after CP3's retrain, see Deferred
+          Wiring), and train-models.yml (CI) still fetching zero 2026 laps
+          (escalated GitHub-Actions/FastF1 item, unrelated to this
+          session).
 Blockers: No physical device for testing — Android emulator
           setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
@@ -1139,83 +1169,102 @@ happen), or was found already fixed and moved into ### Notes below instead.
   with better `tyre_age_laps=1` coverage (or auditing whether HARD out-laps
   are being systematically filtered from the training corpus) — real ML
   work, not attempted today; genuinely deferred to a future day.
+  - **Re-confirmed post-retrain, 2026-09-11** (the tire-deg-model-quality
+    doc's CP3 real retrain — see Notes below): the artifact persists
+    unchanged in the newly-promoted `tire_deg_hard.pkl` — `predicted_life_
+    remaining=0.0` at `tyre_age_laps=1` for all three real drivers checked
+    (COL/LEC/GAS, Belgian GP 2026 R10, real pit laps 16/21/15). Genuinely
+    still open, not fixed by CP1-CP3 (those targeted the fuel-correction
+    sign/leakage bug and the promotion guard, not this specific coverage
+    gap). **Its downstream harm is smaller now, though:** the OLD
+    `pit_predictor.pkl` (same-lap-only label) read this artifact as "pit
+    again now" and spiked to ~0.999 right on the affected lap; the NEW
+    K=3-window-label `pit_predictor.pkl` does not get fooled the same way —
+    `pit_probability` correctly dropped to 0.033/0.093/0.053 immediately
+    after each driver's real pit despite the tire_deg artifact still firing
+    underneath it. Still worth fixing at the source; just no longer the
+    same practical risk it was.
 
-- **[deferred — full writeup: `docs/tire-deg-model-quality-and-rival-pit-
-  behavior.md`] `predicted_life_remaining` is pegged at `MAX_LOOKAHEAD_LAPS`
-  (40) for almost the entire realistic tyre-age range on SOFT/HARD/WET (and
-  past `tyre_age_laps≈2` on MEDIUM), for this exact promoted model set —
-  making `race_simulator.simulate_race`'s organic (non-forced)
-  `projected_pit_laps` output usually empty for every non-forced driver in a
-  short-horizon forward replay of already-past historical data.** That
-  document is the authoritative, fuller writeup (real per-compound sweep
-  tables, a full Gap Analysis, and a dedicated anchor prompt for the future
-  session) — this entry is kept as a shorter in-context pointer, not
-  duplicated in full. Discovered 2026-09-07 verifying the What-If Simulator
-  rebuild part (b) fix (see the now-✅-done `_build_plan_explanation` entry
-  above) against the real running stack — every real `rival_projected_pit_
-  lap`/`rival_pit_probability` came back `null`, including in a window built
-  specifically around COL's own real lap-16 pit stop (Belgian GP 2026 R10).
-  Root-caused via a direct sweep
-  of `tire_deg_model.predict_life_remaining_batch`/each pipeline's raw
-  `predict()` output across `tyre_age_laps` 0-38: SOFT/HARD/WET's predicted
-  `lap_time_delta` never re-crosses `DEGRADATION_THRESHOLD_SECONDS=1.5` past
-  the first lap or two of a stint (confirmed directly inside the worker
-  container, real promoted pipelines, not a mock), so
-  `predict_life_remaining_batch`'s threshold-crossing search finds nothing
-  and correctly returns the cap. `predicted_life_remaining` feeds directly
-  into `pit_predictor`'s 8-feature vector — "40 laps of life left" is a
-  strong, correctly-learned "don't pit" signal to that classifier, so
-  `_pit_scores` stays far below `ALERT_THRESHOLD=0.65` for the whole
-  simulated remainder regardless of real gap/position context. **Confirmed
-  NOT a bug in `projected_pit_laps`/`finish_ahead_probability` themselves**
-  (see that entry's own verification note) — a forced pit lap in the SAME
-  session correctly showed probability exactly `1.0`, and
-  `finish_ahead_probability` rendered real, internally-consistent
-  probabilities throughout; this is a pre-existing characteristic of
-  `tire_deg_model.predict_life_remaining_batch` and the deployed pipelines
-  it's fed, untouched by that fix. Same general class of issue as the
-  `tire_deg_hard.pkl` first-lap entry directly above (a tire_deg model's
-  predicted degradation curve not matching real-world tyre life across part
-  of its input range) but a DIFFERENT mechanism and DIFFERENT compounds
-  affected (this one spans SOFT/HARD/WET/MEDIUM broadly across most tyre
-  ages, not just HARD's specific `tyre_age_laps=1` spike) — likely explains
-  why `race_simulator`'s organic pit decisions look conservative across many
-  of this project's other What-If Simulator verifications, not only this
-  session's. Fix requires the same class of real ML work as the entry
-  above — auditing/retraining `predict_life_remaining_batch`'s degradation
-  curves against real historical pit timing, not attempted today; genuinely
-  deferred to a future day.
-  - **A second, unresolved anomaly surfaced in the same investigation (full
-    detail: `docs/tire-deg-model-quality-and-rival-pit-behavior.md` §2c):**
-    calling the LIVE inference path directly for LEC/COL/GAS — the exact
-    three drivers CLAUDE.md's own Day-43 pit-window checkpoint names as
-    validated with the `pit_within_k_laps` advance-warning label fix
-    ("elevated 0.73-0.92 for the 5 laps approaching each pit") — against the
-    CURRENTLY deployed `pit_predictor.pkl` instead showed near-zero
-    probability approaching each driver's real pit and a ~0.9999 spike
-    exactly ON their real out-lap (COL: 0.000059 at lap 15 → 0.999904 at lap
-    16, their real first HARD lap). That is the PRE-fix same-lap-detector
-    shape the label fix's own docstring describes as already solved, for
-    the exact drivers that fix was validated against — not the post-fix
-    shape. Two explanations were considered and NEITHER was confirmed
-    (no local metrics sidecar exists for `pit_predictor.pkl` to check
-    training provenance): either the currently-deployed `:production` model
-    predates the fix's promotion (plausible given `train-models.yml`'s own
-    already-tracked "fetches zero 2026 laps" problem), or something
-    genuinely regressed since the Day-43 validation. Directly explained by
-    the SAME already-documented `tire_deg_hard.pkl` fresh-tyre-`age=1`
-    misprediction (immediately above this entry) driving `predicted_life_
-    remaining` to `0.0` the instant a driver is on a brand-new HARD tyre —
-    but WHY the currently-deployed model shows this shape for these
-    specific drivers, when a prior validation recorded the opposite, is
-    unresolved and needs independent reconciliation before the future
-    session assumes either direction.
-  Does not block or reduce the value of the
-  What-If Simulator rebuild's own fix: `finish_ahead_probability` (the more
-  informative half of the new `drivers_overtaken` enrichment, and the one
-  actually exercised in every real scenario tried) is unaffected, and a
-  `null` pit projection is the field's own documented, correctly-handled
-  "no meaningful signal" contract, not a rendering failure.
+- **[✅ done 2026-09-11 — full writeup: `docs/tire-deg-model-quality-and-
+  rival-pit-behavior.md`] `predicted_life_remaining` pegged at
+  `MAX_LOOKAHEAD_LAPS` for almost the whole realistic tyre-age range, and a
+  measured `pit_predictor.pkl` same-lap-detector anomaly for LEC/COL/GAS —
+  both root-caused and fixed.** Discovered 2026-09-07 (see that document's
+  §2a-§2c); root-caused 2026-09-09; fixed 2026-09-11 across 3 checkpoints,
+  all real ML work, not a wiring fix:
+  - **Real root cause (not training-data sparsity, as first suspected):**
+    two upstream feature-engineering defects. (1) An inverted fuel-correction
+    sign in `tire_deg_model.add_engineered_features` — the deployed formula
+    used `0.03 × fuel BURNED` (grows across the race) instead of `0.03 ×
+    fuel ON BOARD` (shrinks), roughly doubling the fuel artefact instead of
+    removing it; `tire_stints.avg_deg_per_lap`'s own stored ground truth had
+    the identical bug, negative median for every compound across 7381 real
+    stints. (2) `fuel_adjusted_time` was genuine target leakage — correlated
+    with the training target at +0.91 to +0.96 within a (session, driver)
+    group, then fed a wildly out-of-distribution value (≈−1.5s vs. a ≈86-99s
+    training mean) at every real inference call site. Fixed via a single
+    shared `fuel_load_penalty_seconds()` (the one fuel definition, used by
+    training AND all inference call sites) — CP1, 8 real call sites
+    updated, verified target slope went from negative to physically correct
+    (+0.015 to +0.036 s/lap).
+  - **CP2:** the promotion guard (item 9 below) compared feature COUNT only,
+    so a corrected model with an honest (numerically worse) `holdout_mae`
+    would have lost to an incumbent whose MAE was inflated by the leakage
+    bug. Added `training_schema_version` (bump when a target/feature
+    REDEFINITION makes MAE non-comparable, even with an unchanged feature
+    vector — `pit_predictor`'s exact case, see below) and a `feature_names`
+    check (catches a same-count rename, e.g. `fuel_adjusted_time` →
+    `fuel_load_penalty`) alongside the existing count check, force-promoting
+    on any of the three. 24 new unit tests, `ruff`/`mypy --strict` clean.
+  - **CP3 (real retrain):** ran `train_models.train_all()` for real against
+    the local DB, promoting all 7 models to S3 `production/*` — every one
+    force-promoted via `training_schema_version_mismatch`, as CP2's own dry
+    run predicted. Re-verified against the real running app (not just a
+    standalone script) for COL/LEC/GAS at Belgian GP 2026 R10: `pit_
+    probability` now shows genuine advance warning (e.g. COL 0.845→0.851→
+    0.877→0.871→0.638 approaching their real lap-16 pit, dropping to 0.033
+    after) — comfortably crossing `ALERT_THRESHOLD=0.65` well before the
+    real pit for all three drivers, which is the exact mechanism
+    `race_simulator` needs for rivals to pit organically. `predicted_life_
+    remaining` broke free of the permanent-40 peg for SOFT/MEDIUM/HARD
+    (noisy, not perfectly monotonic, but genuinely varies with age now).
+    **This also resolved the measured `pit_predictor.pkl` anomaly
+    definitively (was §2c's "unresolved second anomaly")**: the deployed
+    model predating this fix WAS the stale pre-label-fix model (bit-
+    identical `positive_rate` to the pre-fix formula, 0.0276 vs. the
+    corpus's own recomputed 0.0276) — confirmed, not merely plausible.
+  - **Two things NOT fixed by this:** the already-documented `tire_deg_
+    hard.pkl` fresh-`tyre_age=1` misprediction persists unchanged (see that
+    entry above — its downstream harm is smaller now since the new
+    `pit_predictor` isn't fooled by it the same way). WET/INTER stay noisy
+    (319/3845 real laps only — expected, low priority, unchanged from the
+    already-tracked WET-retrain item, now itself also done — see below).
+  - Along the way, found and fixed a SEPARATE bug this same investigation
+    surfaced (`safety_car_model` was fit on `is_valid`-filtered laps,
+    silently discarding virtually all real SC/VSC events) and a project-wide
+    infrastructure bug (the model artifact disk cache never invalidated
+    across process restarts) — see their own Notes entries below.
+  CP4 (also done 2026-09-11) re-ran this exact document's own §1 acceptance
+  case (LEC, Belgian GP 2026 R10, lap 15, 3-scenario compare) and confirmed
+  both headline findings resolved: `fresh_tyre_gain_per_lap`'s sign flipped
+  negative→positive in every scenario, and all 21 `drivers_overtaken` rows
+  now carry a real `rival_projected_pit_lap` (was 0/21). CP5 investigated
+  `ALERT_THRESHOLD`/`DEGRADATION_THRESHOLD_SECONDS`/`MIN_LAPS_BETWEEN_PITS`
+  and found no clean fix: a sweep of `ALERT_THRESHOLD` against 89 real
+  historical stints showed a monotonic trade-off (lower catches more stints
+  but predicts earlier; higher does the reverse), not a sweet spot, and the
+  bias is compound-dependent (HARD/SOFT under-signal, MEDIUM over-signals
+  early) in a way one global number can't fix. The one real fix attempted —
+  a `monotone_constraints` retrain on `tyre_age_laps` to stop `tire_deg_
+  hard.pkl`'s curve from plateauing — was measured against the same 89
+  stints and made things WORSE (HARD's never-crossed rate 44%→52%, SOFT's
+  timing accuracy notably worse), so it was reverted; nothing was ever
+  promoted to S3. Full checkpoint-by-checkpoint detail, all real numbers,
+  and the working hypothesis for why the constraint didn't help:
+  `docs/tire-deg-model-quality-and-rival-pit-behavior.md`'s "2026-09-11
+  Session Update" section. Only CP6 (optional resilience layer) remains —
+  CP5's negative result is a real reason to re-weigh whether CP6 is still
+  "probably not needed" the way the 2026-09-09 pilot concluded.
 
 - **[deferred] `StrategyPrediction.tire_life_remaining` stores the wrong
   value — the tire_deg model's raw `lap_time_delta` prediction instead of
@@ -1479,23 +1528,18 @@ happen), or was found already fixed and moved into ### Notes below instead.
      stop a freshly-ingested, not-yet-backfilled season from breaking the
      page. Not needed once ingestion is self-sufficient (fix B below).
 
-- **[deferred] Retrain a real 6-feature `tire_deg_wet.pkl`.** The ✅-fixed
-  entry below ("WET tyre model schema mismatch") aliases `tire_deg_wet.pkl`
-  to `tire_deg_inter.pkl` at model-load time as a working stopgap — a real
-  WET-specific model has never existed at the 6-feature schema the rest of
-  the tire_deg registry uses since the 2026-07-16 weather-feature revert. To
-  retrain: run `train_models.py` against the local corpus (produces a
-  6-feature WET candidate). **Manual sidecar deletion is no longer needed
-  before this** — the promotion guard fix directly above (item 9, ✅ done
-  2026-09-02) now force-promotes automatically on a detected schema mismatch
-  against the stale 8-feature incumbent (`cv_mae=5.7906`), regardless of the
-  candidate's own `holdout_mae`; the old workaround of deleting
-  `production/tire_deg_wet.pkl.metrics.json` from S3 first was only ever
-  needed because the guard used to compare MAE blindly. Low priority: only
-  319 valid WET laps exist across the whole 2018-2025 corpus (2025 holdout
-  has zero), so any retrained WET model will stay high-variance regardless —
-  this removes the INTER-alias fudge, it doesn't produce a genuinely
-  accurate WET model. Full analysis:
+- **[✅ done 2026-09-11] Retrain a real 6-feature `tire_deg_wet.pkl`.**
+  Happened as a side effect of the tire-deg-model-quality CP3 retrain (see
+  the now-✅-done "`predicted_life_remaining` pegged" entry above), not a
+  dedicated effort — `train_models.train_all()` force-promoted a real
+  6-feature WET candidate (`holdout_mae=3.92329`, CV-only promotion basis —
+  2025 still has zero WET holdout laps) over the stale 8-feature incumbent.
+  Confirmed live: `tire_deg_wet.pkl` now reports `n_features=6` in both the
+  backend and worker containers, no `apply_incompatible_model_fallbacks`
+  alias applied. As predicted, still high-variance (only 319 valid WET laps
+  in the whole 2018-2025 corpus) — this removes the INTER-alias fudge, it
+  doesn't produce a low-variance WET model; that would need real new WET
+  data, not a retrain. Full analysis:
   `docs/simulator-issues-wet-model-and-position-context.md` Part A, Option 1.
 
 - **[✅ done 2026-09-02] The model promotion guard (`train_models.py`'s
@@ -1665,6 +1709,102 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Pit-timing threshold retuning + a monotonic-constraint retrain — both
+investigated, neither landed (2026-09-11, tire-deg-model-quality-and-rival-
+pit-behavior.md CP5):** Measured whether `pit_predictor.ALERT_THRESHOLD`
+(0.65) still makes sense against the CP1-CP3-fixed models by sweeping 6
+candidate values (0.45-0.70) against 89 real historical stints across 3 real
+2026 races, using the real production `_first_pit_laps_over_threshold_batch`
+function. Result: a monotonic trade-off, not a sweet spot — every step down
+catches more stints (fewer never-signal-at-all) but predicts earlier on
+average; every step up does the reverse. The miscalibration is also
+compound-dependent (HARD/SOFT often never cross the threshold within the
+15-lap horizon at all — 44% each; MEDIUM over-signals ~6-9 laps early),
+which no single global number can fix regardless of value. `MIN_LAPS_
+BETWEEN_PITS` isn't the bottleneck in this data. `DEGRADATION_THRESHOLD_
+SECONDS` is baked into the already-trained `pit_predictor.pkl`'s own
+training features, so it isn't safely adjustable without a full retrain
+anyway.
+
+Tried the one real fix that seemed principled: added `monotone_constraints=
+(0, 0, 1, 0, 0, 0)` to `tire_deg_model._build_pipeline()`'s `XGBRegressor` —
+constrains only `tyre_age_laps` to a non-decreasing effect on the target
+(physically always true; every other feature, including `compound_encoded`,
+stays unconstrained so compounds can still legitimately have different
+curves). Retrained tire_deg + `pit_predictor` together in memory (pit_
+predictor's own training features depend on tire_deg's output, so both must
+move together to avoid the exact train/inference skew CP1 was about) — no
+S3 writes. Raw holdout MAE was mixed (SOFT and pit_predictor slightly
+better, MEDIUM/HARD/INTER/WET worse). Re-ran the identical 89-stint
+real-world measurement against the candidates: **worse on nearly every
+axis**, including the specific problem it targeted — HARD's never-crossed
+rate went from 44% to 52%, and SOFT's timing accuracy notably worsened
+(−3.60 → −6.20 laps early). Reverted; nothing was ever promoted to S3,
+production ran CP3's models throughout. Working hypothesis, not yet
+independently confirmed: monotonicity forbids local reversals but doesn't
+force a steeper rise, and HARD's flatter real degradation may be closer to
+physical truth than an artifact — the real ceiling may be that pure
+lap-time degradation can't predict pit timing that's actually driven by
+strategic factors (fuel-corrected stint planning, undercut threats, safety
+car timing), which a degradation-only model structurally can't see
+regardless of curve shape. Full numbers and the complete write-up:
+`docs/tire-deg-model-quality-and-rival-pit-behavior.md`'s CP5 section.
+
+**Model artifact disk cache never invalidated across process restarts (✅
+fixed 2026-09-11):** `prediction_worker._download_from_s3`/
+`_download_metrics_from_s3` and `strategy_service`'s identical duplicated
+pair checked a local disk cache (`get_ml_settings().model_cache_dir`,
+default `/tmp/f1_models`) first and, if the file already existed, never
+re-fetched from S3 — for the *life of that file*, not the life of the
+process. Since `docker compose restart` does not wipe a container's
+writable filesystem layer, this meant the documented "restart the worker to
+pick up a newly promoted model" convention had never actually worked
+reliably: found because a same-process-lifetime verification script (the
+tire-deg-model-quality CP3 retrain's own real-world alignment check, see
+above) showed numbers identical to the pre-CP1 "before" table despite CP1-
+CP3 already being promoted to S3. Confirmed via file timestamps, not
+theory: the host machine's cache held `.pkl` files dated 2026-07-16 (over a
+month stale); the LIVE worker container's own cache held files dated
+2026-09-09 — CP1's session, not CP3's. Fixed by removing the
+skip-if-cached-on-disk short-circuit entirely — both functions now always
+download fresh from S3 on every process start. This does NOT reintroduce a
+performance cost per call: `_load_models()`'s own module-level
+`_model_cache` dict still guards each filename to exactly one fetch per
+process, unchanged — only the disk layer surviving PROCESS RESTARTS is
+gone. Verified live: cleared both containers' stale caches, restarted
+`backend`+`worker`, confirmed fresh 2026-09-11 timestamps and
+`n_features=6` for every tire_deg model (no more WET-alias), and re-ran the
+COL/Belgian-GP-R10 advance-warning check *inside the running worker
+container itself* — identical numbers to the host-side check. Full unit
+suite 341 passed after the fix (was 340 before this session).
+
+**`safety_car_model` was fit on `is_valid`-filtered laps, discarding
+virtually all real SC/VSC events (✅ fixed 2026-09-11):** Production's
+`safety_car_model.pkl` had `circuit_rates` all `0.0` and `default_rate=0.0`
+— it always predicted `P(SC)=0`, with a `holdout_mae` of exactly `0.0`
+(every actual was also 0 once filtered) that no honestly-trained model
+could ever beat under the old MAE-only promotion guard. Root cause: `train_
+models.train_all`/`retrain_incremental.retrain` fit this model on the same
+`is_valid=True`-filtered laps `tire_deg_model` correctly wants, for a
+completely different (and here, wrong) reason — a lap run under an active
+SC/VSC period has an anomalous lap time FastF1 marks `is_valid=False`,
+so filtering removes almost the entire positive-class signal `build_lap_
+flags` depends on. Confirmed directly against the real 2018-2025 local
+corpus: 3832 laps carry `track_status="4"` (SC) before the `is_valid`
+filter, 0 after. Fixed two ways together: (1) both training scripts now
+fit `safety_car_model` on the already-unfiltered `pit_train_laps`/
+`pit_holdout_laps` frame `pit_predictor` already builds for the identical
+reason, instead of the filtered `train_laps`/`holdout_laps`; (2) gave
+`safety_car_model` its own `TRAINING_SCHEMA_VERSION` (it has no feature
+vector, so neither of item 9's schema checks could ever fire for it —
+version is the only mechanism that can flag this class of training-input
+change). Verified against real data before promoting: refit locally found
+286 real SC events in train (137286 rows) and 33 in holdout (26337 rows),
+24 circuits get their own rate, `default_rate=0.00188`, and the resulting
+rates are directionally sane (Jeddah/Baku — real high-incident street
+circuits — rank highest, Spa lowest). Promoted for real via the CP3 retrain
+below (`holdout_mae=0.00365` vs. the old, illegitimate `0.00000`).
 
 **Core feature rebuild — What-If Simulator multi-scenario compare +
 position-probability distribution (✅ done 2026-09-06, 6 checkpoints):**
