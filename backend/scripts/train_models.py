@@ -289,14 +289,32 @@ class PromotionOutcome:
 
     reason is one of:
         "no_production_model"      — first run for this filename, nothing to compare against.
-        "schema_mismatch"          — the production incumbent's feature schema didn't match
+        "schema_mismatch"          — the production incumbent's feature COUNT didn't match
                                       this candidate's; promoted regardless of holdout_mae,
                                       since an incompatible incumbent cannot even serve
                                       inference (see tire_deg_wet.pkl's 8-vs-6-feature crash).
-        "holdout_mae_improved"     — schema matched (or wasn't applicable); candidate's
-                                      holdout_mae beat the incumbent's.
-        "holdout_mae_not_improved" — schema matched (or wasn't applicable); candidate's
-                                      holdout_mae did not beat the incumbent's.
+        "training_schema_version_mismatch" — the incumbent's recorded
+                                      training_schema_version (or its absence) didn't match
+                                      this candidate's declared version — the candidate's
+                                      FEATURE/TARGET definitions changed in a way that makes
+                                      holdout_mae non-comparable across versions, even though
+                                      feature count and names may be identical (see
+                                      pit_predictor.TRAINING_SCHEMA_VERSION's label-definition
+                                      case). Promoted regardless of holdout_mae, same rationale
+                                      as schema_mismatch — the two models aren't measuring the
+                                      same thing, so "improved" has no meaning across them.
+        "feature_names_mismatch"   — the incumbent's recorded feature_names didn't match this
+                                      candidate's, despite an identical feature COUNT (e.g.
+                                      CP1's fuel_adjusted_time -> fuel_load_penalty rename) —
+                                      a softer failure mode than schema_mismatch (no shape
+                                      error at inference, just silently wrong predictions), so
+                                      it needs its own check rather than relying on a crash to
+                                      ever surface it. Promoted regardless of holdout_mae.
+        "holdout_mae_improved"     — schema, names, and version all matched (or weren't
+                                      applicable); candidate's holdout_mae beat the incumbent's.
+        "holdout_mae_not_improved" — schema, names, and version all matched (or weren't
+                                      applicable); candidate's holdout_mae did not beat the
+                                      incumbent's.
     """
 
     promoted: bool
@@ -377,6 +395,67 @@ def _resolve_incumbent_schema(
     return n_features, False
 
 
+def _feature_names_mismatch(
+    candidate_feature_names: list[str] | None, current_metrics: dict[str, Any]
+) -> bool:
+    """Whether the incumbent's recorded feature_names differ from the candidate's.
+
+    A softer companion to _resolve_incumbent_schema's feature-COUNT check: two
+    models can share a feature count while a feature at the same position means
+    something completely different (CP1's fuel_adjusted_time -> fuel_load_penalty
+    rename — same 6 features, same position, incompatible values). That class of
+    drift raises no shape error at inference, it just silently predicts against
+    the wrong distribution — so unlike a count mismatch, nothing will ever force
+    this to surface on its own; it needs this explicit check.
+
+    Args:
+        candidate_feature_names: This candidate's feature_names, or None for a
+            model type with no feature-vector concept — always returns False.
+        current_metrics: The production sidecar's already-downloaded metrics dict.
+    Returns:
+        True if the candidate must be force-promoted regardless of holdout_mae.
+        A legacy incumbent with no feature_names recorded at all is treated as
+        mismatched — same "unrecoverable is incompatible" stance
+        _resolve_incumbent_schema takes for feature count, and unlike count there
+        is no .pkl to introspect a name list back out of, so this can never be
+        recovered after the fact the way a legacy count can.
+    """
+    if candidate_feature_names is None:
+        return False
+    return current_metrics.get("feature_names") != candidate_feature_names
+
+
+def _training_schema_mismatch(
+    candidate_training_schema_version: int | None, current_metrics: dict[str, Any]
+) -> bool:
+    """Whether the incumbent's recorded training_schema_version differs from the candidate's.
+
+    Catches a class of drift neither the feature-count nor feature-names check
+    can: pit_predictor's 2026-09-04 label fix (see pit_predictor.
+    TRAINING_SCHEMA_VERSION) changed what TARGET_COLUMN's values mean while
+    FEATURE_COLUMNS stayed byte-for-byte identical — there is no feature-side
+    signal of any kind to compare, so only an explicit version bump can flag the
+    two models as measuring different things.
+
+    Args:
+        candidate_training_schema_version: This candidate's declared version
+            (tire_deg_model.TRAINING_SCHEMA_VERSION / pit_predictor.
+            TRAINING_SCHEMA_VERSION), or None for a model type that doesn't use
+            this concept (safety_car_model) — always returns False.
+        current_metrics: The production sidecar's already-downloaded metrics dict.
+    Returns:
+        True if the candidate must be force-promoted regardless of holdout_mae.
+        Like feature_names, a training_schema_version has no way to be recovered
+        from a fitted model object — it is pure training-time metadata — so an
+        incumbent sidecar that never recorded one (every real sidecar as of
+        2026-09-09) is always treated as mismatched whenever the candidate
+        declares a version.
+    """
+    if candidate_training_schema_version is None:
+        return False
+    return current_metrics.get("training_schema_version") != candidate_training_schema_version
+
+
 def serialize_evaluate_and_upload(
     client: Any,
     bucket: str,
@@ -385,28 +464,37 @@ def serialize_evaluate_and_upload(
     model_obj: Any,
     metrics: dict[str, Any],
     feature_names: list[str] | None = None,
+    training_schema_version: int | None = None,
 ) -> PromotionOutcome:
     """Serialize a model, upload it under version_tag, and promote based on schema + holdout MAE.
 
     Promotion logic, in order:
     1. No existing production model for this filename -> promote (first run).
-    2. This model type has a feature-vector concept (fitted_feature_count(model_obj)
-       is not None) AND the production incumbent's feature schema is either
-       unrecoverable or a different feature count than this candidate -> force-
-       promote regardless of holdout_mae. A schema-incompatible incumbent doesn't
-       just predict worse, it raises at inference time (tire_deg_wet.pkl's
-       2026-08-30 8-vs-6-feature crash) — any schema-correct candidate is strictly
-       better than a model that cannot run, so MAE isn't a meaningful comparison
-       across the mismatch.
-    3. Otherwise (schema matches, schema isn't applicable to this model type — e.g.
-       safety_car_model, which has no feature vector at all — or there's no
-       incumbent to compare against) -> promote only if holdout_mae improved, same
-       as before this check existed.
+    2. The production incumbent is INCOMPATIBLE with this candidate in any of three
+       independent ways -> force-promote regardless of holdout_mae, since an
+       incompatible incumbent's holdout_mae isn't measuring the same thing this
+       candidate's is (see each check's own docstring for what it catches and why
+       the other two can't):
+         a. Feature COUNT differs (fitted_feature_count(model_obj) is not None and
+            the incumbent's is unrecoverable or different) — a hard crash risk,
+            the original form of this check (tire_deg_wet.pkl's 8-vs-6-feature
+            crash).
+         b. Feature NAMES differ despite an identical count (_feature_names_mismatch).
+         c. training_schema_version differs (_training_schema_mismatch) — catches a
+            TARGET-only definition change with no feature-side signal at all (e.g.
+            pit_predictor's label fix).
+    3. Otherwise (fully compatible, or no incumbent to compare against) -> promote
+       only if holdout_mae improved, same as before any of this existed.
 
     Every sidecar this function writes (the version_tag copy always, the production
-    copy on promotion) carries n_features/feature_names/schema_source="declared", so
-    a legacy incumbent's schema only ever needs recovering via .pkl download once —
-    see _resolve_incumbent_schema.
+    copy on promotion) carries n_features/feature_names/schema_source="declared"/
+    training_schema_version, so a legacy incumbent's feature COUNT only ever needs
+    recovering via .pkl download once — see _resolve_incumbent_schema. feature_names
+    and training_schema_version have no equivalent recovery path (see their own
+    docstrings) — an incumbent sidecar predating this function's declaration of
+    either is permanently treated as mismatched on that axis, which is the correct,
+    conservative default: force one real promotion under this fix and the sidecar
+    carries both fields from then on.
 
     Args:
         client: boto3 S3 client.
@@ -418,6 +506,9 @@ def serialize_evaluate_and_upload(
         feature_names: This model's FEATURE_COLUMNS, in training order, or None for
             a model type with no feature-vector concept (safety_car_model). When
             given, must have exactly fitted_feature_count(model_obj) entries.
+        training_schema_version: This model's TRAINING_SCHEMA_VERSION (tire_deg_model
+            / pit_predictor), or None for a model type that doesn't declare one
+            (safety_car_model) — see _training_schema_mismatch.
     Returns:
         PromotionOutcome — whether this run's model was promoted to the
         'production' tag, and why.
@@ -438,6 +529,7 @@ def serialize_evaluate_and_upload(
     schema_metrics["n_features"] = candidate_n_features
     schema_metrics["feature_names"] = feature_names
     schema_metrics["schema_source"] = "declared"
+    schema_metrics["training_schema_version"] = training_schema_version
 
     local_path = MODEL_DIR / filename
     joblib.dump(model_obj, local_path)
@@ -460,22 +552,44 @@ def serialize_evaluate_and_upload(
             incumbent_n_features, incumbent_unrecoverable = _resolve_incumbent_schema(
                 client, bucket, filename, current_production
             )
-        schema_mismatch = candidate_n_features is not None and (
+        feature_count_mismatch = candidate_n_features is not None and (
             incumbent_unrecoverable or incumbent_n_features != candidate_n_features
         )
-        if schema_mismatch:
+        names_mismatch = _feature_names_mismatch(feature_names, current_production)
+        version_mismatch = _training_schema_mismatch(training_schema_version, current_production)
+
+        if feature_count_mismatch or names_mismatch or version_mismatch:
             should_promote = True
-            reason = "schema_mismatch"
+            # Priority when more than one fires at once (e.g. CP1's tire_deg
+            # rename tripped both names_mismatch and version_mismatch): report
+            # the highest-severity check that actually caused promotion —
+            # feature_count_mismatch (a crash risk) first, then the deliberate
+            # version signal, then the automatic name-based safety net.
+            reason = (
+                "schema_mismatch"
+                if feature_count_mismatch
+                else "training_schema_version_mismatch"
+                if version_mismatch
+                else "feature_names_mismatch"
+            )
             logger.warning(
-                "%s: production incumbent's feature schema is incompatible "
-                "(incumbent=%s, candidate=%d%s) — force-promoting regardless of "
-                "holdout_mae (candidate=%.5f, incumbent=%s)",
+                "%s: production incumbent is incompatible with this candidate — "
+                "force-promoting regardless of holdout_mae (candidate=%.5f, "
+                "incumbent=%s). feature_count_mismatch=%s (incumbent_n_features=%s, "
+                "candidate_n_features=%s%s) feature_names_mismatch=%s "
+                "training_schema_version_mismatch=%s (incumbent_version=%s, "
+                "candidate_version=%s)",
                 filename,
+                holdout_mae,
+                f"{current_holdout_mae:.5f}" if current_holdout_mae is not None else "none",
+                feature_count_mismatch,
                 incumbent_n_features,
                 candidate_n_features,
                 " [incumbent .pkl unrecoverable]" if incumbent_unrecoverable else "",
-                holdout_mae,
-                f"{current_holdout_mae:.5f}" if current_holdout_mae is not None else "none",
+                names_mismatch,
+                version_mismatch,
+                current_production.get("training_schema_version"),
+                training_schema_version,
             )
         else:
             # Read straight off current_production (not the separately-derived
@@ -506,7 +620,7 @@ def add_predicted_life_remaining(
 
     Args:
         df: Must include compound, lap_number, compound_encoded, tyre_age_laps,
-            fuel_adjusted_time, circuit_id_encoded, driver_id_encoded.
+            fuel_load_penalty, circuit_id_encoded, driver_id_encoded.
         tire_deg_results: Fitted tire degradation results, keyed by compound.
     Returns:
         Series aligned to df.index with the estimated laps remaining.
@@ -526,7 +640,7 @@ def add_predicted_life_remaining(
             group["lap_number"].to_numpy(),
             group["compound_encoded"].to_numpy(),
             group["tyre_age_laps"].to_numpy(),
-            group["fuel_adjusted_time"].to_numpy(),
+            group["fuel_load_penalty"].to_numpy(),
             group["circuit_id_encoded"].to_numpy(),
             group["driver_id_encoded"].to_numpy(),
         )
@@ -641,12 +755,22 @@ async def train_all() -> None:
                 **encoding_maps,
             },
             feature_names=tire_deg_model.FEATURE_COLUMNS,
+            training_schema_version=tire_deg_model.TRAINING_SCHEMA_VERSION,
         )
         tire_deg_results[compound] = result
 
     # --- Safety car model ---
-    sc_train = safety_car_model.build_lap_flags(train_laps)
-    sc_holdout = safety_car_model.build_lap_flags(holdout_laps)
+    # Unlike tire_deg (which wants is_valid=True only), this model must NOT be
+    # fit on is_valid-filtered laps: a lap under an active SC/VSC period has an
+    # anomalous lap time FastF1 marks is_valid=False, so filtering removes
+    # virtually the entire positive-class signal (see safety_car_model.
+    # TRAINING_SCHEMA_VERSION's docstring — this was the real, measured root
+    # cause of production's all-zero circuit_rates). pit_train_laps/
+    # pit_holdout_laps are already the unfiltered frame with the same
+    # encode_categoricals/laps_in_session/split_train_holdout applied — reused
+    # here rather than building a third copy.
+    sc_train = safety_car_model.build_lap_flags(pit_train_laps)
+    sc_holdout = safety_car_model.build_lap_flags(pit_holdout_laps)
     sc_model = safety_car_model.train_safety_car_model(sc_train)
     sc_holdout_mae = safety_car_model.evaluate_holdout(sc_model, sc_holdout)
     serialize_evaluate_and_upload(
@@ -656,6 +780,7 @@ async def train_all() -> None:
         "safety_car_model.pkl",
         sc_model,
         {"holdout_mae": sc_holdout_mae, "n_circuits": len(sc_model.circuit_rates)},
+        training_schema_version=safety_car_model.TRAINING_SCHEMA_VERSION,
     )
 
     # --- Pit predictor (depends on tire_deg_results + sc_model) ---
@@ -689,6 +814,7 @@ async def train_all() -> None:
             "n_samples": pit_result.n_samples,
         },
         feature_names=pit_predictor.FEATURE_COLUMNS,
+        training_schema_version=pit_predictor.TRAINING_SCHEMA_VERSION,
     )
 
     logger.info("Training complete. version_tag=%s", version_tag)

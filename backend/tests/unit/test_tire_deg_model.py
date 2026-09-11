@@ -25,6 +25,7 @@ from backend.services.ml.tire_deg_model import (
     apply_incompatible_model_fallbacks,
     build_categorical_encoding_maps,
     encoding_maps_from_metrics,
+    fuel_load_penalty_seconds,
     pipeline_feature_count,
     predict_life_remaining_batch,
     project_stint_delta,
@@ -118,7 +119,7 @@ def test_train_tire_degradation_model_returns_fitted_pipeline_and_metrics() -> N
                     "lap_number": lap_number + 1,
                     "compound_encoded": 2,
                     "tyre_age_laps": lap_number,
-                    "fuel_adjusted_time": float(rng.random()),
+                    "fuel_load_penalty": float(rng.random()),
                     "circuit_id_encoded": 1,
                     "driver_id_encoded": 0,
                     "lap_time_delta": 0.05 * lap_number + rng.normal(0, 0.05),
@@ -152,11 +153,104 @@ def test_add_engineered_features_computes_delta_and_imputes_weather() -> None:
 
     result = add_engineered_features(df)
 
-    assert "fuel_adjusted_time" in result.columns
+    assert "fuel_load_penalty" in result.columns
+    assert "fuel_corrected_time" in result.columns
     assert not result["track_temp"].isna().any()
     assert not result["air_temp"].isna().any()
-    expected_median = df["lap_time_seconds"].median()
-    assert result.loc[0, "lap_time_delta"] == pytest.approx(90.0 - expected_median)
+
+    # The target is a deviation from the median of the FUEL-CORRECTED times,
+    # not of the raw ones — correcting both sides with the same term is what
+    # stops the median subtraction reintroducing the fuel trend.
+    penalty = fuel_load_penalty_seconds(df["lap_number"], df["laps_in_session"])
+    corrected = df["lap_time_seconds"] - penalty
+    assert result["fuel_corrected_time"].tolist() == pytest.approx(corrected.tolist())
+    assert result.loc[0, "lap_time_delta"] == pytest.approx(corrected.iloc[0] - corrected.median())
+
+
+@pytest.mark.unit
+def test_fuel_load_penalty_decreases_as_the_race_runs() -> None:
+    """The car gets lighter, so the penalty it carries must SHRINK toward zero.
+
+    Regression test for the 2026-09-09 inverted-sign defect (see the module
+    docstring): the previous formula subtracted fuel BURNED, which grows across
+    a race, so it made late laps look faster still instead of normalising them.
+    """
+    penalty = fuel_load_penalty_seconds(np.array([1.0, 25.0, 50.0]), 50.0)
+
+    assert penalty[0] > penalty[1] > penalty[2]
+    assert penalty[2] == pytest.approx(0.0)
+    # Lap 1 carries very nearly the full tank's penalty.
+    assert penalty[0] == pytest.approx(
+        FUEL_TIME_PENALTY_PER_KG * ASSUMED_START_FUEL_KG * (1 - 1 / 50), rel=1e-9
+    )
+
+
+@pytest.mark.unit
+def test_fuel_load_penalty_is_never_negative_and_survives_degenerate_inputs() -> None:
+    """total_laps <= 0 and laps past the flag must not produce a negative penalty."""
+    assert fuel_load_penalty_seconds(5.0, 0.0) >= 0.0
+    assert fuel_load_penalty_seconds(80.0, 50.0) == pytest.approx(0.0)
+    assert np.all(fuel_load_penalty_seconds(np.array([0.0, 10.0, 999.0]), 50.0) >= 0.0)
+
+
+@pytest.mark.unit
+def test_engineered_target_recovers_a_positive_degradation_slope() -> None:
+    """A synthetic stint that genuinely degrades must produce a POSITIVE target slope.
+
+    The core regression test for both 2026-09-09 defects at once. Lap times here
+    are built as (constant base) + (real degradation) - (real fuel gain), i.e.
+    exactly what a real degrading car does. Under the old fuel handling the fuel
+    term dominated and the resulting target sloped DOWNWARD with tyre age,
+    teaching every model that tyres improve as they age.
+    """
+    total_laps = 50
+    laps = np.arange(1, total_laps + 1)
+    true_degradation_per_lap = 0.06
+    real_fuel_effect = FUEL_TIME_PENALTY_PER_KG * ASSUMED_START_FUEL_KG * (1 - laps / total_laps)
+    df = pd.DataFrame(
+        {
+            "session_id": ["s1"] * total_laps,
+            "driver_id": ["d1"] * total_laps,
+            "lap_number": laps,
+            "lap_time_seconds": 90.0 + true_degradation_per_lap * laps + real_fuel_effect,
+            "laps_in_session": [total_laps] * total_laps,
+            "compound": ["MEDIUM"] * total_laps,
+            "circuit_id_encoded": [1] * total_laps,
+            "track_temp": [35.0] * total_laps,
+            "air_temp": [25.0] * total_laps,
+        }
+    )
+
+    result = add_engineered_features(df)
+    slope = float(np.polyfit(result["lap_number"], result["lap_time_delta"], 1)[0])
+
+    assert slope == pytest.approx(true_degradation_per_lap, abs=1e-9)
+
+
+@pytest.mark.unit
+def test_fuel_load_penalty_feature_never_encodes_a_lap_time() -> None:
+    """The feature must be identical for two frames that differ ONLY in lap time.
+
+    Guards the leakage half of the 2026-09-09 fix: the old fuel_adjusted_time
+    was `lap_time_seconds - penalty`, so it carried the target into the feature
+    matrix and could not be reconstructed by a forward simulation that has no
+    lap times. fuel_load_penalty depends on race position alone, which is what
+    makes training and inference produce the same value by construction.
+    """
+    base = {
+        "session_id": ["s1", "s1", "s1"],
+        "driver_id": ["d1", "d1", "d1"],
+        "lap_number": [1, 2, 3],
+        "laps_in_session": [3, 3, 3],
+        "compound": ["MEDIUM"] * 3,
+        "circuit_id_encoded": [1, 1, 1],
+        "track_temp": [35.0] * 3,
+        "air_temp": [25.0] * 3,
+    }
+    slow = add_engineered_features(pd.DataFrame({**base, "lap_time_seconds": [90.0, 91.0, 92.0]}))
+    fast = add_engineered_features(pd.DataFrame({**base, "lap_time_seconds": [70.0, 71.0, 72.0]}))
+
+    assert slow["fuel_load_penalty"].tolist() == pytest.approx(fast["fuel_load_penalty"].tolist())
 
 
 @pytest.mark.unit
@@ -169,7 +263,7 @@ def test_predict_life_remaining_batch_crosses_threshold_before_cap() -> None:
         lap_number=np.array([10, 10], dtype=np.int64),
         compound_encoded=np.array([2, 2], dtype=np.int64),
         tyre_age_laps=np.array([0, 0], dtype=np.int64),
-        fuel_adjusted_time=np.array([0.0, 0.0]),
+        fuel_load_penalty=np.array([0.0, 0.0]),
         circuit_id_encoded=np.array([0, 0], dtype=np.int64),
         driver_id_encoded=np.array([0, 0], dtype=np.int64),
     )
@@ -190,7 +284,7 @@ def test_predict_life_remaining_batch_caps_when_never_crossing() -> None:
         lap_number=np.array([10], dtype=np.int64),
         compound_encoded=np.array([2], dtype=np.int64),
         tyre_age_laps=np.array([0], dtype=np.int64),
-        fuel_adjusted_time=np.array([0.0]),
+        fuel_load_penalty=np.array([0.0]),
         circuit_id_encoded=np.array([0], dtype=np.int64),
         driver_id_encoded=np.array([0], dtype=np.int64),
     )
@@ -418,17 +512,22 @@ def _naive_stint_delta(
     start_tyre_age: int,
     total_laps: int,
 ) -> float:
-    """Hand-built reference sum, independent of project_stint_delta's own code path."""
+    """Hand-built reference sum, independent of project_stint_delta's own code path.
+
+    Deliberately re-derives the fuel term inline rather than calling
+    fuel_load_penalty_seconds, so this stays an independent check of what
+    project_stint_delta builds rather than a tautology against the shared helper.
+    """
     laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
     tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
     fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
-    fuel_adjusted_time = -FUEL_TIME_PENALTY_PER_KG * (ASSUMED_START_FUEL_KG - fuel_at_lap)
+    fuel_load_penalty = FUEL_TIME_PENALTY_PER_KG * fuel_at_lap
     features = np.column_stack(
         [
             laps,
             np.full(n_laps, float(compound_encoded)),
             tyre_age,
-            fuel_adjusted_time,
+            fuel_load_penalty,
             np.full(n_laps, float(circuit_code)),
             np.full(n_laps, float(driver_code)),
         ]

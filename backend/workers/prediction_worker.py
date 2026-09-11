@@ -109,17 +109,35 @@ def _local_model_path(filename: str) -> Path:
 
 
 def _download_from_s3(filename: str) -> Path:
-    """Download a model file from S3, unless already cached locally.
+    """Download a model file from S3, always fresh for this process.
+
+    Deliberately does NOT check whether path already exists on disk and skip
+    the download if so — that was the original behavior (see git history) and
+    it silently served stale models forever, since the local file never
+    expires and nothing else ever invalidates it. Confirmed as a real bug
+    2026-09-11 (docs/tire-deg-model-quality-and-rival-pit-behavior.md's CP3):
+    both the host machine's and the running worker container's cache
+    directories held .pkl files dated weeks/a session earlier than the
+    latest real promotion, so "docker compose restart worker" — this
+    project's own documented convention for picking up a newly-promoted
+    model — never actually worked, because a plain restart doesn't touch the
+    container's writable filesystem layer where this cache lived.
+
+    This still costs only ONE fetch per process (not per call): _load_models
+    only ever calls this once per filename, guarded by the module-level
+    _model_cache dict, so the per-process "load once, cache in memory for the
+    process's lifetime" contract CLAUDE.md documents is unchanged — only the
+    now-removed disk layer surviving PROCESS RESTARTS is gone. These files
+    are ~1MB each (7 total); against this project's own documented ~88s
+    cold-start import time (xgboost/lightgbm/shap), a few extra MB over the
+    network at startup is noise.
 
     Args:
         filename: Model file name, as listed in the ML Model Registry.
     Returns:
-        Local filesystem path to the (now-)cached file.
+        Local filesystem path to the freshly-downloaded file.
     """
     path = _local_model_path(filename)
-    if path.exists():
-        return path
-
     settings = get_aws_settings()
     client = boto3.client(
         "s3",
@@ -139,13 +157,15 @@ def _local_metrics_path(filename: str) -> Path:
 
 
 def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
-    """Download a tire_deg model's own sidecar metrics.json from S3, unless cached locally.
+    """Download a tire_deg model's own sidecar metrics.json from S3, always fresh for this process.
 
     Duplicated from strategy_service.py's identical helper — same no-cross-service-
     import convention as this module's other duplicated helpers (_resolve_weather,
-    _encoding_maps_for_compound). Same local-disk-cache-then-fetch lifecycle as _download_from_s3
-    (never re-fetches once cached — a worker restart is what picks up a newly-promoted
-    model's fresh sidecar, same as every other model in this process).
+    _encoding_maps_for_compound). Same always-fresh-per-process contract as
+    _download_from_s3 (see that function's docstring for why the old
+    skip-if-cached-on-disk behavior was a real staleness bug, not a valid
+    optimization) — still only one fetch per filename per process, via
+    _load_models' own once-per-process guard, not a fetch per call.
 
     Args:
         filename: Model file name, e.g. "tire_deg_medium.pkl" — fetches its
@@ -157,9 +177,6 @@ def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
         "no recoverable encoding map," not as an error.
     """
     path = _local_metrics_path(filename)
-    if path.exists():
-        return dict(json.loads(path.read_text()))
-
     settings = get_aws_settings()
     client = boto3.client(
         "s3",
@@ -620,8 +637,8 @@ def _run_inference(
     driver_code = tire_deg_model.resolve_driver_code(compound_maps, str(driver_id))
 
     fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1))
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    fuel_load_penalty = float(
+        tire_deg_model.fuel_load_penalty_seconds(lap_number, float(max(total_laps, 1)))
     )
 
     # Fallback default — used both when a model never loaded (deg_model is
@@ -648,7 +665,7 @@ def _run_inference(
                         np.array([lap_number]),
                         np.array([compound_encoded]),
                         np.array([tyre_age_laps]),
-                        np.array([fuel_adjusted_time]),
+                        np.array([fuel_load_penalty]),
                         np.array([circuit_code]),
                         np.array([driver_code]),
                     )[0]

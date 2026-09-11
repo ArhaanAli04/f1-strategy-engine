@@ -225,6 +225,12 @@ async def _upsert_tire_stints(
 ) -> int:
     rows: list[dict[str, object]] = []
 
+    # Race distance, for _regression_slope's fuel correction (see its own
+    # docstring on why an uncorrected slope measures fuel burn, not tyre wear).
+    # MAX(LapNumber) across the whole session is the same "total laps" proxy
+    # the rest of this codebase uses — no total_laps column exists anywhere.
+    laps_in_session = int(laps["LapNumber"].max()) if not laps["LapNumber"].dropna().empty else 1
+
     grouped = laps.dropna(subset=["Stint"]).groupby(["Driver", "Stint"])
     for (driver_code, stint_number), stint_laps in grouped:
         driver_id = driver_code_to_id.get(driver_code)
@@ -235,13 +241,14 @@ async def _upsert_tire_stints(
         if compounds.empty:
             continue
 
-        # Slope (seconds/lap) of a linear fit over this stint's valid lap
-        # times — positive means the tyre is degrading. Same definition and
-        # IsAccurate / non-null-time filter as backfill_tire_data.py, computed
-        # inline so a fresh ingest is self-sufficient; backfill_tire_data.py
-        # stays the repair tool for stints ingested before this. None for a
-        # stint with fewer than 2 valid timed laps (_regression_slope's own
-        # guard), matching the previous always-None behaviour for those.
+        # Slope (seconds/lap) of a linear fit over this stint's valid,
+        # fuel-corrected lap times — positive means the tyre is degrading. Same
+        # definition and IsAccurate / non-null-time filter as
+        # backfill_tire_data.py, computed inline so a fresh ingest is
+        # self-sufficient; backfill_tire_data.py stays the repair tool for
+        # stints ingested before this. None for a stint with fewer than 2 valid
+        # timed laps (_regression_slope's own guard), matching the previous
+        # always-None behaviour for those.
         valid = stint_laps[stint_laps["IsAccurate"].fillna(False).astype(bool)].copy()
         valid = valid.dropna(subset=["LapNumber"])
         valid["lap_time_seconds"] = valid["LapTime"].map(lap_time_to_seconds)
@@ -249,6 +256,7 @@ async def _upsert_tire_stints(
         avg_deg_per_lap = _regression_slope(
             [int(n) for n in valid["LapNumber"]],
             [float(t) for t in valid["lap_time_seconds"]],
+            laps_in_session,
         )
 
         rows.append(

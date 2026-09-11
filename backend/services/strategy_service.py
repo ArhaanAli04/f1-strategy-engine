@@ -177,17 +177,24 @@ def _local_model_path(filename: str) -> Path:
 
 
 def _download_from_s3(filename: str) -> Path:
-    """Download a model file from S3, unless already cached locally.
+    """Download a model file from S3, always fresh for this process.
+
+    See prediction_worker.py's identical helper for the full rationale — the old
+    skip-if-already-cached-on-disk behavior silently served stale models forever
+    across process restarts (confirmed 2026-09-11, docs/tire-deg-model-quality-
+    and-rival-pit-behavior.md's CP3: both the host machine's and the running
+    backend container's cache directories held weeks-old .pkl files, so
+    "docker compose restart" never actually picked up a newly-promoted model).
+    Still only one fetch per filename per process — _load_models' own
+    module-level cache dict is what makes this "once per process," not this
+    function's disk behavior.
 
     Args:
         filename: Model file name, as listed in the ML Model Registry.
     Returns:
-        Local filesystem path to the (now-)cached file.
+        Local filesystem path to the freshly-downloaded file.
     """
     path = _local_model_path(filename)
-    if path.exists():
-        return path
-
     settings = get_aws_settings()
     client = boto3.client(
         "s3",
@@ -206,11 +213,12 @@ def _local_metrics_path(filename: str) -> Path:
 
 
 def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
-    """Download a tire_deg model's own sidecar metrics.json from S3, unless cached locally.
+    """Download a tire_deg model's own sidecar metrics.json from S3, always fresh for this process.
 
-    Same local-disk-cache-then-fetch lifecycle as _download_from_s3 (never re-fetches
-    once cached, so — like every other model in this process — a worker restart is
-    what picks up a newly-promoted model's fresh sidecar, not a background refresh).
+    Same always-fresh-per-process contract as _download_from_s3 (see that function's
+    docstring for why the old skip-if-cached-on-disk behavior was a real staleness
+    bug) — still only one fetch per filename per process, via _load_models' own
+    once-per-process guard.
 
     Args:
         filename: Model file name, e.g. "tire_deg_medium.pkl" — fetches its
@@ -222,9 +230,6 @@ def _download_metrics_from_s3(filename: str) -> dict[str, Any] | None:
         "no recoverable encoding map," not as an error.
     """
     path = _local_metrics_path(filename)
-    if path.exists():
-        return dict(json.loads(path.read_text()))
-
     settings = get_aws_settings()
     client = boto3.client(
         "s3",
@@ -632,7 +637,7 @@ def _project_stint_delta(
         start_lap: First lap number of this stint segment.
         n_laps: Number of laps to project.
         start_tyre_age: Tyre age at start_lap.
-        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        total_laps: Estimated race distance, for the fuel_load_penalty feature.
     Returns:
         Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0 OR the
         shared helper couldn't project (see its own docstring for why).
@@ -719,7 +724,7 @@ def _stint2_batch_deltas(
         pit_laps: 1D array of candidate pit lap numbers.
         laps_remaining: 1D array, same length as pit_laps — total_laps - pit_lap
             for each candidate (stint 2's length on this compound).
-        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        total_laps: Estimated race distance, for the fuel_load_penalty feature.
     Returns:
         1D array, same length as pit_laps: this compound's projected stint-2
         delta for each candidate pit_lap. All zero if pit_laps is empty or
@@ -735,16 +740,13 @@ def _stint2_batch_deltas(
     tyre_age_grid = np.broadcast_to(offsets[None, :], (n, max_remaining))
     valid = offsets[None, :] < laps_remaining[:, None]
 
-    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_grid / max(total_laps, 1))
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
-    )
+    fuel_load_penalty = tire_deg_model.fuel_load_penalty_seconds(lap_grid, float(total_laps))
     flat_features = np.column_stack(
         [
             lap_grid.ravel(),
             np.full(n * max_remaining, float(compound_encoded)),
             tyre_age_grid.ravel(),
-            fuel_adjusted_time.ravel(),
+            fuel_load_penalty.ravel(),
             np.full(n * max_remaining, float(circuit_code)),
             np.full(n * max_remaining, float(driver_code)),
         ]
@@ -893,18 +895,15 @@ def compute_pit_recommendation(
     # pit_laps[i], with no separate indexing needed to line the two up.
     laps_stint1 = pit_laps.astype(np.float64)
     tyre_age_stint1 = state["tyre_age_laps"] + np.arange(1, n_candidates + 1, dtype=np.float64)
-    fuel_at_lap1 = tire_deg_model.ASSUMED_START_FUEL_KG * (
-        1 - laps_stint1 / max(state["total_laps"], 1)
-    )
-    fuel_adjusted_time1 = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap1
+    fuel_load_penalty1 = tire_deg_model.fuel_load_penalty_seconds(
+        laps_stint1, float(state["total_laps"])
     )
     features1 = np.column_stack(
         [
             laps_stint1,
             np.full(n_candidates, float(current_compound_encoded)),
             tyre_age_stint1,
-            fuel_adjusted_time1,
+            fuel_load_penalty1,
             np.full(n_candidates, float(circuit_code)),
             np.full(n_candidates, float(driver_code)),
         ]
@@ -1217,7 +1216,7 @@ def tire_deg_recommendation_contributions(
         maps_cache: Output of _load_encoding_maps().
         driver_id: Driver this recommendation is for.
         circuit_name: Circuit display name, for resolve_circuit_code.
-        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        total_laps: Estimated race distance, for the fuel_load_penalty feature.
         pit_lap: The #1 candidate's recommended pit lap.
         recommended_compound: The #1 candidate's recommended_compound.
     Returns:
@@ -1235,9 +1234,8 @@ def tire_deg_recommendation_contributions(
     driver_code = tire_deg_model.resolve_driver_code(maps, str(driver_id))
     circuit_code = tire_deg_model.resolve_circuit_code(maps, circuit_name)
     stint2_first_lap = pit_lap + 1
-    fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - stint2_first_lap / max(total_laps, 1))
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    fuel_load_penalty = float(
+        tire_deg_model.fuel_load_penalty_seconds(stint2_first_lap, float(total_laps))
     )
     features = np.array(
         [
@@ -1245,7 +1243,7 @@ def tire_deg_recommendation_contributions(
                 stint2_first_lap,
                 _COMPOUND_ENCODING.get(recommended_compound, _COMPOUND_ENCODING["MEDIUM"]),
                 0,  # fresh tyre — first lap of the recommended stint
-                fuel_adjusted_time,
+                fuel_load_penalty,
                 circuit_code,
                 driver_code,
             ]
@@ -1308,8 +1306,8 @@ def pit_predictor_current_contributions(
     lap_number = state["lap_number"]
     total_laps = state["total_laps"]
     fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (1 - lap_number / max(total_laps, 1))
-    fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-        tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
+    fuel_load_penalty = float(
+        tire_deg_model.fuel_load_penalty_seconds(lap_number, float(max(total_laps, 1)))
     )
     predicted_life_remaining = float(
         tire_deg_model.predict_life_remaining_batch(
@@ -1317,7 +1315,7 @@ def pit_predictor_current_contributions(
             np.array([lap_number]),
             np.array([_COMPOUND_ENCODING.get(state["compound"], _COMPOUND_ENCODING["MEDIUM"])]),
             np.array([state["tyre_age_laps"]]),
-            np.array([fuel_adjusted_time]),
+            np.array([fuel_load_penalty]),
             np.array([circuit_code]),
             np.array([driver_code]),
         )[0]

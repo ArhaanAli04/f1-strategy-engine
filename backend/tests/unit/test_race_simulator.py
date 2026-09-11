@@ -134,7 +134,7 @@ def _tire_deg_predictions_inputs(
         "driver_id_encoded": np.array(
             [d.driver_id_encoded for d in race_state.drivers], dtype=np.int64
         ),
-        "fuel_adjusted_time": 0.0,
+        "fuel_load_penalty": 0.0,
     }
 
 
@@ -226,7 +226,7 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
         [d.compound_encoded for d in race_state.drivers], dtype=np.int64
     )
     lap_number = race_state.current_lap + 1
-    fuel_adjusted_time = -1.5
+    fuel_load_penalty = 1.5
     compound_groups = {COMPOUND: np.arange(n_drivers)}
 
     predicted_delta, predicted_life_remaining = _tire_deg_predictions(
@@ -237,7 +237,7 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
         lap_number=lap_number,
         tyre_age=tyre_age,
         driver_id_encoded=driver_id_encoded,
-        fuel_adjusted_time=fuel_adjusted_time,
+        fuel_load_penalty=fuel_load_penalty,
     )
 
     # Ground truth: the pre-memoization approach — build the full
@@ -251,7 +251,7 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
             np.full(tyre_age_flat.shape[0], lap_number, dtype=np.float64),
             compound_encoded_flat.astype(np.float64),
             tyre_age_flat.astype(np.float64),
-            np.full(tyre_age_flat.shape[0], fuel_adjusted_time),
+            np.full(tyre_age_flat.shape[0], fuel_load_penalty),
             np.full(tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.float64),
             driver_id_encoded_flat.astype(np.float64),
         ]
@@ -262,7 +262,7 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
         np.full(tyre_age_flat.shape[0], lap_number, dtype=np.int64),
         compound_encoded_flat,
         tyre_age_flat,
-        np.full(tyre_age_flat.shape[0], fuel_adjusted_time),
+        np.full(tyre_age_flat.shape[0], fuel_load_penalty),
         np.full(tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.int64),
         driver_id_encoded_flat,
     ).reshape(tyre_age.shape)
@@ -289,6 +289,7 @@ def test_advance_lap_adds_baseline_on_a_racing_lap() -> None:
     tyre_age = np.array([[5, 5]], dtype=np.int64)
     predicted_delta = np.array([[0.0, 0.0]])
     baseline_lap_time = np.array([50.0, 80.0])
+    fuel_trend_seconds = np.array([0.0, 0.0])
     pit_flags = np.array([[False, False]])
     sc_active = np.array([False])
 
@@ -297,6 +298,7 @@ def test_advance_lap_adds_baseline_on_a_racing_lap() -> None:
         tyre_age,
         predicted_delta,
         baseline_lap_time,
+        fuel_trend_seconds,
         0.0,  # noise_std
         pit_flags,
         22.0,  # pit_stop_seconds
@@ -312,15 +314,53 @@ def test_advance_lap_adds_baseline_on_a_racing_lap() -> None:
 
 @pytest.mark.unit
 @pytest.mark.slow
+def test_advance_lap_applies_fuel_trend_per_driver_on_a_racing_lap() -> None:
+    """predicted_delta is fuel-corrected, so the fuel trend is added separately.
+
+    Covers the 2026-09-09 target-definition change (see race_simulator's module
+    docstring): lap_time_delta no longer carries any fuel effect of its own, so
+    a driver's simulated lap time must pick it up from fuel_trend_seconds — and
+    per driver, since a driver with no real baseline gets none.
+    """
+    cumulative_time = np.array([[1000.0, 2000.0]])
+    tyre_age = np.array([[5, 5]], dtype=np.int64)
+    predicted_delta = np.array([[0.0, 0.0]])
+    baseline_lap_time = np.array([50.0, 80.0])
+    # driver 0 is lighter than its baseline reference; driver 1 has no baseline
+    # correction applied at all (simulate_race zeroes it for baseline == 0)
+    fuel_trend_seconds = np.array([-0.75, 0.0])
+    pit_flags = np.array([[False, False]])
+    sc_active = np.array([False])
+
+    _advance_lap(
+        cumulative_time,
+        tyre_age,
+        predicted_delta,
+        baseline_lap_time,
+        fuel_trend_seconds,
+        0.0,
+        pit_flags,
+        22.0,
+        sc_active,
+        999.0,
+    )
+
+    assert cumulative_time[0, 0] == pytest.approx(1000.0 + 50.0 - 0.75)
+    assert cumulative_time[0, 1] == pytest.approx(2000.0 + 80.0)
+
+
+@pytest.mark.unit
+@pytest.mark.slow
 def test_advance_lap_ignores_baseline_on_an_sc_lap() -> None:
     """sc_lap_time_seconds is already a real absolute lap time in its own right
-    (see simulate_race's derivation) — per-driver baseline_lap_time_seconds must
-    NOT also be added on top during the SC-bunching branch.
+    (see simulate_race's derivation) — neither per-driver baseline_lap_time_seconds
+    nor fuel_trend_seconds may be added on top during the SC-bunching branch.
     """
     cumulative_time = np.array([[1000.0, 1200.0]])
     tyre_age = np.array([[5, 5]], dtype=np.int64)
     predicted_delta = np.array([[0.0, 0.0]])
     baseline_lap_time = np.array([50.0, 999999.0])  # wildly different — must not matter
+    fuel_trend_seconds = np.array([-5.0, 5.0])  # likewise must not matter on an SC lap
     pit_flags = np.array([[False, False]])
     sc_active = np.array([True])
 
@@ -329,6 +369,7 @@ def test_advance_lap_ignores_baseline_on_an_sc_lap() -> None:
         tyre_age,
         predicted_delta,
         baseline_lap_time,
+        fuel_trend_seconds,
         0.0,
         pit_flags,
         22.0,

@@ -188,11 +188,19 @@ def _promote_and_record(
     metrics: dict[str, Any],
     summary: dict[str, dict[str, object]],
     feature_names: list[str] | None = None,
+    training_schema_version: int | None = None,
 ) -> None:
     previous = download_metrics(client, bucket, "production", filename)
     previous_mae = float(previous["holdout_mae"]) if previous is not None else None
     outcome = serialize_evaluate_and_upload(
-        client, bucket, version_tag, filename, model_obj, metrics, feature_names=feature_names
+        client,
+        bucket,
+        version_tag,
+        filename,
+        model_obj,
+        metrics,
+        feature_names=feature_names,
+        training_schema_version=training_schema_version,
     )
     summary[filename] = {
         "holdout_mae": float(metrics["holdout_mae"]),
@@ -293,12 +301,18 @@ def retrain() -> dict[str, dict[str, object]]:
             },
             summary,
             feature_names=tire_deg_model.FEATURE_COLUMNS,
+            training_schema_version=tire_deg_model.TRAINING_SCHEMA_VERSION,
         )
         tire_deg_results[compound] = result
 
     # --- Safety car model ---
-    sc_train = safety_car_model.build_lap_flags(train_laps)
-    sc_holdout = safety_car_model.build_lap_flags(holdout_laps)
+    # See train_models.train_all's identical comment / safety_car_model.
+    # TRAINING_SCHEMA_VERSION's docstring: must NOT use is_valid-filtered laps —
+    # pit_train_laps/pit_holdout_laps (already unfiltered, built above) are the
+    # correct source here, mirroring train_all's structure per this file's own
+    # docstring convention.
+    sc_train = safety_car_model.build_lap_flags(pit_train_laps)
+    sc_holdout = safety_car_model.build_lap_flags(pit_holdout_laps)
     sc_model = safety_car_model.train_safety_car_model(sc_train)
     sc_holdout_mae = safety_car_model.evaluate_holdout(sc_model, sc_holdout)
     _promote_and_record(
@@ -309,6 +323,7 @@ def retrain() -> dict[str, dict[str, object]]:
         sc_model,
         {"holdout_mae": sc_holdout_mae, "n_circuits": len(sc_model.circuit_rates)},
         summary,
+        training_schema_version=safety_car_model.TRAINING_SCHEMA_VERSION,
     )
 
     # --- Pit predictor (depends on tire_deg_results + sc_model) ---
@@ -343,6 +358,7 @@ def retrain() -> dict[str, dict[str, object]]:
         },
         summary,
         feature_names=pit_predictor.FEATURE_COLUMNS,
+        training_schema_version=pit_predictor.TRAINING_SCHEMA_VERSION,
     )
 
     logger.info("Incremental retraining complete. version_tag=%s", version_tag)

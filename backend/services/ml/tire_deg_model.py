@@ -1,10 +1,45 @@
 """XGBoost tire degradation regression — one model per compound.
 
-Predicts, for a given lap, the lap time delta from that driver's session
-median lap time as a function of tyre age, fuel-adjusted pace, and
-circuit/driver context. See FEATURE_COLUMNS below for why track/air
-temperature are computed (weather infra) but not currently selected into
-the feature set.
+Predicts, for a given lap, the FUEL-CORRECTED lap time delta from that
+driver's session median as a function of tyre age and circuit/driver
+context. See FEATURE_COLUMNS below for why track/air temperature are
+computed (weather infra) but not currently selected into the feature set.
+
+Fuel correction and target definition, both corrected 2026-09-09 — see
+docs/tire-deg-model-quality-and-rival-pit-behavior.md. Two defects, measured
+against the real 2018-2024 corpus, made every deployed tire_deg model predict
+that a tyre gets FASTER as it ages:
+
+1. INVERTED FUEL-CORRECTION SIGN. The correction subtracted the fuel already
+   BURNED (`0.03 * (110 - fuel_at_lap)`), which grows as the race runs, rather
+   than the penalty the car is currently CARRYING (`0.03 * fuel_at_lap`),
+   which shrinks. A heavy car is slow, so the deployed form made late (light,
+   fast) laps look faster still — roughly DOUBLING the fuel artefact instead
+   of removing it. Measured within-stint slope of corrected lap time vs tyre
+   age over ages 3-25 (physical F1 degradation is +0.02..+0.15 s/lap):
+       raw lap time        SOFT -0.0130  MEDIUM -0.0133  HARD -0.0103
+       old (fuel burned)   SOFT -0.0490  MEDIUM -0.0536  HARD -0.0561
+       new (fuel on board) SOFT +0.0223  MEDIUM +0.0261  HARD +0.0351
+   The models were not mis-trained; they faithfully learned a target that said
+   tyres improve with age.
+
+2. TARGET LEAKAGE IN THE `fuel_adjusted_time` FEATURE. It was defined as
+   `lap_time_seconds - fuel_penalty` — i.e. it contained the very quantity the
+   target is derived from. Within a (session, driver) group it correlated with
+   the target at +0.91..+0.96 median, while tyre_age_laps correlated at only
+   -0.07..-0.10 (identity confirmed to 1.42e-14). A forward simulation has no
+   lap_time_seconds, so every inference call site substituted the fuel term
+   alone — ~-1.5s against a training mean of ~86-99s, i.e. z = -6.9..-15.1
+   outside the training distribution. Scored the way production actually calls
+   them, the deployed models were WORSE than predicting a constant on every
+   compound (SOFT 0.885 vs 0.723 naive, MEDIUM 0.932 vs 0.566, HARD 0.904 vs
+   0.586).
+
+Both are fixed by fuel_load_penalty_seconds() below, which is the SINGLE
+definition used by training and by every inference call site. It is a function
+of lap_number/total_laps only — it contains no lap time, so it cannot leak the
+target and it is identical in both regimes by construction, which is what
+stops these two paths ever drifting apart again.
 """
 
 from __future__ import annotations
@@ -28,11 +63,39 @@ FEATURE_COLUMNS = [
     "lap_number",
     "compound_encoded",
     "tyre_age_laps",
-    "fuel_adjusted_time",
+    # Replaced the leaky `fuel_adjusted_time` on 2026-09-09 (see module
+    # docstring). Deliberately renamed rather than redefined in place: the
+    # quantity is completely different (seconds of lap time currently
+    # attributable to fuel load, vs. a lap time minus a penalty), so a model
+    # trained on one is not interchangeable with a model trained on the other,
+    # and the sidecar's own feature_names is what makes that visible to the
+    # promotion guard.
+    "fuel_load_penalty",
     "circuit_id_encoded",
     "driver_id_encoded",
 ]
 TARGET_COLUMN = "lap_time_delta"
+
+# Bump whenever add_engineered_features' TARGET definition or any FEATURE_COLUMNS
+# entry's real-world MEANING changes in a way that makes holdout_mae non-comparable
+# across versions — train_models.serialize_evaluate_and_upload's promotion guard
+# (CP2, docs/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a
+# candidate over an incumbent recorded at a different version, regardless of MAE,
+# the same way it already force-promotes over a feature-COUNT mismatch (item 9).
+# That count-only check cannot catch this class of change by itself: CP1's fix
+# renamed fuel_adjusted_time -> fuel_load_penalty (caught separately by the
+# feature_names comparison added alongside this), but a future fix could just as
+# easily correct a formula while keeping the same name and feature count — this
+# version is the only thing that would still catch that case.
+#
+# 1 (implicit, never recorded under this name): the original schema — leaky
+#   fuel_adjusted_time feature, target built from raw (not fuel-corrected) lap
+#   times. Every currently-promoted tire_deg model was trained under this schema
+#   and its sidecar predates this constant, so the guard correctly treats "no
+#   training_schema_version in the incumbent's sidecar" as a mismatch on its own.
+# 2 (2026-09-09): fuel_load_penalty replaces fuel_adjusted_time; the target is a
+#   deviation from the fuel-CORRECTED session median. See module docstring.
+TRAINING_SCHEMA_VERSION = 2
 
 # Model-registry filename -> fallback filename to substitute at load time if
 # the primary model's fitted feature count doesn't match len(FEATURE_COLUMNS)
@@ -337,13 +400,53 @@ DEFAULT_AIR_TEMP_C = 25.0
 
 # F1 cars start a race with ~110kg of fuel and burn roughly linearly to ~0kg
 # by the finish; FastF1 does not publish real fuel load, so this is an
-# estimate used only to compute the fuel_adjusted_time feature.
+# estimate used only to compute the fuel_load_penalty feature (see
+# fuel_load_penalty_seconds).
 ASSUMED_START_FUEL_KG = 110.0
 FUEL_TIME_PENALTY_PER_KG = 0.03
 
 CV_FOLDS = 5
 DEGRADATION_THRESHOLD_SECONDS = 1.5
 MAX_LOOKAHEAD_LAPS = 40
+
+
+def fuel_load_penalty_seconds(
+    lap_number: npt.NDArray[np.float64] | pd.Series | float,
+    total_laps: npt.NDArray[np.float64] | pd.Series | float,
+) -> Any:
+    """Seconds of lap time attributable to the fuel still on board at a given lap.
+
+    THE single definition of this project's fuel model, used by training
+    (add_engineered_features, for both the feature and the target's fuel
+    correction) and by every inference call site (race_simulator,
+    prediction_worker's live path, strategy_service's four projection paths,
+    and project_stint_delta below). Keeping one implementation is the point:
+    the 2026-09-09 leakage defect (see module docstring) existed precisely
+    because training and inference each built their own version of this
+    quantity and the two silently diverged.
+
+    A car burns ~ASSUMED_START_FUEL_KG of fuel roughly linearly across a race
+    and carries FUEL_TIME_PENALTY_PER_KG seconds of lap time per kg. So the
+    penalty is largest on lap 1 (full tank) and reaches ~0 at the flag. It
+    depends only on race position, never on a lap time — which is what makes
+    it safe to use as a model feature (no target leakage) and computable in a
+    forward simulation that has no lap times yet.
+
+    Args:
+        lap_number: Lap number(s). Scalar, Series, or array.
+        total_laps: Race distance in laps, for the same rows. Values <= 0 are
+            clamped to 1 so a session with no recorded laps can't divide by
+            zero; the result is then simply the full-tank penalty.
+    Returns:
+        Non-negative seconds, same shape/type as the inputs broadcast together.
+        Subtract this from a raw lap time to remove the fuel effect; use it
+        directly as the fuel_load_penalty feature.
+    """
+    safe_total = np.maximum(total_laps, 1)
+    fuel_remaining_kg = ASSUMED_START_FUEL_KG * (
+        1 - np.clip(np.divide(lap_number, safe_total), 0.0, 1.0)
+    )
+    return FUEL_TIME_PENALTY_PER_KG * fuel_remaining_kg
 
 
 @dataclass(frozen=True)
@@ -383,28 +486,58 @@ def _impute_weather(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_engineered_features(laps: pd.DataFrame) -> pd.DataFrame:
-    """Add fuel_adjusted_time, lap_time_delta, and imputed weather columns to a raw laps frame.
+    """Add fuel_load_penalty, fuel_corrected_time, lap_time_delta, and imputed weather.
+
+    lap_time_delta (the training target) is a deviation from the driver's own
+    session median measured on FUEL-CORRECTED lap times, so what remains is
+    pace variation the fuel model doesn't already explain — principally tyre
+    wear, which is what these models exist to predict. Correcting both sides
+    with the same term means the median subtraction can't reintroduce the fuel
+    trend it is meant to remove.
+
+    Before 2026-09-09 the target was built from raw lap times and the fuel term
+    was applied with the wrong sign, so the fuel gain across a race dominated
+    the target and every model learned that tyres get faster with age. See the
+    module docstring for the measured before/after.
 
     Args:
         laps: One row per lap; must include session_id, driver_id, lap_number,
             lap_time_seconds, laps_in_session (max lap_number in that session),
             compound, circuit_id_encoded, track_temp, air_temp.
     Returns:
-        Copy of laps with fuel_adjusted_time and lap_time_delta added, and
-        track_temp/air_temp NaN-imputed (see _impute_weather).
+        Copy of laps with fuel_load_penalty, fuel_corrected_time and
+        lap_time_delta added, and track_temp/air_temp NaN-imputed (see
+        _impute_weather).
     """
     df = laps.copy()
-    fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - df["lap_number"] / df["laps_in_session"])
-    df["fuel_adjusted_time"] = df["lap_time_seconds"] - FUEL_TIME_PENALTY_PER_KG * (
-        ASSUMED_START_FUEL_KG - fuel_at_lap
+    df["fuel_load_penalty"] = fuel_load_penalty_seconds(df["lap_number"], df["laps_in_session"])
+    df["fuel_corrected_time"] = df["lap_time_seconds"] - df["fuel_load_penalty"]
+    session_median = df.groupby(["session_id", "driver_id"])["fuel_corrected_time"].transform(
+        "median"
     )
-    session_median = df.groupby(["session_id", "driver_id"])["lap_time_seconds"].transform("median")
-    df["lap_time_delta"] = df["lap_time_seconds"] - session_median
+    df["lap_time_delta"] = df["fuel_corrected_time"] - session_median
     df = _impute_weather(df)
     return df
 
 
 def _build_pipeline() -> Pipeline:
+    """StandardScaler -> XGBRegressor.
+
+    2026-09-11 (docs/tire-deg-model-quality-and-rival-pit-behavior.md CP5):
+    a monotone_constraints=(0, 0, 1, 0, 0, 0) variant (non-decreasing
+    tyre_age_laps effect on the fuel-corrected lap_time_delta target) was
+    tried here and measured against real historical stint data — it did NOT
+    improve real-world pit-timing alignment (HARD's never-crossed-within-
+    horizon rate got WORSE, 44%->52%, and SOFT's timing accuracy notably
+    worsened, -3.60->-6.20 laps early), despite fixing the underlying curve
+    shape's physical sanity. Reverted rather than kept as an unproven
+    change. Full measurement and the working hypothesis for why (pure
+    lap-time degradation may be structurally unable to predict real pit
+    timing, which is also driven by strategic factors — fuel-corrected
+    stint planning, undercut threats, safety car timing — a monotonic
+    curve can't capture) are in that document's own write-up. Do not
+    re-add this without re-measuring against real data first.
+    """
     return Pipeline(
         [
             ("scaler", StandardScaler()),
@@ -479,21 +612,24 @@ def predict_life_remaining_batch(
     lap_number: npt.NDArray[np.int64],
     compound_encoded: npt.NDArray[np.int64],
     tyre_age_laps: npt.NDArray[np.int64],
-    fuel_adjusted_time: npt.NDArray[np.float64],
+    fuel_load_penalty: npt.NDArray[np.float64],
     circuit_id_encoded: npt.NDArray[np.int64],
     driver_id_encoded: npt.NDArray[np.int64],
 ) -> npt.NDArray[np.int64]:
     """Estimate laps remaining before predicted degradation crosses the threshold.
 
     For each input lap, simulates tyre_age_laps + 0..MAX_LOOKAHEAD_LAPS-1 (lap_number
-    advancing in step) in a single batched predict() call, holding fuel_adjusted_time
+    advancing in step) in a single batched predict() call, holding fuel_load_penalty
     fixed at its current-lap value — pace beyond the next few laps is dominated by
-    tyre wear, not the small residual fuel effect.
+    tyre wear, not the residual fuel effect over the lookahead window.
 
     Args:
         pipeline: Fitted tire degradation pipeline for the relevant compound.
-        lap_number, compound_encoded, tyre_age_laps, fuel_adjusted_time,
+        lap_number, compound_encoded, tyre_age_laps, fuel_load_penalty,
             circuit_id_encoded, driver_id_encoded: 1D arrays, one entry per lap.
+            fuel_load_penalty must come from fuel_load_penalty_seconds — see
+            this module's docstring on why building it any other way is what
+            broke these predictions before 2026-09-09.
     Returns:
         1D int array, same length as inputs: estimated laps remaining until predicted
         lap_time_delta >= DEGRADATION_THRESHOLD_SECONDS, capped at MAX_LOOKAHEAD_LAPS.
@@ -509,7 +645,7 @@ def predict_life_remaining_batch(
             future_lap.ravel(),
             np.repeat(compound_encoded, MAX_LOOKAHEAD_LAPS),
             future_age.ravel(),
-            np.repeat(fuel_adjusted_time, MAX_LOOKAHEAD_LAPS),
+            np.repeat(fuel_load_penalty, MAX_LOOKAHEAD_LAPS),
             np.repeat(circuit_id_encoded, MAX_LOOKAHEAD_LAPS),
             np.repeat(driver_id_encoded, MAX_LOOKAHEAD_LAPS),
         ],
@@ -545,10 +681,10 @@ def project_stint_delta(
     (see resolve_driver_code/resolve_circuit_code below) — this function does
     no encoding itself, same contract as predict_life_remaining_batch above.
 
-    fuel_adjusted_time is derived per lap from the fuel-burn trend alone (the
-    training-time definition's lap_time_seconds term is unavailable in a
-    forward projection, same approximation race_simulator's module docstring
-    documents for its own identical feature construction).
+    The fuel_load_penalty feature is built by fuel_load_penalty_seconds, the
+    same function training uses — since 2026-09-09 this is an exact match
+    rather than the out-of-distribution approximation the old leaky
+    fuel_adjusted_time feature forced here (see module docstring).
 
     Args:
         pipeline: Fitted tire_deg pipeline for the compound being projected,
@@ -558,7 +694,7 @@ def project_stint_delta(
         start_lap: First lap number of this stint segment.
         n_laps: Number of laps to project.
         start_tyre_age: Tyre age at start_lap.
-        total_laps: Estimated race distance, for the fuel_adjusted_time feature.
+        total_laps: Estimated race distance, for the fuel_load_penalty feature.
     Returns:
         Sum of predicted per-lap deltas in seconds; 0.0 if n_laps <= 0 (no laps
         to project — distinct from "couldn't project", which is None). None if
@@ -582,14 +718,13 @@ def project_stint_delta(
 
     laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
     tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
-    fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
-    fuel_adjusted_time = -FUEL_TIME_PENALTY_PER_KG * (ASSUMED_START_FUEL_KG - fuel_at_lap)
+    fuel_load_penalty = fuel_load_penalty_seconds(laps, float(total_laps))
     features = np.column_stack(
         [
             laps,
             np.full(n_laps, float(compound_encoded)),
             tyre_age,
-            fuel_adjusted_time,
+            fuel_load_penalty,
             np.full(n_laps, float(circuit_code)),
             np.full(n_laps, float(driver_code)),
         ]

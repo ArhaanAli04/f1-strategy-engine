@@ -22,28 +22,32 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   caller-supplied inputs (RaceSimulationInput), the same contract
   tire_deg_model.predict_life_remaining_batch already uses. This module does not
   reproduce train_models.py's pd.Categorical encoding itself.
-- tire_deg_model's `fuel_adjusted_time` feature is defined at training time as
-  `lap_time_seconds - fuel_penalty` — i.e. it partially encodes the actual lap time,
-  which a forward simulation does not have (that's what we're simulating). We
-  approximate it with just the fuel-burn trend component (the penalty term with the
-  unknown lap_time_seconds term dropped), which preserves the feature's monotonic
-  trend across the race at the cost of not matching the training distribution's
-  absolute scale. Acceptable since compound/tyre_age dominate the model's splits.
+- tire_deg_model's `fuel_load_penalty` feature is built here by
+  tire_deg_model.fuel_load_penalty_seconds — the exact function training uses.
+  Before 2026-09-09 the feature was `fuel_adjusted_time`, which embedded the
+  actual lap time (the thing a forward simulation is trying to predict), so
+  this module substituted the fuel term alone and fed the model values ~7-15
+  standard deviations outside its training distribution. This module's own
+  docstring used to call that "acceptable since compound/tyre_age dominate the
+  model's splits" — measured feature importances showed the opposite
+  (fuel_adjusted_time 0.20-0.30 vs tyre_age_laps 0.07-0.10 on the dry
+  compounds), and the resulting predictions were worse than a constant. See
+  docs/tire-deg-model-quality-and-rival-pit-behavior.md.
 - cumulative_race_time_seconds accumulates real elapsed race time (input, carrying
   today's actual gaps) plus, for each simulated lap, that driver's own
   baseline_lap_time_seconds (their real median lap time through current_lap —
-  see DriverRaceState) plus the tire_deg model's predicted lap_time_delta plus
-  noise. Since lap_time_delta is trained as a deviation from the driver's own
-  session median (see tire_deg_model.add_engineered_features), baseline +
-  delta reconstructs a genuine absolute lap time by construction — this makes
-  cumulative_race_time_seconds (and therefore predicted_finish_time in the API
-  response) a real elapsed-time estimate, not just the starting gap held
-  static while small deltas accumulate on top. A caller that omits
-  baseline_lap_time_seconds (defaults to 0.0) gets the old relative-delta-only
-  behaviour for that driver. A real per-driver baseline also means two
-  drivers with genuinely different race pace now diverge further apart over
-  the simulated remainder, instead of holding today's gap fixed for the rest
-  of the race — a real modelling improvement, not just a units fix.
+  see DriverRaceState), the tire_deg model's predicted lap_time_delta, a
+  fuel-trend term (below), and noise. lap_time_delta is now a deviation from
+  the driver's own FUEL-CORRECTED session median (tire_deg_model.
+  add_engineered_features), so it deliberately excludes the fuel effect —
+  baseline + delta alone would hold the car at its current weight for the rest
+  of the race. simulate_race therefore adds back the change in fuel load
+  between the lap being simulated and the (raw, uncorrected) baseline's own
+  reference point, so cumulative_race_time_seconds stays a real elapsed-time
+  estimate and predicted_finish_time keeps the accuracy validated on
+  2026-09-03. A caller that omits baseline_lap_time_seconds (defaults to 0.0)
+  gets the relative-delta-only behaviour for that driver, and no fuel term is
+  applied to it — there is no absolute lap time to correct.
 - After a pit stop, compound is assumed unchanged (no compound-choice model exists
   yet) and tyre age resets to 0.
 - A safety car lap "neutralises gaps" by collapsing every driver's cumulative time to
@@ -112,15 +116,22 @@ class DriverRaceState:
     driver_id_encoded: int
     cumulative_race_time_seconds: float = 0.0
     # This driver's own real median lap time (seconds) through current_lap —
-    # see prediction_worker._build_race_state, which computes it the same way
-    # tire_deg_model.add_engineered_features defines lap_time_delta's baseline
-    # (per-driver session median), just bounded to laps <= current_lap since a
-    # forward simulation can't see the session's full median. Added to every
-    # simulated lap's predicted delta so cumulative_race_time_seconds
-    # accumulates a real absolute time (see this module's docstring) instead
-    # of only the small delta-from-median. Default 0.0: a caller that omits
-    # this (e.g. an older/synthetic test fixture) gets the pre-existing
-    # relative-delta-only behaviour for that driver, unchanged.
+    # see prediction_worker._build_race_state, which takes a per-driver median
+    # bounded to laps <= current_lap, since a forward simulation can't see the
+    # session's full median. Added to every simulated lap's predicted delta so
+    # cumulative_race_time_seconds accumulates a real absolute time (see this
+    # module's docstring) instead of only the small delta-from-median.
+    #
+    # Deliberately a RAW median, NOT the fuel-corrected one
+    # tire_deg_model.add_engineered_features builds its target against: this is
+    # an absolute lap time to anchor elapsed race time to, so it should carry
+    # the real fuel penalty of the laps it was measured over. simulate_race
+    # accounts for the difference explicitly (see baseline_fuel_penalty there)
+    # rather than by silently redefining this field.
+    #
+    # Default 0.0: a caller that omits this (e.g. an older/synthetic test
+    # fixture) gets the pre-existing relative-delta-only behaviour for that
+    # driver, unchanged.
     baseline_lap_time_seconds: float = 0.0
 
 
@@ -192,6 +203,7 @@ def _advance_lap(
     tyre_age: npt.NDArray[np.int64],
     predicted_delta: npt.NDArray[np.float64],
     baseline_lap_time: npt.NDArray[np.float64],
+    fuel_trend_seconds: npt.NDArray[np.float64],
     noise_std: float,
     pit_flags: npt.NDArray[np.bool_],
     pit_stop_seconds: float,
@@ -216,6 +228,13 @@ def _advance_lap(
             absolute lap time, not just the delta. Not applied on an SC lap: the
             caller's sc_lap_time_seconds is already a real absolute lap time in
             its own right (see this function's caller).
+        fuel_trend_seconds: (n_drivers,) this lap's fuel-load correction for
+            each driver — how much lighter (negative) or heavier (positive) the
+            car is on this lap than at the reference point baseline_lap_time was
+            measured over. Needed because predicted_delta is fuel-corrected and
+            therefore carries no fuel trend of its own (see module docstring).
+            Zero for a driver with no real baseline, and not applied on an SC
+            lap, for the same reason baseline_lap_time isn't.
         noise_std: Standard deviation of the per-lap Gaussian noise term.
         pit_flags: (n_sims, n_drivers) whether this driver pits this lap.
         pit_stop_seconds: Fixed pit stop time loss.
@@ -241,7 +260,9 @@ def _advance_lap(
         else:
             for d in range(n_drivers):
                 noise = np.random.normal(0.0, noise_std)
-                cumulative_time[s, d] += baseline_lap_time[d] + predicted_delta[s, d] + noise
+                cumulative_time[s, d] += (
+                    baseline_lap_time[d] + predicted_delta[s, d] + fuel_trend_seconds[d] + noise
+                )
                 tyre_age[s, d] += 1
                 if pit_flags[s, d]:
                     cumulative_time[s, d] += pit_stop_seconds
@@ -261,7 +282,7 @@ def _tire_deg_predictions(
     lap_number: int,
     tyre_age: npt.NDArray[np.int64],
     driver_id_encoded: npt.NDArray[np.int64],
-    fuel_adjusted_time: float,
+    fuel_load_penalty: float,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Batch tire_deg predictions (delta + life remaining) for every (sim, driver) pair.
 
@@ -281,7 +302,8 @@ def _tire_deg_predictions(
         lap_number: Lap being predicted for.
         tyre_age: (n_sims, n_drivers) current tyre age.
         driver_id_encoded: (n_drivers,) per-driver encoded id.
-        fuel_adjusted_time: This lap's fuel_adjusted_time proxy (see module docstring).
+        fuel_load_penalty: This lap's fuel_load_penalty feature value, from
+            tire_deg_model.fuel_load_penalty_seconds (see module docstring).
     Returns:
         (predicted_delta, predicted_life_remaining), each (n_sims, n_drivers). Drivers
         on a compound with no fitted pipeline, a pipeline whose fitted feature count
@@ -345,7 +367,7 @@ def _tire_deg_predictions(
         n_unique = unique_rows.shape[0]
 
         lap_number_arr = np.full(n_unique, lap_number, dtype=np.int64)
-        fuel_adjusted_time_arr = np.full(n_unique, fuel_adjusted_time)
+        fuel_load_penalty_arr = np.full(n_unique, fuel_load_penalty)
         circuit_id_encoded_arr = np.full(n_unique, race_state.circuit_id_encoded, dtype=np.int64)
 
         features = np.column_stack(
@@ -353,7 +375,7 @@ def _tire_deg_predictions(
                 lap_number_arr.astype(np.float64),
                 unique_compound_encoded.astype(np.float64),
                 unique_tyre_age.astype(np.float64),
-                fuel_adjusted_time_arr,
+                fuel_load_penalty_arr,
                 circuit_id_encoded_arr.astype(np.float64),
                 unique_driver_id_encoded.astype(np.float64),
             ]
@@ -386,7 +408,7 @@ def _tire_deg_predictions(
                     lap_number_arr,
                     unique_compound_encoded,
                     unique_tyre_age,
-                    fuel_adjusted_time_arr,
+                    fuel_load_penalty_arr,
                     circuit_id_encoded_arr,
                     unique_driver_id_encoded,
                 )
@@ -552,6 +574,23 @@ def simulate_race(
         if nonzero_baselines.size > 0
         else SC_LAP_TIME_SECONDS
     )
+    # baseline_lap_time is a RAW (uncorrected) median over laps 1..current_lap,
+    # so it already embeds the average fuel penalty over that window — best
+    # approximated at its midpoint. Each simulated lap's fuel term below is
+    # measured relative to this reference, so a driver's simulated pace picks
+    # up the fuel gain from here to the flag rather than double-counting the
+    # portion the baseline already contains. An assumed midpoint is in the same
+    # spirit as this module's other documented approximations
+    # (ASSUMED_START_FUEL_KG, SC_LAP_TIME_MULTIPLIER).
+    baseline_fuel_penalty = float(
+        tire_deg_model.fuel_load_penalty_seconds(
+            max(race_state.current_lap, 1) / 2.0, float(race_state.total_laps)
+        )
+    )
+    # Zero for any driver with no real baseline: there is no absolute lap time
+    # to fuel-correct, so that driver keeps the documented relative-delta-only
+    # behaviour exactly as before.
+    has_baseline = baseline_lap_time > 0
 
     driver_index_by_id = {d.driver_id: i for i, d in enumerate(race_state.drivers)}
     # Mutable per-lap state — unlike everything else derived from race_state
@@ -576,12 +615,15 @@ def simulate_race(
             for compound in set(current_compounds)
         }
 
+        fuel_load_penalty = float(
+            tire_deg_model.fuel_load_penalty_seconds(lap_number, float(race_state.total_laps))
+        )
         fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
             1 - lap_number / race_state.total_laps
         )
-        fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-            tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
-        )
+        # How much lighter (negative) this lap is than the baseline's own
+        # reference point — see baseline_fuel_penalty above.
+        fuel_trend_seconds = np.where(has_baseline, fuel_load_penalty - baseline_fuel_penalty, 0.0)
 
         predicted_delta, predicted_life_remaining = _tire_deg_predictions(
             race_state,
@@ -591,7 +633,7 @@ def simulate_race(
             lap_number,
             tyre_age,
             driver_id_encoded,
-            fuel_adjusted_time,
+            fuel_load_penalty,
         )
 
         with f1_ml_inference_duration_seconds.labels(model="safety_car").time():
@@ -637,6 +679,7 @@ def simulate_race(
             tyre_age,
             predicted_delta,
             baseline_lap_time,
+            fuel_trend_seconds,
             LAP_TIME_NOISE_STD_SECONDS,
             pit_flags,
             PIT_STOP_SECONDS,

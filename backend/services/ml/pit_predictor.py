@@ -56,6 +56,25 @@ TARGET_COLUMN = "pit_within_k_laps"
 ALERT_THRESHOLD = 0.65
 CV_FOLDS = 5
 
+# Same versioning contract as tire_deg_model.TRAINING_SCHEMA_VERSION — bump when
+# label_pit_laps' TARGET definition changes in a way that makes holdout_mae
+# non-comparable across versions. Necessary here specifically because
+# FEATURE_COLUMNS itself never changes between the two labels below (both read
+# identical inputs), so the promotion guard's feature-count/feature-names checks
+# have nothing to catch — the label definition change lives entirely in
+# TARGET_COLUMN's values, which only an explicit version can flag.
+#
+# 1 (implicit, never recorded under this name): the original out-lap-only label
+#   (this module's docstring's "PRE-fix bug") — positive_rate ~2.8% on the real
+#   2018-2025 corpus. The currently-deployed production model is confirmed
+#   (docs/tire-deg-model-quality-and-rival-pit-behavior.md §2c) to still be this
+#   version, despite the 2026-09-04 code fix below — it was never promoted,
+#   because the promotion guard had no way to flag the two labels as
+#   non-comparable and a same-lap detector's holdout_mae looks artificially
+#   strong. This version constant is what closes that gap.
+# 2 (2026-09-04, PIT_LABEL_HORIZON_LAPS-window label): positive_rate ~8.7%.
+TRAINING_SCHEMA_VERSION = 2
+
 # How many laps of advance warning label_pit_laps trains the model to give —
 # the "K" in "pits within the next K laps". 3 laps: long enough to be a
 # genuinely earlier signal than the old same-lap-only label (which gave
