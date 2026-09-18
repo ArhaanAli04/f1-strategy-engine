@@ -202,10 +202,13 @@ def test_live_prediction_pipeline_populates_recommendation_fields(
         id=uuid.uuid4(), race_id=race.id, session_type="R", session_date=date(2025, 3, 8)
     )
     driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
-    # A second, further-along driver establishes a real race distance
-    # (total_laps is estimated as MAX(lap_number) across the session — see
-    # strategy_service.py's module docstring) so compute_pit_recommendation
-    # has a non-empty [current_lap+1, total_laps] candidate range.
+    # session_row above has no total_laps set (Session.total_laps, added for
+    # docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
+    # see strategy_service.py's module docstring), so total_laps falls back
+    # to MAX(lap_number) across the session, same as before that fix. A
+    # second, further-along driver establishes a real race distance under
+    # that fallback so compute_pit_recommendation has a non-empty
+    # [current_lap+1, total_laps] candidate range.
     other_driver = Driver(
         id=uuid.uuid4(), code="HAM", full_name="Lewis Hamilton", nationality="GBR"
     )

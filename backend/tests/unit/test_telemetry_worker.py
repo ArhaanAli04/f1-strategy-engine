@@ -171,3 +171,97 @@ async def test_persist_tire_stint_disposes_engine_on_success(
     await telemetry_worker._persist_tire_stint(_sample_stint())
 
     mock_engine.dispose.assert_awaited_once()
+
+
+# --- _persist_session_total_laps (Issue A, docs/live-race-ingestion-and-
+# strategy-gaps-monza-2026.md — the live LapCount write path) ---
+
+
+@pytest.mark.unit
+async def test_persist_session_total_laps_disposes_engine_even_when_persist_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same dispose-on-exception regression guard as the two sibling persist
+    functions above — same file, same proven fix pattern, applied to the
+    new write path rather than introducing the bug fresh."""
+    monkeypatch.setattr(telemetry_worker, "_get_session_factory", lambda: _FakeSession)
+
+    mock_engine = MagicMock()
+    mock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(telemetry_worker, "get_engine", lambda: mock_engine)
+
+    with pytest.raises(RuntimeError, match="simulated DB failure"):
+        await telemetry_worker._persist_session_total_laps(uuid.uuid4(), 53)
+
+    mock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_persist_session_total_laps_disposes_engine_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SucceedingSession(_FakeSession):
+        async def execute(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(telemetry_worker, "_get_session_factory", lambda: _SucceedingSession)
+
+    mock_engine = MagicMock()
+    mock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(telemetry_worker, "get_engine", lambda: mock_engine)
+
+    await telemetry_worker._persist_session_total_laps(uuid.uuid4(), 53)
+
+    mock_engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_persist_session_total_laps_issues_a_real_update_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirms the actual statement shape — an UPDATE targeting this one
+    session_id with total_laps set — not just that SOME execute() call
+    happens (the dispose tests above stub execute() to a no-op and can't
+    tell)."""
+    executed: list[object] = []
+
+    class _CapturingSession(_FakeSession):
+        async def execute(self, *args: object, **kwargs: object) -> None:
+            executed.append(args[0])
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(telemetry_worker, "_get_session_factory", lambda: _CapturingSession)
+    mock_engine = MagicMock()
+    mock_engine.dispose = AsyncMock()
+    monkeypatch.setattr(telemetry_worker, "get_engine", lambda: mock_engine)
+
+    session_id = uuid.uuid4()
+    await telemetry_worker._persist_session_total_laps(session_id, 53)
+
+    assert len(executed) == 1
+    compiled = executed[0].compile()  # type: ignore[attr-defined]
+    assert compiled.params == {"total_laps": 53, "id_1": session_id}
+
+
+@pytest.mark.unit
+def test_update_session_total_laps_task_validates_and_delegates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Celery task entrypoint: string session_id -> real UUID, delegated
+    to _persist_session_total_laps via asyncio.run."""
+    session_id = uuid.uuid4()
+    calls: list[tuple[uuid.UUID, int]] = []
+
+    async def _fake_persist(sid: uuid.UUID, total_laps: int) -> None:
+        calls.append((sid, total_laps))
+
+    monkeypatch.setattr(telemetry_worker, "_persist_session_total_laps", _fake_persist)
+
+    telemetry_worker.update_session_total_laps(str(session_id), 53)
+
+    assert calls == [(session_id, 53)]

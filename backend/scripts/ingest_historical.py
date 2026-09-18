@@ -311,6 +311,11 @@ async def ingest(season: int, round_number: int, session_type: str) -> None:
             session_type=session_type,
             session_date=fastf1_session.event["EventDate"].date(),
             scheduled_start=resolve_scheduled_start(fastf1_session.event, session_type),
+            # FastF1's own total_laps property — already loaded by
+            # load_session()'s load(laps=True, ...) call above. None for a
+            # non-race-like session (FP1-3/Q), matching Session.total_laps's
+            # documented always-NULL-there semantics.
+            total_laps=fastf1_session.total_laps,
         )
         await db.commit()
 

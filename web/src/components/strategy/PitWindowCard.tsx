@@ -16,12 +16,17 @@ interface PitWindowCardProps {
 // available, falling back to the single recommended lap otherwise (e.g. a
 // pre-Checkpoint-4 history row, or a lap where the recommendation
 // computation degraded gracefully — see usePitRecommendation's own
-// viewFromHistoryEntry).
+// viewFromHistoryEntry). A "~" prefix on the fallback-only case flags it as
+// an unconfirmed estimate, not a real bounded recommendation — see
+// PitRecommendationView.isFallbackEstimate's own docstring for why this
+// can't be more precise than a plain visual flag (no race-length context
+// exists client-side to sanity-check the number itself).
 function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLabel: string): string {
   if (view.windowStart !== null && view.windowEnd !== null) {
     return `${windowLabel}${view.windowStart}–${view.windowEnd}`
   }
-  return `${lapLabel}${view.pitLap}`
+  const prefix = view.isFallbackEstimate ? "~" : ""
+  return `${prefix}${lapLabel}${view.pitLap}`
 }
 
 function formatCompactCaption(view: PitRecommendationView | null): string {
@@ -94,9 +99,14 @@ export function PitWindowCard({ sessionId, driverId, compact, className }: PitWi
           )}
         </div>
         <p className="text-sm text-muted-foreground">
-          Recommended: Lap {view.pitLap}
+          {view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap {view.pitLap}
           {view.recommendedCompound && ` — ${view.recommendedCompound}`}
         </p>
+        {view.isFallbackEstimate && (
+          <p className="text-[10px] text-muted-foreground">
+            Unconfirmed estimate — not yet bounded by a real pit-window search.
+          </p>
+        )}
         {view.explanation && (
           <p className="text-sm text-muted-foreground">{view.explanation.narrative}</p>
         )}

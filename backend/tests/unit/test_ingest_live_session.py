@@ -314,6 +314,322 @@ def test_recompute_positions_excludes_retired_car() -> None:
     assert ingestor._car_live_gap_state["3"]["position"] == 2  # promoted, not stuck at 3
 
 
+# --- _is_plausible_lap (Issue D: docs/live-race-ingestion-and-strategy-
+# gaps-monza-2026.md) ---
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_accepts_a_normal_green_flag_lap() -> None:
+    assert ingest_live_session._is_plausible_lap(87.174, 28.453, 30.254, 28.467, {"1"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_accepts_a_green_to_yellow_transition() -> None:
+    """Both orderings F1's own accuracy check allows ('12' and '21') collapse
+    to the same set membership check here — order isn't tracked at all."""
+    assert ingest_live_session._is_plausible_lap(90.0, 30.0, 30.0, 30.0, {"1", "2"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_safety_car_status() -> None:
+    assert not ingest_live_session._is_plausible_lap(90.0, 30.0, 30.0, 30.0, {"4"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_red_flag_status() -> None:
+    assert not ingest_live_session._is_plausible_lap(90.0, 30.0, 30.0, 30.0, {"5"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_lap_immediately_after_a_safety_car_lap() -> None:
+    """FastF1's own check_3: the lap AFTER an SC/VSC/red-flag lap often has
+    its own timing anomalies, even if that lap's own status was clean."""
+    assert not ingest_live_session._is_plausible_lap(90.0, 30.0, 30.0, 30.0, {"1"}, {"4"})
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_missing_lap_time() -> None:
+    assert not ingest_live_session._is_plausible_lap(None, 30.0, 30.0, 30.0, {"1"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_missing_sector() -> None:
+    """Matches the real Monza lap 1 shape: sector1 never arrives (no
+    reference point before the start line), so the lap can't be judged
+    either way and is treated as not plausible — same as ingest_historical.py
+    treating a NULL IsAccurate as False."""
+    assert not ingest_live_session._is_plausible_lap(90.0, None, 30.0, 30.0, {"1"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_rejects_sector_sum_mismatch() -> None:
+    assert not ingest_live_session._is_plausible_lap(90.0, 30.0, 30.0, 30.0 + 5.0, {"1"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_tolerates_small_sector_sum_rounding() -> None:
+    assert ingest_live_session._is_plausible_lap(90.02, 30.0, 30.0, 30.0, {"1"}, set())
+
+
+@pytest.mark.unit
+def test_is_plausible_lap_magnitude_backstop_rejects_a_red_flag_scale_lap() -> None:
+    """Isolates the magnitude backstop specifically: all three sectors
+    present and correctly summing to the (implausible) lap time, with a
+    clean status and clean previous lap — the ONLY thing that can reject
+    this is _MAX_PLAUSIBLE_LAP_SECONDS. Covers laps ingested before this
+    ingestor's first-ever TrackStatus message (still defaulted to "1"),
+    the scenario a real red flag at Monza 2026 would hit if this ingestor
+    connected after the session had already started. Magnitude matches the
+    real ~1956.9s value observed for every driver's lap 4 that race."""
+    assert not ingest_live_session._is_plausible_lap(
+        1956.913, 650.971, 650.971, 654.971, {"1"}, set()
+    )
+
+
+# --- _handle_lap_count (Issue A, docs/live-race-ingestion-and-strategy-
+# gaps-monza-2026.md) ---
+
+
+@pytest.mark.unit
+def test_handle_lap_count_dispatches_on_first_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    ingestor = _make_ingestor()
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        ingest_live_session.update_session_total_laps,
+        "delay",
+        lambda session_id, total_laps: dispatched.append((session_id, total_laps)),
+    )
+
+    ingestor._handle_lap_count({"TotalLaps": 53})
+
+    assert ingestor._total_laps_dispatched == 53
+    assert dispatched == [("session-1", 53)]
+
+
+@pytest.mark.unit
+def test_handle_lap_count_does_not_redispatch_the_same_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1's own feed can resend the same TotalLaps repeatedly over a
+    session — sessions.total_laps only needs to be set once."""
+    ingestor = _make_ingestor()
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        ingest_live_session.update_session_total_laps,
+        "delay",
+        lambda session_id, total_laps: dispatched.append((session_id, total_laps)),
+    )
+
+    ingestor._handle_lap_count({"TotalLaps": 53})
+    ingestor._handle_lap_count({"TotalLaps": 53})
+    ingestor._handle_lap_count({"TotalLaps": 53})
+
+    assert dispatched == [("session-1", 53)]
+
+
+@pytest.mark.unit
+def test_handle_lap_count_redispatches_on_a_genuine_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real correction (e.g. a shortened race distance) is picked up, not
+    permanently locked to the first value seen."""
+    ingestor = _make_ingestor()
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        ingest_live_session.update_session_total_laps,
+        "delay",
+        lambda session_id, total_laps: dispatched.append((session_id, total_laps)),
+    )
+
+    ingestor._handle_lap_count({"TotalLaps": 53})
+    ingestor._handle_lap_count({"TotalLaps": 50})
+
+    assert dispatched == [("session-1", 53), ("session-1", 50)]
+    assert ingestor._total_laps_dispatched == 50
+
+
+@pytest.mark.unit
+def test_handle_lap_count_ignores_missing_or_non_positive_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestor = _make_ingestor()
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        ingest_live_session.update_session_total_laps,
+        "delay",
+        lambda session_id, total_laps: dispatched.append((session_id, total_laps)),
+    )
+
+    ingestor._handle_lap_count({})
+    ingestor._handle_lap_count({"TotalLaps": None})
+    ingestor._handle_lap_count({"TotalLaps": "53"})  # wrong type, not coerced
+    ingestor._handle_lap_count({"TotalLaps": 0})
+    ingestor._handle_lap_count({"TotalLaps": -1})
+
+    assert dispatched == []
+    assert ingestor._total_laps_dispatched is None
+
+
+# --- _handle_track_status ---
+
+
+@pytest.mark.unit
+def test_handle_track_status_updates_current_status() -> None:
+    ingestor = _make_ingestor()
+    assert ingestor._current_track_status == "1"
+
+    ingestor._handle_track_status({"Status": "4", "Message": "SCDeployed"})
+
+    assert ingestor._current_track_status == "4"
+
+
+@pytest.mark.unit
+def test_handle_track_status_ignores_unparseable_payload() -> None:
+    ingestor = _make_ingestor()
+
+    ingestor._handle_track_status({"Message": "no Status field at all"})
+
+    assert ingestor._current_track_status == "1"  # unchanged default
+
+
+@pytest.mark.unit
+def test_handle_track_status_accepts_value_wrapped_status() -> None:
+    """Same {"Value": ...}-wrapped shape _extract_string_field already
+    handles for GapToLeader/IntervalToPositionAhead — defensive in case
+    F1 sends TrackStatus's Status field wrapped too."""
+    ingestor = _make_ingestor()
+
+    ingestor._handle_track_status({"Status": {"Value": "2"}})
+
+    assert ingestor._current_track_status == "2"
+
+
+# --- _handle_timing_data end-to-end: track_status/is_valid on the dispatched raw_lap ---
+
+
+@pytest.mark.unit
+def test_handle_timing_data_dispatches_valid_lap_under_green_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestor = _make_ingestor(car_number_to_driver_id={"44": "driver-44"})
+
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        ingest_live_session.process_lap, "delay", lambda raw_lap: dispatched.append(raw_lap)
+    )
+    monkeypatch.setattr(ingest_live_session.run_strategy_prediction, "delay", lambda raw_lap: None)
+
+    # Sectors arrive across separate messages, same as the real feed.
+    ingestor._handle_timing_data({"Lines": {"44": {"Sectors": {"0": {"Value": "28.453"}}}}})
+    ingestor._handle_timing_data({"Lines": {"44": {"Sectors": {"1": {"Value": "30.254"}}}}})
+    ingestor._handle_timing_data(
+        {
+            "Lines": {
+                "44": {
+                    "Sectors": {"2": {"Value": "28.467"}},
+                    "NumberOfLaps": 1,
+                    "LastLapTime": {"Value": "1:27.174"},
+                }
+            }
+        }
+    )
+
+    assert len(dispatched) == 1
+    raw_lap = dispatched[0]
+    assert raw_lap["track_status"] == "1"
+    assert raw_lap["is_valid"] is True
+
+
+@pytest.mark.unit
+def test_handle_timing_data_marks_lap_invalid_and_records_status_during_red_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end reproduction of Issue D: a red flag (status "5") active
+    while a lap is in progress must both (a) be recorded in track_status and
+    (b) mark the lap is_valid=False — exactly what was missing at the real
+    2026 Italian GP (every driver's lap 4 stored as ~1955s, is_valid=True)."""
+    ingestor = _make_ingestor(car_number_to_driver_id={"44": "driver-44"})
+
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        ingest_live_session.process_lap, "delay", lambda raw_lap: dispatched.append(raw_lap)
+    )
+    monkeypatch.setattr(ingest_live_session.run_strategy_prediction, "delay", lambda raw_lap: None)
+
+    # Car "44" is mid-lap when the red flag is thrown...
+    ingestor._handle_timing_data({"Lines": {"44": {"GapToLeader": "+1.0"}}})
+    ingestor._handle_track_status({"Status": "5", "Message": "Red"})
+    # ...and the field is still being updated (position/gap fields update on
+    # essentially every message) while the flag is out, before the session
+    # resumes and this car's lap finally completes.
+    ingestor._handle_timing_data(
+        {
+            "Lines": {
+                "44": {
+                    "GapToLeader": "+1.0",
+                    "Sectors": {"0": {"Value": "28.0"}, "1": {"Value": "1900.0"}},
+                }
+            }
+        }
+    )
+    ingestor._handle_track_status({"Status": "1", "Message": "AllClear"})
+    ingestor._handle_timing_data(
+        {
+            "Lines": {
+                "44": {
+                    "Sectors": {"2": {"Value": "28.0"}},
+                    "NumberOfLaps": 1,
+                    "LastLapTime": {"Value": "1956.0"},
+                }
+            }
+        }
+    )
+
+    assert len(dispatched) == 1
+    raw_lap = dispatched[0]
+    assert raw_lap["track_status"] == "15"  # both codes observed, sorted
+    assert raw_lap["is_valid"] is False
+
+
+@pytest.mark.unit
+def test_handle_timing_data_invalidates_lap_immediately_after_a_safety_car_lap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingestor = _make_ingestor(car_number_to_driver_id={"44": "driver-44"})
+
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        ingest_live_session.process_lap, "delay", lambda raw_lap: dispatched.append(raw_lap)
+    )
+    monkeypatch.setattr(ingest_live_session.run_strategy_prediction, "delay", lambda raw_lap: None)
+
+    def _complete_lap(lap_number: int, lap_time: str) -> None:
+        ingestor._handle_timing_data(
+            {"Lines": {"44": {"Sectors": {"0": {"Value": "30.0"}, "1": {"Value": "30.0"}}}}}
+        )
+        ingestor._handle_timing_data(
+            {
+                "Lines": {
+                    "44": {
+                        "Sectors": {"2": {"Value": "30.0"}},
+                        "NumberOfLaps": lap_number,
+                        "LastLapTime": {"Value": lap_time},
+                    }
+                }
+            }
+        )
+
+    ingestor._handle_track_status({"Status": "4", "Message": "SCDeployed"})
+    _complete_lap(1, "90.0")  # under SC — correctly invalid on its own status
+    ingestor._handle_track_status({"Status": "1", "Message": "AllClear"})
+    _complete_lap(2, "90.0")  # clean status, but immediately follows an SC lap
+
+    assert len(dispatched) == 2
+    assert dispatched[0]["is_valid"] is False
+    assert dispatched[1]["track_status"] == "1"  # this lap's OWN status was clean
+    assert dispatched[1]["is_valid"] is False  # still invalid: check_3
+
+
 @pytest.mark.unit
 def test_handle_timing_data_publishes_gaps_with_recomputed_positions() -> None:
     """_publish_live_gaps reads _car_live_gap_state["position"] — confirms
@@ -342,3 +658,127 @@ def test_handle_timing_data_publishes_gaps_with_recomputed_positions() -> None:
     assert redis_client.setex.called
     key = redis_client.setex.call_args.args[0]
     assert key == "f1:2026:10:gaps"
+
+
+# --- Real-world verification: actual field data from the 2026 Italian GP
+# (Monza, session_id 3ddc84bd-f10e-4870-9e98-631d79695beb) — see docs/live-
+# race-ingestion-and-strategy-gaps-monza-2026.md Issue D. Every value below
+# was queried directly from the local DB's lap_data table, not fabricated —
+# see that document's Section 0b / Issue D re-verification note for the
+# queries. sector1_seconds is omitted from each tuple because it is None
+# for literally every one of these real rows (confirmed by direct query:
+# lap 4 and lap 5 are missing sector1 for all 21 drivers still running).
+#
+# This is deliberately fed through _is_plausible_lap with status_codes={"1"}
+# (green) and no incident in the previous lap — the MOST CHARITABLE possible
+# assumption, i.e. "assume nothing is known about track status at all". The
+# point of that choice is to prove laps 4 and 5 are caught by the
+# missing-sector/magnitude/sum checks ALONE, with no dependency on real
+# TrackStatus ground truth (which doesn't exist for this already-ingested
+# race — track_status is NULL for all 1052 rows in this session, since it
+# was ingested before this fix). See test_is_plausible_lap_real_monza_lap3_
+# is_a_known_uncloseable_gap below for the lap this does NOT close.
+
+_MONZA_LAP4_REAL_VALUES: list[tuple[str, float, float, float]] = [
+    ("ALB", 1952.319, 32.254, 49.850),
+    ("ALO", 1948.683, 32.911, 49.693),
+    ("ANT", 1955.709, 33.473, 49.130),
+    ("BEA", 1953.349, 34.921, 45.497),
+    ("BOR", 1954.830, 32.918, 49.126),
+    ("BOT", 1952.109, 34.053, 47.964),
+    ("COL", 1957.224, 36.583, 41.903),
+    ("GAS", 1955.174, 36.470, 37.965),
+    ("HAM", 1956.220, 36.288, 44.176),
+    ("HUL", 1956.009, 33.326, 50.074),
+    ("LAW", 1952.849, 33.770, 51.231),
+    ("LIN", 1953.462, 37.853, 42.102),
+    ("NOR", 1953.175, 39.475, 41.193),
+    ("OCO", 1954.058, 34.999, 47.296),
+    ("PER", 1952.583, 32.887, 51.202),
+    ("PIA", 1954.257, 38.361, 42.734),
+    ("RUS", 1958.319, 36.989, 37.463),
+    ("SAI", 1953.793, 31.943, 51.857),
+    ("STR", 1952.267, 33.309, 49.163),
+    ("TSU", 1954.517, 34.534, 50.912),
+    ("VER", 1956.913, 36.182, 40.997),
+]
+
+_MONZA_LAP5_REAL_VALUES: list[tuple[str, float, float, float]] = [
+    ("ALB", 197.566, 33.777, 50.387),
+    ("ALO", 195.888, 35.442, 49.612),
+    ("ANT", 199.022, 34.249, 46.618),
+    ("BEA", 194.870, 33.753, 40.137),
+    ("BOR", 198.186, 33.440, 46.465),
+    ("BOT", 197.236, 35.753, 48.842),
+    ("COL", 198.372, 32.878, 40.557),
+    ("GAS", 200.677, 35.398, 40.200),
+    ("HAM", 194.748, 34.411, 38.878),
+    ("HUL", 197.751, 34.649, 46.893),
+    ("LAW", 198.082, 35.578, 48.414),
+    ("LIN", 197.161, 34.202, 40.122),
+    ("NOR", 197.849, 33.842, 41.814),
+    ("OCO", 194.602, 35.135, 40.826),
+    ("PER", 196.624, 35.544, 49.404),
+    ("PIA", 196.620, 35.287, 39.228),
+    ("RUS", 200.259, 36.049, 39.056),
+    ("SAI", 198.108, 34.806, 50.063),
+    ("STR", 196.538, 33.478, 51.215),
+    ("TSU", 198.308, 35.643, 47.651),
+    ("VER", 198.400, 36.302, 39.298),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("code", "lap_time", "sector2", "sector3"), _MONZA_LAP4_REAL_VALUES)
+def test_is_plausible_lap_rejects_every_real_monza_lap4_row(
+    code: str, lap_time: float, sector2: float, sector3: float
+) -> None:
+    """All 21 drivers' real, literal lap 4 values from the actual race this
+    fix was written for. Confirms the fix would have caught the exact
+    incident that motivated it, for every driver, not just VER."""
+    assert not ingest_live_session._is_plausible_lap(lap_time, None, sector2, sector3, {"1"}, set())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("code", "lap_time", "sector2", "sector3"), _MONZA_LAP5_REAL_VALUES)
+def test_is_plausible_lap_rejects_every_real_monza_lap5_row(
+    code: str, lap_time: float, sector2: float, sector3: float
+) -> None:
+    """Extension found during re-verification (not in the original doc
+    draft): lap 5 is also distorted for every driver, and — like lap 4 — is
+    independently caught by the missing-sector check alone, no TrackStatus
+    ground truth required."""
+    assert not ingest_live_session._is_plausible_lap(lap_time, None, sector2, sector3, {"1"}, set())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("code", "lap_time", "sector1", "sector2", "sector3"),
+    [
+        ("ALO", 169.953, 47.321, 51.157, 71.475),
+        ("GAS", 123.475, 31.599, 41.157, 50.719),
+        ("RUS", 119.148, 31.124, 40.730, 47.294),
+        ("STR", 162.980, 45.547, 50.158, 67.275),
+        ("VER", 125.983, 33.413, 40.597, 51.973),
+    ],
+)
+def test_is_plausible_lap_real_monza_lap3_is_a_known_uncloseable_gap(
+    code: str, lap_time: float, sector1: float, sector2: float, sector3: float
+) -> None:
+    """Documents a real, known limitation rather than papering over it: lap 3
+    is ALSO part of the same red-flag window (docs/live-race-ingestion-and-
+    strategy-gaps-monza-2026.md Issue D re-verification, laps 3-6), but every
+    field here is genuinely present and sums correctly (confirmed: 0 of 21
+    lap-3 rows are missing a sector), and 120-170s is well under
+    _MAX_PLAUSIBLE_LAP_SECONDS. The ONLY signal that could have caught this
+    lap is TrackStatus — which doesn't exist as ground truth for this
+    already-ingested race (track_status is NULL for all 1052 rows in this
+    session; it was ingested before this fix landed). This asserts the
+    CURRENT, honest behavior (still plausible under a "nothing known"
+    status assumption) rather than silently omitting lap 3 from this
+    verification pass. The fix is structurally capable of catching this for
+    a genuinely live-ingested FUTURE race, where real TrackStatus messages
+    would arrive — it cannot be proven retroactively against Monza's already-
+    ingested data, and this test says so rather than implying otherwise.
+    """
+    assert ingest_live_session._is_plausible_lap(lap_time, sector1, sector2, sector3, {"1"}, set())

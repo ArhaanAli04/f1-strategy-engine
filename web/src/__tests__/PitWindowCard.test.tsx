@@ -21,7 +21,7 @@ vi.mock("@/hooks/useDrivers", () => ({
 }))
 
 function buildView(overrides: Partial<PitRecommendationView> = {}): PitRecommendationView {
-  return {
+  const defaults: PitRecommendationView = {
     pitLap: 24,
     windowStart: 22,
     windowEnd: 26,
@@ -30,8 +30,9 @@ function buildView(overrides: Partial<PitRecommendationView> = {}): PitRecommend
     explanation: null,
     pitProbability: null,
     asOfLapNumber: null,
-    ...overrides,
+    isFallbackEstimate: false,
   }
+  return { ...defaults, ...overrides }
 }
 
 function mockView(view: PitRecommendationView | null, isLoading = false) {
@@ -90,6 +91,42 @@ describe("PitWindowCard", () => {
     render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
 
     expect(screen.getByText("Lap 24")).toBeInTheDocument()
+  })
+
+  it("flags a fallback estimate with a ~ headline, 'Estimated' label, and an unconfirmed-estimate note", () => {
+    // docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A: this
+    // is the honest-uncertainty surface for a value that could still be an
+    // unbounded, low-confidence pit_predictor estimate (a pre-fix persisted
+    // row, or a live session before its first LapCount message) — the
+    // frontend has no race-length context to sanity-check the number
+    // itself, so it flags the uncertainty instead.
+    mockView(
+      buildView({
+        windowStart: null,
+        windowEnd: null,
+        pitLap: 78,
+        isFallbackEstimate: true,
+      }),
+    )
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+
+    expect(screen.getByText("~Lap 78")).toBeInTheDocument()
+    expect(screen.getByText("Estimated: Lap 78 — MEDIUM")).toBeInTheDocument()
+    expect(
+      screen.getByText("Unconfirmed estimate — not yet bounded by a real pit-window search."),
+    ).toBeInTheDocument()
+  })
+
+  it("does not flag a real bounded recommendation as a fallback estimate", () => {
+    mockView(buildView()) // isFallbackEstimate: false by default
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+
+    expect(screen.getByText("Recommended: Lap 24 — MEDIUM")).toBeInTheDocument()
+    expect(
+      screen.queryByText("Unconfirmed estimate — not yet bounded by a real pit-window search."),
+    ).not.toBeInTheDocument()
   })
 
   it("shows the no-window empty state when there is no view at all", () => {

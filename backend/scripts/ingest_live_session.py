@@ -56,6 +56,7 @@ from backend.scripts._ingest_common import (
 from backend.workers.prediction_worker import run_strategy_prediction as run_strategy_prediction
 from backend.workers.telemetry_worker import process_lap as process_lap
 from backend.workers.telemetry_worker import record_tire_stint as record_tire_stint
+from backend.workers.telemetry_worker import update_session_total_laps as update_session_total_laps
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -76,6 +77,11 @@ _TOPICS = [
     "TrackStatus",
     "WeatherData",
     "DriverList",
+    # The real scheduled race distance, broadcast live — see
+    # _handle_lap_count's own docstring and docs/live-race-ingestion-and-
+    # strategy-gaps-monza-2026.md Issue A. FastF1's own reference SignalR
+    # client subscribes to this same topic (livetiming/client.py).
+    "LapCount",
 ]
 
 _MAX_BACKOFF_SECONDS = 30.0
@@ -89,6 +95,36 @@ _WEATHER_KEY_TTL_SECONDS = 60
 # Map Panel's live driver dots need to look current within a couple of
 # seconds, not lag behind a stale sample) — see CLAUDE.md Redis Cache Key Schema.
 _POSITION_KEY_TTL_SECONDS = 3
+
+# Status codes documented by FastF1's own track_status parser (fastf1/_api.py)
+# as green/yellow (no active incident): '1' AllClear, '2' Yellow, '12'/'21'
+# a transition between the two within one lap. A lap whose accumulated code
+# SET is a subset of {"1", "2"} is treated as plausible here — this is a set
+# check, not a literal string match against FastF1's own concatenated-string
+# values, so it doesn't depend on reproducing FastF1's exact code ORDER (see
+# _is_plausible_lap's docstring for why that's a deliberate simplification,
+# not an oversight). Anything else observed during the lap (Safety Car '4',
+# Red Flag '5', VSC '6'/'7', or an unrecognized code) marks it implausible.
+_TRACK_STATUS_VALID_CODES = frozenset({"1", "2"})
+
+# FastF1's own accuracy check (Session._check_lap_accuracy) tolerates a 0.003s
+# gap between a lap's own recorded time and the sum of its three sectors.
+# Live sector times are accumulated across separate diff messages rather than
+# parsed from one complete historical record, so a slightly looser tolerance
+# is used here to avoid false negatives from message-timing/rounding noise —
+# confirmed empirically against a real live-ingested session (Italian GP 2026
+# Monza): 0 of 1052 real rows exceed even a 0.05s sum-mismatch, so this
+# tolerance is not expected to pass anything a stricter check would reject.
+_SECTOR_SUM_TOLERANCE_SECONDS = 0.05
+
+# Backstop for laps ingested before this ingestor has ever received a
+# TrackStatus message (so _current_track_status is still at its "1" default
+# and can't yet reflect a real incident) — a magnitude check independent of
+# track status. 300s comfortably separates a real lap (even a very slow
+# in/out/SC lap) from a red-flag-inflated session-clock artifact: confirmed
+# against the same real Monza session, this exact threshold isolates the 21
+# genuinely bogus rows (all ~1955s) and 0 legitimate ones.
+_MAX_PLAUSIBLE_LAP_SECONDS = 300.0
 
 # f1:{season}:{round}:gaps — same key telemetry_service.py's @cacheable-wrapped
 # get_session_gaps() already reads/writes (CLAUDE.md Redis Cache Key Schema,
@@ -135,6 +171,70 @@ def _parse_temp(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_plausible_lap(
+    lap_time_seconds: float | None,
+    sector1_seconds: float | None,
+    sector2_seconds: float | None,
+    sector3_seconds: float | None,
+    status_codes: set[str],
+    prev_lap_status_codes: set[str],
+) -> bool:
+    """Whether a completed lap looks like real racing pace, not a session-
+    stoppage/red-flag artifact — mirrors FastF1's own Session._check_lap_
+    accuracy (the logic behind its IsAccurate column, which ingest_historical.py
+    already relies on) closely enough to apply the same standard live, without
+    depending on data only FastF1's post-hoc reconstruction has (PitInTime/
+    PitOutTime, FastF1Generated — pit in/out lap exclusion is intentionally
+    NOT attempted here, see docs/live-race-ingestion-and-strategy-gaps-monza-
+    2026.md Issue D's "what needs investigating" list).
+
+    Checks, all must hold:
+    - every track-status code observed during the lap is green/yellow only
+      (a SET subset check against _TRACK_STATUS_VALID_CODES, not a literal
+      string match — FastF1's own check accepts both '12' and '21' as the
+      same green<->yellow transition, so which code was seen FIRST is not a
+      meaningful distinction for plausibility, only which codes were seen at
+      all)
+    - lap_time_seconds and all three sector times are present (an incomplete
+      lap, e.g. the very first lap of a race with no sector 1 reference
+      point, can't be judged plausible either way)
+    - lap_time_seconds is under _MAX_PLAUSIBLE_LAP_SECONDS — a backstop
+      independent of track status, for laps ingested before this ingestor's
+      first TrackStatus message ever arrives
+    - the three sectors sum to lap_time_seconds within
+      _SECTOR_SUM_TOLERANCE_SECONDS
+    - the PREVIOUS lap had no incident code either — FastF1's own check_3:
+      "first lap after safety car often has timing issues (as do all laps
+      under safety car)"
+
+    Args:
+        lap_time_seconds: This lap's recorded time, or None if never received.
+        sector1_seconds: This lap's sector 1 time, or None if never received.
+        sector2_seconds: This lap's sector 2 time, or None if never received.
+        sector3_seconds: This lap's sector 3 time, or None if never received.
+        status_codes: Track-status codes observed while this lap was being run.
+        prev_lap_status_codes: Track-status codes observed during this same
+            car's immediately preceding lap (empty set if this is lap 1).
+    Returns:
+        True if this lap looks like plausible racing pace.
+    """
+    if (
+        lap_time_seconds is None
+        or sector1_seconds is None
+        or sector2_seconds is None
+        or sector3_seconds is None
+    ):
+        return False
+    if lap_time_seconds > _MAX_PLAUSIBLE_LAP_SECONDS:
+        return False
+    if not status_codes <= _TRACK_STATUS_VALID_CODES:
+        return False
+    if not prev_lap_status_codes <= _TRACK_STATUS_VALID_CODES:
+        return False
+    sector_sum = sector1_seconds + sector2_seconds + sector3_seconds
+    return abs(sector_sum - lap_time_seconds) <= _SECTOR_SUM_TOLERANCE_SECONDS
 
 
 _LAPS_BEHIND_PATTERN = re.compile(r"^\+?\s*(\d+)\s*LAPS?$", re.IGNORECASE)
@@ -234,6 +334,34 @@ class F1SignalRIngestor:
         # "gap_to_ahead" (float|None), "laps_behind" (int, deficit to the car
         # immediately ahead). Published to Redis via _publish_live_gaps.
         self._car_live_gap_state: dict[str, dict[str, Any]] = {}
+        # Global track status (F1's TrackStatus topic is session-wide, not
+        # per-car). Defaults to AllClear so laps ingested before this
+        # ingestor's first TrackStatus message ever arrives aren't
+        # incorrectly treated as under an incident — see
+        # _MAX_PLAUSIBLE_LAP_SECONDS's own comment for the magnitude
+        # backstop that covers that same gap the other way.
+        self._current_track_status: str = "1"
+        # Per-car accumulator of every status code observed while that car's
+        # CURRENT lap has been in progress — same accumulate-across-messages
+        # shape as _sector_accumulator above, cleared into a completed lap's
+        # track_status the same way _sector_accumulator is. Populated
+        # unconditionally on every TimingData message that mentions a car
+        # (see _handle_timing_data's pass 1), not only on a status CHANGE, so
+        # a car that never received a mid-lap status update still correctly
+        # records whatever status was current for its whole lap.
+        self._car_track_status_codes: dict[str, set[str]] = {}
+        # Per-car status codes from the PREVIOUS completed lap — used by
+        # _is_plausible_lap's check_3 equivalent (a lap immediately following
+        # an SC/VSC/red-flag lap often has its own timing anomalies, per
+        # FastF1's own Session._check_lap_accuracy). Empty set (no incident
+        # assumed) for a car's first completed lap.
+        self._car_prev_lap_status_codes: dict[str, set[str]] = {}
+        # The real scheduled race distance, once resolved from the live
+        # feed's LapCount topic — None until the first LapCount message
+        # arrives. Tracked so _handle_lap_count only dispatches a DB write
+        # when the value is new/changed, not on every repeated message (F1
+        # can resend the same value many times over a session).
+        self._total_laps_dispatched: int | None = None
         self._connection: Any = None
         self._stopped = threading.Event()
         self._opened = threading.Event()
@@ -288,6 +416,10 @@ class F1SignalRIngestor:
                 self._handle_weather_data(data)
             elif topic == "DriverList":
                 self._handle_driver_list(data)
+            elif topic == "TrackStatus":
+                self._handle_track_status(data)
+            elif topic == "LapCount":
+                self._handle_lap_count(data)
             else:
                 logger.debug("Received %s message", topic)
         except Exception:
@@ -336,6 +468,65 @@ class F1SignalRIngestor:
             _WEATHER_KEY_TTL_SECONDS,
             json.dumps({"track_temp": track_temp, "air_temp": air_temp}),
         )
+
+    def _handle_track_status(self, payload: dict[str, Any]) -> None:
+        """Track the session-wide flag status (green/yellow/SC/VSC/red flag).
+
+        Was subscribed (_TOPICS already lists "TrackStatus") but never
+        handled at all before this fix — the signal was arriving and being
+        silently discarded on every `else: logger.debug(...)` branch of
+        _on_feed. See docs/live-race-ingestion-and-strategy-gaps-monza-
+        2026.md Issue D: this is the signal _is_plausible_lap needs to
+        distinguish a red-flag-inflated "lap" from real racing pace, and the
+        reason `track_status` was NULL for every live-ingested row before
+        this fix.
+
+        Does not itself write anything to a car's accumulator — that happens
+        unconditionally in _handle_timing_data's own per-car loop (see its
+        comment), so a status change is picked up the next time each car's
+        own TimingData entry is processed, same as every other per-car state
+        in this class.
+        """
+        status = _extract_string_field(payload.get("Status"))
+        if status is None:
+            return
+        if status != self._current_track_status:
+            logger.info(
+                "Track status changed: %s -> %s (%s)",
+                self._current_track_status,
+                status,
+                payload.get("Message"),
+            )
+        self._current_track_status = status
+
+    def _handle_lap_count(self, payload: dict[str, Any]) -> None:
+        """Resolve the session's real scheduled race distance from F1's own feed.
+
+        F1's live timing broadcasts this directly (see _TOPICS's own comment)
+        as {"TotalLaps": N} — no FastF1 REST fetch works mid-race for this
+        (session.total_laps is gated behind session.load(laps=True), and
+        this codebase's live path deliberately loads laps=False; see
+        docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A for
+        the full "why this was missing" writeup). This is a genuine race
+        property, not a per-car one — unlike every other handler in this
+        class, there is nothing to key by car number here.
+
+        Dispatches update_session_total_laps at most once per distinct value
+        seen (see _total_laps_dispatched's own comment) — sessions.
+        total_laps only needs to be set once, and F1's own documentation of
+        this field notes it "shouldn't usually change," but a genuine
+        correction (a rare, real possibility, e.g. a race distance shortened
+        for a red flag) is still picked up and re-dispatched here, not
+        permanently locked to the first value seen.
+        """
+        total_laps = payload.get("TotalLaps")
+        if not isinstance(total_laps, int) or total_laps <= 0:
+            return
+        if total_laps == self._total_laps_dispatched:
+            return
+        self._total_laps_dispatched = total_laps
+        logger.info("Session total_laps resolved from live feed: %d", total_laps)
+        update_session_total_laps.delay(str(self._session_id), total_laps)
 
     def _handle_driver_list(self, payload: dict[str, Any]) -> None:
         """Resolve car_number->driver_id from the live DriverList topic.
@@ -493,6 +684,17 @@ class F1SignalRIngestor:
             # the "laps_completed increased" check below.
             self._update_gap_state(car_number, entry)
 
+            # Record the status current AS OF this message for this car's
+            # in-progress lap — unconditional (every message this car
+            # appears in, not just ones carrying a Sectors update), same
+            # reasoning as the gap-state update immediately above: this is
+            # what lets a car whose lap saw no mid-lap status CHANGE still
+            # correctly end up with whatever single status was in force the
+            # whole time (see _current_track_status's own comment).
+            self._car_track_status_codes.setdefault(car_number, set()).add(
+                self._current_track_status
+            )
+
         # Re-rank the whole field from the now-current gap state, once per
         # message rather than once per car — see _recompute_positions' own
         # docstring for why this replaces F1's own Position field (sent only
@@ -519,17 +721,46 @@ class F1SignalRIngestor:
             # unfiltered payload.items() case above. _as_dict is required.
             last_lap = _as_dict(entry.get("LastLapTime"))
             acc = self._sector_accumulator.pop(car_number, {})
+            lap_time_seconds = _parse_lap_time(last_lap.get("Value"))
+            sector1_seconds, sector2_seconds, sector3_seconds = (
+                acc.get("0"),
+                acc.get("1"),
+                acc.get("2"),
+            )
+
+            # Pop (not peek) this car's accumulated status codes — the set
+            # belongs to the lap that's completing right now; the next
+            # message this car appears in re-seeds a fresh accumulator for
+            # its NEXT lap (see the setdefault(...).add(...) call above).
+            # Default to the current global status if this car's own
+            # accumulator is somehow empty (e.g. its very first-ever
+            # message coincides with lap completion), rather than an empty
+            # set, which _is_plausible_lap would otherwise vacuously accept.
+            status_codes = self._car_track_status_codes.pop(car_number, None) or {
+                self._current_track_status
+            }
+            prev_status_codes = self._car_prev_lap_status_codes.get(car_number, set())
+            self._car_prev_lap_status_codes[car_number] = status_codes
+
             raw_lap = {
                 "session_id": str(self._session_id),
                 "driver_id": str(driver_id),
                 "lap_number": int(laps_completed),
-                "lap_time_seconds": _parse_lap_time(last_lap.get("Value")),
+                "lap_time_seconds": lap_time_seconds,
                 "compound": self._car_current_compound.get(car_number, "UNKNOWN"),
                 "tyre_age_laps": self._current_tyre_age(car_number, int(laps_completed)),
-                "is_valid": True,
-                "sector1_seconds": acc.get("0"),
-                "sector2_seconds": acc.get("1"),
-                "sector3_seconds": acc.get("2"),
+                "is_valid": _is_plausible_lap(
+                    lap_time_seconds,
+                    sector1_seconds,
+                    sector2_seconds,
+                    sector3_seconds,
+                    status_codes,
+                    prev_status_codes,
+                ),
+                "sector1_seconds": sector1_seconds,
+                "sector2_seconds": sector2_seconds,
+                "sector3_seconds": sector3_seconds,
+                "track_status": "".join(sorted(status_codes)),
                 "position": self._car_live_gap_state.get(car_number, {}).get("position"),
             }
             process_lap.delay(raw_lap)

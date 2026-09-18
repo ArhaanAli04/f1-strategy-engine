@@ -64,6 +64,12 @@ DRIVER_LAPS_TTL_SECONDS = 86400
 # stale {"items": [], "total": 0} for the rest of the race, silently masking
 # every real lap ingested afterward — 24h is only safe for a session that
 # will never change again.
+#
+# Also used as get_driver_laps's fallback whenever _is_session_live's Redis
+# signal can't be trusted (see DRIVER_LAPS_TTL_SECONDS's floor below) — reuses
+# this constant rather than introducing a third tunable, since the fallback
+# is meant to behave exactly like the live case: short enough to self-correct
+# within one race weekend, no separate tuning story of its own.
 DRIVER_LAPS_LIVE_TTL_SECONDS = 30
 
 
@@ -377,12 +383,49 @@ async def _is_session_live(client: aioredis.Redis, db: AsyncSession, session_id:
     _publish_live_gaps (30s TTL, refreshed on every relevant TimingData
     update — see ingest_live_session.py) — its mere presence is a reliable
     live-vs-historical signal, cheaper than checking session status.
+
+    NOT trustworthy as the sole live-vs-historical signal on its own, though
+    — a real ingestor reconnect gap lasting more than 30s lets this key lapse
+    while the race is very much still live (ingest_live_session.py's own
+    _publish_live_gaps docstring documents this happening for real at the
+    2026 Dutch GP). get_driver_laps's own TTL selection additionally floors
+    on Race.status via _resolve_race_status rather than trusting a `False`
+    return from this function alone — see docs/live-race-ingestion-and-
+    strategy-gaps-monza-2026.md Issue E.
     """
     resolved = await _resolve_season_round(db, session_id)
     if resolved is None:
         return False
     season, round_number = resolved
     return await cache_get(client, f"f1:{season}:{round_number}:gaps") is not None
+
+
+async def _resolve_race_status(db: AsyncSession, session_id: uuid.UUID) -> str | None:
+    """Resolve a session's parent Race.status, or None if the session is unknown.
+
+    get_driver_laps's floor on its own long-cache TTL (see there): only a
+    session whose race is genuinely `completed` is safe to treat as
+    immutable for 24h. A live-ingested race stays `scheduled` for its entire
+    life unless separately re-processed by ingest_historical.py (see
+    CLAUDE.md's Zandvoort R12 note), so this check is a reliable,
+    independent-of-Redis signal that a session is still in progress — it
+    doesn't depend on the same 30s pubsub key _is_session_live reads, so a
+    transient gap in that key can't fool this one too.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to resolve.
+    Returns:
+        The parent Race's status string, or None if no session with this ID
+        exists.
+    """
+    query = (
+        select(Race.status)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    row = (await db.execute(query)).one_or_none()
+    return row.status if row is not None else None
 
 
 async def _fetch_driver_laps(
@@ -436,6 +479,26 @@ async def get_driver_laps(
     get_current_race) — this is a cheap indexed DB query, not an external
     API round-trip, so a cache-stampede on a miss is not a real concern.
 
+    TTL selection (fixed for Issue E, docs/live-race-ingestion-and-strategy-
+    gaps-monza-2026.md): the long 86400s TTL is reachable ONLY when the
+    result is non-empty, _is_session_live currently reads False, AND the
+    session's parent Race.status is genuinely "completed". Originally this
+    used _is_session_live alone — but that signal depends on a 30s-TTL Redis
+    key the live ingestor refreshes continuously EXCEPT during a real,
+    documented class of connection-drop/reconnect gap (confirmed happening
+    live at the 2026 Dutch GP, see _is_session_live's own docstring). If a
+    driver's cache entry happened to get populated during exactly such a
+    gap, the old logic poisoned it with an 86400s TTL that never
+    self-corrected for the rest of the race — the leading hypothesis for why
+    one driver's lap/sector charts showed no data all race during the 2026
+    Italian GP while every other driver's updated normally (Issue E in the
+    doc above). Race.status is read directly from the DB, independent of the
+    Redis key _is_session_live checks, so a lapsed `gaps` key can no longer
+    fool this function into caching for 24h. An empty result never gets the
+    long TTL either, regardless of status — an empty page is the
+    highest-cost thing to freeze (this is the original Dutch GP dry-run
+    finding DRIVER_LAPS_TTL_SECONDS's own comment already documents).
+
     Args:
         client: Redis client (cache-aside).
         db: Async DB session.
@@ -453,10 +516,10 @@ async def get_driver_laps(
         return PaginatedResponse[LapDataResponse].model_validate(cached)
 
     data = await _fetch_driver_laps(db, driver_id, session_id, page, page_size)
-    ttl = (
-        DRIVER_LAPS_LIVE_TTL_SECONDS
-        if await _is_session_live(client, db, session_id)
-        else DRIVER_LAPS_TTL_SECONDS
-    )
+    ttl = DRIVER_LAPS_LIVE_TTL_SECONDS
+    if data["total"] > 0 and not await _is_session_live(client, db, session_id):
+        race_status = await _resolve_race_status(db, session_id)
+        if race_status == "completed":
+            ttl = DRIVER_LAPS_TTL_SECONDS
     await cache_set(client, key, data, ttl)
     return PaginatedResponse[LapDataResponse].model_validate(data)
