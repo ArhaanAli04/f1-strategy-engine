@@ -83,12 +83,69 @@ def _current_state_side_effects(
     circuit_id: uuid.UUID,
     circuit_name: str = "Test Circuit",
 ) -> list[MagicMock]:
-    """The 3 db.execute() calls _current_state makes, in order: lap, total_laps, circuit."""
+    """The 2 db.execute() calls _current_state makes, in order: lap, circuit.
+
+    Fixed for docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
+    A: _current_state now reads Session.total_laps directly off the circuit
+    query (a real stored value, not a separate MAX(lap_number) query) and
+    only falls back to that proxy when the stored value is NULL — this
+    helper always supplies a real stored total_laps, so the fallback path is
+    never exercised here. See
+    test_current_state_falls_back_to_max_lap_number_when_total_laps_unset
+    for dedicated coverage of that fallback.
+    """
     return [
         _lap_result(lap),
-        _scalar_result(total_laps),
-        _one_result((circuit_id, circuit_name)),
+        _one_result((circuit_id, circuit_name, total_laps)),
     ]
+
+
+@pytest.mark.unit
+async def test_current_state_prefers_stored_total_laps_over_max_lap_number(
+    mock_db_session: AsyncMock,
+) -> None:
+    """When Session.total_laps IS stored, it's used directly and the old
+    MAX(lap_number) fallback query is never issued — only 2 db.execute()
+    calls, not 3 (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    Issue A)."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=38, compound="MEDIUM", tyre_age_laps=20, position=3)
+
+    mock_db_session.execute.side_effect = _current_state_side_effects(
+        lap, total_laps=53, circuit_id=circuit_id
+    )
+
+    state = await strategy_service._current_state(mock_db_session, session_id, driver_id)
+
+    assert state["total_laps"] == 53  # the real stored value, NOT lap.lap_number (38)
+    assert mock_db_session.execute.call_count == 2
+
+
+@pytest.mark.unit
+async def test_current_state_falls_back_to_max_lap_number_when_total_laps_unset(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A session with no stored Session.total_laps (predates the column, or
+    a live session before its first LapCount message has arrived) falls
+    back to the old MAX(lap_number)-so-far proxy, unchanged from before
+    this fix."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=10, compound="MEDIUM", tyre_age_laps=10, position=3)
+
+    mock_db_session.execute.side_effect = [
+        _lap_result(lap),
+        _one_result((circuit_id, "Test Circuit", None)),  # total_laps NOT stored
+        _scalar_result(38),  # MAX(lap_number) fallback
+    ]
+
+    state = await strategy_service._current_state(mock_db_session, session_id, driver_id)
+
+    assert state["total_laps"] == 38
+    assert mock_db_session.execute.call_count == 3
 
 
 def _fake_competitor_lap(
@@ -531,7 +588,7 @@ async def test_get_competitor_predicted_strategy_returns_prediction_per_driver(
     ]
     mock_db_session.execute.side_effect = [
         _scalars_all_result(laps),
-        _one_result((circuit_id, "Test Circuit")),
+        _one_result((circuit_id, "Test Circuit", 53)),  # real stored Session.total_laps
     ]
 
     # Constant high pit probability — crosses ALERT_THRESHOLD on the very first
@@ -553,6 +610,107 @@ async def test_get_competitor_predicted_strategy_returns_prediction_per_driver(
     for entry in results:
         assert entry["pit_probability"] == pytest.approx(0.8)
         assert entry["predicted_pit_lap"] > 0
+
+
+@pytest.mark.unit
+async def test_get_competitor_predicted_strategy_prefers_stored_total_laps(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The THIRD instance of Issue A's bug (docs/live-race-ingestion-and-
+    strategy-gaps-monza-2026.md), found while fixing the other two: this
+    function's own total_laps = max(lap.lap_number for lap in latest_laps)
+    is the same "how far has the race gotten" proxy, just computed in
+    Python over each driver's latest row instead of a SQL MAX(). It fed
+    _first_pit_laps_over_threshold_batch's horizon calculation directly
+    (np.maximum(total_laps - current_laps, 1)), silently shrinking every
+    competitor's pit-lap search horizon to 1 lap for the whole live race.
+
+    Confirms the real stored value (53) is used, NOT the drivers' own
+    latest-lap max (20) — if the bug were still present, a driver at lap 20
+    would get total_laps=20, collapsing their horizon to 1 lap; with the fix,
+    the full COMPETITOR_STRATEGY_HORIZON_LAPS-lap horizon is available,
+    which is what lets this deterministic 0.8-probability pit_model actually
+    predict a lap in the first place (a 1-lap horizon would still find one
+    too, so the real assertion is the horizon math itself, exercised via
+    _first_pit_laps_over_threshold_batch's own dedicated tests below — this
+    test's job is only to confirm get_competitor_predicted_strategy passes
+    the STORED value through, not the proxy).
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    driver_a = uuid.uuid4()
+    laps = [
+        _fake_competitor_lap(
+            driver_a, lap_number=20, compound="MEDIUM", tyre_age_laps=15, position=1
+        )
+    ]
+    captured_total_laps: list[int] = []
+
+    def _capturing_batch(*args: Any, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
+        captured_total_laps.append(args[-1])
+        return np.array([25]), np.array([0.8])
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(laps),
+        _one_result((circuit_id, "Test Circuit", 53)),  # real stored value != lap 20
+    ]
+    monkeypatch.setattr(strategy_service, "_first_pit_laps_over_threshold_batch", _capturing_batch)
+    monkeypatch.setattr(
+        strategy_service, "_load_models", lambda: {"pit_predictor.pkl": MagicMock()}
+    )
+
+    await strategy_service.get_competitor_predicted_strategy(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id
+    )
+
+    assert captured_total_laps == [53]
+
+
+@pytest.mark.unit
+async def test_get_competitor_predicted_strategy_falls_back_when_total_laps_unset(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored Session.total_laps — falls back to max(lap.lap_number for
+    lap in latest_laps), unchanged from before this fix. No extra DB query
+    needed for this fallback (unlike _current_state's), since it's a pure
+    Python max() over rows already fetched for the per-driver prediction
+    itself."""
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    driver_a = uuid.uuid4()
+    driver_b = uuid.uuid4()
+    laps = [
+        _fake_competitor_lap(
+            driver_a, lap_number=20, compound="MEDIUM", tyre_age_laps=15, position=1
+        ),
+        _fake_competitor_lap(
+            driver_b, lap_number=18, compound="MEDIUM", tyre_age_laps=10, position=2
+        ),
+    ]
+    captured_total_laps: list[int] = []
+
+    def _capturing_batch(*args: Any, **kwargs: Any) -> tuple[np.ndarray, np.ndarray]:
+        captured_total_laps.append(args[-1])
+        return np.array([25, 22]), np.array([0.8, 0.8])
+
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(laps),
+        _one_result((circuit_id, "Test Circuit", None)),  # total_laps NOT stored
+    ]
+    monkeypatch.setattr(strategy_service, "_first_pit_laps_over_threshold_batch", _capturing_batch)
+    monkeypatch.setattr(
+        strategy_service, "_load_models", lambda: {"pit_predictor.pkl": MagicMock()}
+    )
+
+    await strategy_service.get_competitor_predicted_strategy(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id
+    )
+
+    assert captured_total_laps == [20]  # max(20, 18) — the pre-fix proxy, unchanged
 
 
 @pytest.mark.unit

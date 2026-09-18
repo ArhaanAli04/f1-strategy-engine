@@ -30,9 +30,15 @@ they're used rather than silently papered over:
   fully-observed set — pd.Categorical's inferred code order for it is far
   more predictable than for circuit/driver IDs, and was never part of this
   gap.
-- total_laps: neither Race nor Session persists race distance. It's
-  approximated as MAX(lap_number) observed so far in the session, which
-  under-estimates mid-race and converges to the true value near the finish.
+- total_laps: fixed 2026-09-19 (docs/live-race-ingestion-and-strategy-gaps-
+  monza-2026.md Issue A) — Session.total_laps now stores the real scheduled
+  race distance (from FastF1's own session.total_laps historically, from
+  the live feed's LapCount topic mid-race; see ingest_historical.py/
+  ingest_live_session.py). _current_state below prefers it and only falls
+  back to the old MAX(lap_number)-so-far approximation (which
+  under-estimates mid-race and converges to the true value only near the
+  finish) for a session that predates the column, or a live session before
+  its first LapCount message has arrived.
 - get_competitor_predicted_strategy holds gap_to_car_ahead/behind at
   pit_predictor.MAX_GAP_SECONDS and safety_car_probability at 0.0 — a real
   forward gap/SC model would need telemetry_service (forbidden import) or
@@ -456,7 +462,7 @@ async def validate_current_lap(db: AsyncSession, session_id: uuid.UUID, current_
 async def _current_state(
     db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
 ) -> dict[str, Any]:
-    """Latest lap + circuit + estimated total-laps context for one driver in a session.
+    """Latest lap + circuit + real (or estimated) total-laps context for one driver.
 
     Args:
         db: Async DB session.
@@ -480,16 +486,26 @@ async def _current_state(
     if lap is None:
         raise NotFoundError(f"No lap data for driver {driver_id} in session {session_id}")
 
-    total_laps_query = select(func.max(LapData.lap_number)).where(LapData.session_id == session_id)
-    total_laps = (await db.execute(total_laps_query)).scalar_one() or lap.lap_number
-
     circuit_query = (
-        select(Race.circuit_id, Circuit.name)
+        select(Race.circuit_id, Circuit.name, SessionModel.total_laps)
         .join(SessionModel, SessionModel.race_id == Race.id)
         .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    circuit_id, circuit_name = (await db.execute(circuit_query)).one()
+    circuit_id, circuit_name, stored_total_laps = (await db.execute(circuit_query)).one()
+
+    # Prefer the real scheduled distance (see this module's own "total_laps"
+    # note above); only fall back to the MAX(lap_number)-so-far proxy — a
+    # second query, run only when actually needed — for a session that
+    # predates Session.total_laps or a live session before its first
+    # LapCount message has arrived.
+    if stored_total_laps is not None:
+        total_laps = stored_total_laps
+    else:
+        total_laps_query = select(func.max(LapData.lap_number)).where(
+            LapData.session_id == session_id
+        )
+        total_laps = (await db.execute(total_laps_query)).scalar_one() or lap.lap_number
 
     return {
         "lap_number": lap.lap_number,
@@ -2031,14 +2047,35 @@ async def get_competitor_predicted_strategy(
     if not latest_laps:
         return []
 
-    total_laps = max(lap.lap_number for lap in latest_laps)
     circuit_query = (
-        select(Race.circuit_id, Circuit.name)
+        select(Race.circuit_id, Circuit.name, SessionModel.total_laps)
         .join(SessionModel, SessionModel.race_id == Race.id)
         .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    _circuit_id, circuit_name = (await db.execute(circuit_query)).one()
+    _circuit_id, circuit_name, stored_total_laps = (await db.execute(circuit_query)).one()
+
+    # Prefer the real scheduled distance — see this module's own "total_laps"
+    # note above and docs/live-race-ingestion-and-strategy-gaps-monza-
+    # 2026.md Issue A. This was a THIRD, previously-undiscovered instance of
+    # the same bug: max(lap.lap_number for lap in latest_laps) is "how far
+    # has the race gotten" across the whole field, not "how long is the
+    # race" — mid-race it collapses toward the current lap, which fed
+    # _first_pit_laps_over_threshold_batch's horizon calculation
+    # (np.maximum(total_laps - current_laps, 1)) directly, silently
+    # shrinking every competitor's pit-lap search horizon from
+    # COMPETITOR_STRATEGY_HORIZON_LAPS down to 1 lap for the whole live
+    # race — the same class of corruption CP3 fixed at the other two call
+    # sites, on the /strategy/{session_id}/overview endpoint (CLAUDE.md:
+    # "the single most compute-expensive endpoint measured", the team
+    # strategy wall's live view). Falls back to the old proxy only for a
+    # session that predates Session.total_laps or a live session before its
+    # first LapCount message has arrived.
+    total_laps = (
+        stored_total_laps
+        if stored_total_laps is not None
+        else max(lap.lap_number for lap in latest_laps)
+    )
 
     driver_ids = [str(lap.driver_id) for lap in latest_laps]
     compounds = [lap.compound for lap in latest_laps]

@@ -85,13 +85,15 @@ def _seed_session_with_lap(
         tyre_age_laps=12,
         lap_time_seconds=91.2,
     )
-    # build_pit_recommendation derives total_laps as MAX(lap_number) across the
-    # whole session (races/sessions don't persist a race-distance column —
-    # see strategy_service.py's module docstring). Without a lap somewhere in
-    # the session beyond the driver's own latest lap, total_laps == 12 ==
-    # lap_number, so the [lap_number+1, total_laps] candidate window is empty
-    # and the endpoint would (correctly) return []. A second car, further
-    # into the race, establishes a realistic race distance.
+    # session_row above has no total_laps set (Session.total_laps, added for
+    # docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
+    # see strategy_service.py's module docstring), so build_pit_recommendation
+    # falls back to deriving it as MAX(lap_number) across the whole session,
+    # same as before that fix. Without a lap somewhere in the session beyond
+    # the driver's own latest lap, total_laps == 12 == lap_number, so the
+    # [lap_number+1, total_laps] candidate window is empty and the endpoint
+    # would (correctly) return []. A second car, further into the race,
+    # establishes a realistic race distance.
     other_driver = Driver(
         id=uuid.uuid4(), code="HAM", full_name="Lewis Hamilton", nationality="GBR"
     )

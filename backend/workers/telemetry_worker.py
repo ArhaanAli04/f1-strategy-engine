@@ -6,11 +6,13 @@ import logging
 import uuid
 
 import redis
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_redis_settings
 from backend.core.database import get_engine
+from backend.models.race import Session as SessionModel
 from backend.models.telemetry import LapData, TireStint
 from backend.schemas.telemetry_schema import LapDataCreate, TireStintCreate
 from backend.workers.celery_app import app
@@ -150,3 +152,50 @@ def record_tire_stint(raw_stint: dict[str, object]) -> None:
     """
     stint = TireStintCreate.model_validate(raw_stint)
     asyncio.run(_persist_tire_stint(stint))
+
+
+async def _persist_session_total_laps(session_id: uuid.UUID, total_laps: int) -> None:
+    """Set sessions.total_laps for one session, once resolved from the live feed.
+
+    Plain UPDATE, not an upsert — unlike process_lap/record_tire_stint's
+    per-lap rows, the Session row is always already created (by
+    ingest_live_session.py's own _resolve_context, before the ingestor's
+    SignalR connection ever opens), so there is nothing to insert here; a
+    missing row would be a real bug (the session_id the live ingestor is
+    running under doesn't exist), not a legitimate race to handle quietly.
+
+    Args:
+        session_id: Session whose total_laps to set.
+        total_laps: Real scheduled race distance, from the live feed's
+            LapCount.TotalLaps (see ingest_live_session.py's
+            _handle_lap_count and docs/live-race-ingestion-and-strategy-
+            gaps-monza-2026.md Issue A).
+    Returns:
+        None.
+    """
+    session_factory = _get_session_factory()
+    try:
+        async with session_factory() as db:
+            await db.execute(
+                update(SessionModel)
+                .where(SessionModel.id == session_id)
+                .values(total_laps=total_laps)
+            )
+            await db.commit()
+    finally:
+        # Same dispose-on-exception convention as _persist_lap/
+        # _persist_tire_stint above — see _persist_lap's own comment.
+        await get_engine().dispose()
+
+
+@app.task(name="update_session_total_laps")  # type: ignore[untyped-decorator]
+def update_session_total_laps(session_id: str, total_laps: int) -> None:
+    """Persist the live feed's LapCount.TotalLaps for one session.
+
+    Args:
+        session_id: Session UUID (string form, as dispatched by the live ingestor).
+        total_laps: Real scheduled race distance.
+    Returns:
+        None.
+    """
+    asyncio.run(_persist_session_total_laps(uuid.UUID(session_id), total_laps))

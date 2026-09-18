@@ -138,6 +138,144 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     assert driver_b_state.baseline_lap_time_seconds == pytest.approx(90.5)
 
 
+# --- _resolve_inference_context: total_laps (docs/live-race-ingestion-and-
+# strategy-gaps-monza-2026.md Issue A) ---
+#
+# _resolve_weather/_resolve_position_context are monkeypatched to canned
+# values in both tests below — this isolates exactly the total_laps logic
+# CP3 changed, matching this file's own established pattern (see
+# test_get_pit_window_with_explanation's docstring in test_strategy_service.py
+# for the same "monkeypatch the unrelated dependencies" convention).
+
+
+@pytest.mark.unit
+async def test_resolve_inference_context_prefers_stored_total_laps(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Session.total_laps IS stored, it's used directly and the old
+    MAX(lap_number) fallback query is never issued — only 1 db.execute()
+    call, not 2."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, 2026, 10, "Test Circuit", 53)
+    mock_db_session.execute.return_value = context_result
+
+    monkeypatch.setattr(prediction_worker, "_resolve_weather", AsyncMock(return_value=(30.0, 20.0)))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_resolve_position_context",
+        AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
+    )
+
+    resolved = await prediction_worker._resolve_inference_context(
+        mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
+    )
+
+    assert resolved["total_laps"] == 53  # the real stored value, NOT MAX(lap_number)
+    assert resolved["stored_total_laps"] == 53
+    mock_db_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_resolve_inference_context_falls_back_to_max_lap_number(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored Session.total_laps — falls back to MAX(lap_number),
+    unchanged from before this fix (the exact behavior that produced
+    Issue A: a live session where this equals ~current_lap collapses every
+    "laps remaining"/fuel-load feature to near-zero for the whole race)."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, 2026, 10, "Test Circuit", None)
+    max_lap_result = MagicMock()
+    max_lap_result.scalar_one.return_value = 38
+    mock_db_session.execute.side_effect = [context_result, max_lap_result]
+
+    monkeypatch.setattr(prediction_worker, "_resolve_weather", AsyncMock(return_value=(30.0, 20.0)))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_resolve_position_context",
+        AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
+    )
+
+    resolved = await prediction_worker._resolve_inference_context(
+        mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
+    )
+
+    assert resolved["total_laps"] == 38
+    assert resolved["stored_total_laps"] is None
+    assert mock_db_session.execute.call_count == 2
+
+
+# --- _run_inference: optimal_pit_lap clamp (docs/live-race-ingestion-and-
+# strategy-gaps-monza-2026.md Issue A) ---
+#
+# models={} in both tests below deliberately provides no tire_deg_*.pkl,
+# forcing _run_inference's own documented fallback: predicted_life_remaining
+# defaults to tire_deg_model.MAX_LOOKAHEAD_LAPS (40.0) — the exact pegged
+# value the doc's real-world investigation found at Monza (predicted_life_
+# remaining stuck at 40.0 for the whole race), reproducing "Recommended:
+# Lap 78" at lap_number=38 (38 + 40 = 78) without needing to mock a real
+# tire_deg pipeline's predict() call.
+
+
+@pytest.mark.unit
+def test_run_inference_clamps_optimal_pit_lap_to_known_total_laps() -> None:
+    """The headline Issue A repro: predicted_life_remaining pegged at 40
+    previously let optimal_pit_lap run to lap 78 on what was actually a
+    53-lap race. Confirms the clamp engages when stored_total_laps is real."""
+    driver_id = uuid.uuid4()
+    context = {"compound": "MEDIUM", "lap_number": 38, "tyre_age_laps": 20}
+    resolved = {
+        "circuit_name": "Test Circuit",
+        "total_laps": 53,
+        "stored_total_laps": 53,
+        "gap_to_car_ahead": 5.0,
+        "gap_to_car_behind": 5.0,
+        "position": 5,
+    }
+
+    result = prediction_worker._run_inference({}, {}, context, resolved, driver_id)
+
+    assert result["tire_life_remaining"] == 40.0
+    assert result["optimal_pit_lap"] == 53  # clamped — NOT 38 + 40 = 78
+
+
+@pytest.mark.unit
+def test_run_inference_does_not_clamp_when_total_laps_unknown() -> None:
+    """stored_total_laps is None (session predates Session.total_laps, or a
+    live session before its first LapCount message has arrived) — left
+    unclamped, per this document's own research-question-3 decision:
+    clamping against the fallback MAX(lap_number) proxy (here: total_laps
+    coincides with lap_number, 38 — the exact mid-race shape the proxy
+    takes) would just replace one wrong number with a different, equally
+    meaningless one, not a correct one."""
+    driver_id = uuid.uuid4()
+    context = {"compound": "MEDIUM", "lap_number": 38, "tyre_age_laps": 20}
+    resolved = {
+        "circuit_name": "Test Circuit",
+        "total_laps": 38,  # the fallback proxy — NOT a real race length
+        "stored_total_laps": None,
+        "gap_to_car_ahead": 5.0,
+        "gap_to_car_behind": 5.0,
+        "position": 5,
+    }
+
+    result = prediction_worker._run_inference({}, {}, context, resolved, driver_id)
+
+    assert result["optimal_pit_lap"] == 78  # 38 + 40, NOT clamped down to 38
+
+
 @pytest.mark.unit
 async def test_build_race_state_starting_position_uses_current_lap_not_final_position(
     mock_db_session: AsyncMock,

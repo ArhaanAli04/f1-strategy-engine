@@ -74,6 +74,22 @@ class Session(Base):
     # back a countdown timer. Nullable: historical rows ingested before this
     # column existed, and any session Ergast doesn't carry a time for.
     scheduled_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Real scheduled race distance — the ONE authoritative source of "how
+    # many laps is this race", replacing the MAX(LapData.lap_number)-so-far
+    # proxy every other part of this codebase still falls back to when this
+    # is NULL. Only meaningful for a race-like session (R/Sprint) — always
+    # NULL for FP1/FP2/FP3/Q, which run on a clock instead of a lap count.
+    # Populated by ingest_historical.py from FastF1's own session.total_laps
+    # (gated behind load(laps=True), only available post-race) and by
+    # ingest_live_session.py from the live feed's LapCount topic's
+    # TotalLaps field (the one thing F1's own timing system broadcasts this
+    # number through mid-race — see docs/live-race-ingestion-and-strategy-
+    # gaps-monza-2026.md Issue A). NULL for every session ingested before
+    # this column existed (migration 20260918_add_total_laps_to_sessions)
+    # and for a completed session that a backfill script has not yet run
+    # against — see that migration's own docstring for the backfill
+    # decision (completed races only, not partially-live-ingested ones).
+    total_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     race: Mapped["Race"] = relationship(back_populates="sessions")
     lap_data: Mapped[list["LapData"]] = relationship(

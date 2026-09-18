@@ -157,6 +157,26 @@ export interface PitRecommendationView {
   // replay progression) — null when sourced from the always-current
   // /pit-window REST fetch, which has no single "as of" lap.
   asOfLapNumber: number | null
+  // True when pitLap came from the crude predicted_pit_lap fallback (pit_
+  // predictor's own estimate) rather than the bounded recommendation
+  // engine — see viewFromHistoryEntry below. Always false from
+  // viewFromPitWindow: that source's pit_lap is always the recommendation
+  // engine's own output, never the raw fallback.
+  //
+  // Backend now clamps predicted_pit_lap to the real race length once it's
+  // known (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
+  // A — prediction_worker._run_inference's optimal_pit_lap clamp), but two
+  // gaps remain this flag exists for: (1) a row persisted BEFORE that fix
+  // (a real race, e.g. the doc's own "Recommended: Lap 78" on a 53-lap
+  // race, is never retroactively corrected), and (2) a live session before
+  // its first LapCount message has arrived, where the backend
+  // deliberately leaves this field unclamped rather than clamp it against
+  // a meaningless proxy (see that fix's own reasoning). Either way, this
+  // value can still be an unbounded, low-confidence estimate — the
+  // frontend has no race-length context of its own to sanity-check it
+  // against, so the honest fix is to surface that uncertainty rather than
+  // render it with the same visual confidence as a real recommendation.
+  isFallbackEstimate: boolean
 }
 
 function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommendationView | null {
@@ -170,6 +190,7 @@ function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommenda
     explanation: window.explanation,
     pitProbability: null,
     asOfLapNumber: null,
+    isFallbackEstimate: false,
   }
 }
 
@@ -190,6 +211,7 @@ function viewFromHistoryEntry(
     explanation: entry.explanation,
     pitProbability: entry.pit_probability,
     asOfLapNumber: entry.lap_number,
+    isFallbackEstimate: !hasRecommendation,
   }
 }
 

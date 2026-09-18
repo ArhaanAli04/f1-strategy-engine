@@ -547,20 +547,49 @@ async def _resolve_inference_context(
             function's docstring).
     Returns:
         Dict with circuit_id, circuit_name, season, round_number, total_laps,
-        track_temp, air_temp, plus _resolve_position_context's position,
-        gap_to_car_ahead, gap_to_car_behind, target_ahead_driver_id,
-        target_behind_driver_id.
+        stored_total_laps, track_temp, air_temp, plus
+        _resolve_position_context's position, gap_to_car_ahead,
+        gap_to_car_behind, target_ahead_driver_id, target_behind_driver_id.
+        stored_total_laps is the real Session.total_laps value specifically
+        (None if not yet known) — distinct from total_laps, which is that
+        same value OR the MAX(lap_number)-so-far fallback proxy. Callers
+        that need to distinguish "a real race length is known" from "we're
+        using the mid-race proxy" (e.g. _run_inference's optimal_pit_lap
+        clamp — see docs/live-race-ingestion-and-strategy-gaps-monza-
+        2026.md Issue A) must check stored_total_laps, not total_laps: the
+        proxy is itself meaningless mid-race, so treating it as equally
+        trustworthy would silently replace one wrong number with another.
     """
     context_query = (
-        select(Race.circuit_id, Race.season, Race.round_number, Circuit.name)
+        select(
+            Race.circuit_id, Race.season, Race.round_number, Circuit.name, SessionModel.total_laps
+        )
         .join(SessionModel, SessionModel.race_id == Race.id)
         .join(Circuit, Race.circuit_id == Circuit.id)
         .where(SessionModel.id == session_id)
     )
-    circuit_id, season, round_number, circuit_name = (await db.execute(context_query)).one()
+    circuit_id, season, round_number, circuit_name, stored_total_laps = (
+        await db.execute(context_query)
+    ).one()
 
-    total_laps_query = select(func.max(LapData.lap_number)).where(LapData.session_id == session_id)
-    total_laps = (await db.execute(total_laps_query)).scalar_one()
+    # Prefer the real scheduled distance (docs/live-race-ingestion-and-
+    # strategy-gaps-monza-2026.md Issue A) — Session.total_laps, populated
+    # historically from FastF1's own session.total_laps and live from the
+    # feed's LapCount topic (see ingest_historical.py/ingest_live_session.py).
+    # Only fall back to the old MAX(lap_number)-so-far proxy — a second
+    # query, run only when actually needed — for a session that predates
+    # this column or a live session before its first LapCount message has
+    # arrived; that proxy is meaningless mid-race (it tracks how far the
+    # race has gotten, not how long it is), which is exactly what made
+    # every downstream "laps remaining"/fuel-load feature wrong for the
+    # entire duration of a live race before this fix.
+    if stored_total_laps is not None:
+        total_laps = stored_total_laps
+    else:
+        total_laps_query = select(func.max(LapData.lap_number)).where(
+            LapData.session_id == session_id
+        )
+        total_laps = (await db.execute(total_laps_query)).scalar_one()
 
     track_temp, air_temp = await _resolve_weather(
         async_redis_client, db, season, round_number, circuit_id, compound
@@ -575,6 +604,7 @@ async def _resolve_inference_context(
         "season": int(season),
         "round_number": int(round_number),
         "total_laps": int(total_laps) if total_laps is not None else None,
+        "stored_total_laps": stored_total_laps,
         "track_temp": track_temp,
         "air_temp": air_temp,
         **position_context,
@@ -722,13 +752,35 @@ def _run_inference(
             )
             pit_probability = 0.0
 
+    # FIXED (Checkpoint 4): was lap_number + max(int(tire_life_remaining), 1)
+    # using the OLD tire_life_remaining (the raw lap_time_delta prediction,
+    # a small ±2s float with no laps-count meaning) — collapsed to
+    # current_lap + 1 almost always. predicted_life_remaining is the
+    # genuine laps-until-degradation-threshold count.
+    optimal_pit_lap = lap_number + max(int(predicted_life_remaining), 1)
+    # Clamped 2026-09-19 (docs/live-race-ingestion-and-strategy-gaps-monza-
+    # 2026.md Issue A): predicted_life_remaining caps at tire_deg_model.
+    # MAX_LOOKAHEAD_LAPS (40), so this was unbounded against real race
+    # length — the exact bug behind "Recommended: Lap 78" on a 53-lap race.
+    #
+    # Checked against resolved["stored_total_laps"] specifically, NOT
+    # resolved["total_laps"] (used above for the fuel/laps-remaining
+    # features) and NOT the local `total_laps` variable — both of those are
+    # "real value OR the MAX(lap_number)-so-far proxy," and that proxy is
+    # itself meaningless mid-race (Issue A's whole root cause). Clamping
+    # against it would silently replace one wrong number (obviously
+    # implausible, e.g. lap 78 of 53) with a DIFFERENT wrong number that
+    # looks plausible (≈ lap_number, since the proxy tracks current
+    # progress) — see this document's own research-question-3 decision on
+    # exactly this trap. stored_total_laps is None until a real value is
+    # known (predates Session.total_laps, or a live session before its
+    # first LapCount message has arrived) — left unclamped in that case; it
+    # becomes correct automatically once CP2/CP3's real value lands.
+    if resolved["stored_total_laps"] is not None:
+        optimal_pit_lap = min(optimal_pit_lap, resolved["stored_total_laps"])
+
     return {
-        # FIXED (Checkpoint 4): was lap_number + max(int(tire_life_remaining), 1)
-        # using the OLD tire_life_remaining (the raw lap_time_delta prediction,
-        # a small ±2s float with no laps-count meaning) — collapsed to
-        # current_lap + 1 almost always. predicted_life_remaining is the
-        # genuine laps-until-degradation-threshold count.
-        "optimal_pit_lap": lap_number + max(int(predicted_life_remaining), 1),
+        "optimal_pit_lap": optimal_pit_lap,
         "pit_probability": pit_probability,
         "undercut_score": 0.0,
         "overcut_score": 0.0,

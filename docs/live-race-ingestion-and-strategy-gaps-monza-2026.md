@@ -19,6 +19,15 @@
 > discovery/root-cause document only, for a future session to plan and
 > implement against. Read the Anchor Prompt at the end before starting that
 > work.
+>
+> **Re-verified 2026-09-18** against the same local DB (all Monza rows still
+> present) and the current source. All five issues confirmed real; four
+> changed materially, and several "needs investigating" questions are now
+> answered — including Issue A's `total_laps` source and Issue D's
+> red-flag confirmation. **Read section 0b next** for what changed, then
+> each issue's own dated re-verification note. Issue B's framing in
+> particular was found to be wrong and has been re-scoped; Issue C was found
+> to be blocked on evidence that no longer exists. Still no fixes attempted.
 
 ---
 
@@ -44,7 +53,58 @@ produced what's in the DB and what the UI rendered from it.
 
 ---
 
-## 1. Issue A — Pit-window recommendation exceeded the real race length (predicted lap 78 on a 53-lap race)
+## 0b. Re-verification pass (2026-09-18) — what changed
+
+Every finding above was independently re-verified against the same local
+Postgres (the Monza session's rows are all still present: 1052 `lap_data`
+rows, 1052 `strategy_predictions` rows, 33 `alerts` rows) and against the
+current source. **All five issues are real.** Four of the five changed in
+some material way, and several of this document's own "what needs
+investigating" questions are now answered — including two that were listed
+as needing a future live race or external research.
+
+| Issue | Re-verification outcome |
+|---|---|
+| A | **Confirmed, materially worse than written.** Layer 2's frequency claim is now measured, not reasoned: 94.6% null. Also: the open `total_laps` design question now has an authoritative answer (see A.1 below). |
+| B | **Confirmed, but the framing was wrong.** The real defect is score *bistability*, not primarily race-state blindness. The specific alert cited (ANT/VER at lap 38) is not what the DB shows. |
+| C | **Confirmed. The #1 research step is impossible** — no raw feed sample exists or can be recovered. |
+| D | **Confirmed and extended.** The anomaly spans laps 3-6, not just lap 4; the red-flag hypothesis is now confirmed from the DB alone; and the signal needed to fix it is *already being received and discarded*. |
+| E | **Mechanism upgraded from hypothesis to documented-recurring**, via a precedent found in this codebase's own comments. One research question closed for free. |
+
+Each issue's section below carries its own dated re-verification note with
+the real numbers. Where a number in the original text is superseded, the
+note says so explicitly rather than editing the original claim away — same
+provenance convention this project's CLAUDE.md uses.
+
+**One caveat that applies to A and B together, and was not available to the
+original investigation:** this race ran **2026-09-06**, which is *before*
+the 2026-09-11 CP1-CP3 tire-deg/pit_predictor retrain
+(`docs/tire-deg-model-quality-and-rival-pit-behavior.md`). Every model
+output captured in this session's `strategy_predictions` rows — including
+the `tire_life_remaining = 40.00` pegging that drives Issue A's arithmetic
+— comes from the **pre-retrain** models. The structural bugs are real and
+independent of model quality, but the observed *magnitudes* should not be
+assumed to still hold on current models without re-measuring.
+
+---
+
+## 1. Issue A — Pit-window recommendation exceeded the real race length (predicted lap 78 on a 53-lap race) — ✅ FIXED 2026-09-19
+
+> **✅ Fixed 2026-09-19, four checkpoints.** `Session.total_laps` now
+> stores the real scheduled race distance (migration
+> `20260918_add_total_laps_to_sessions`), populated historically from
+> FastF1's own `session.total_laps` and live from the feed's `LapCount`
+> topic (previously subscribed to nothing that carried this). Every real
+> consumer of the old `MAX(lap_number)`-so-far proxy — including a THIRD
+> instance the original investigation didn't find, in
+> `get_competitor_predicted_strategy` — now prefers the real value, and
+> `optimal_pit_lap` is clamped to it once known. See "Fix summary
+> (2026-09-19)" at the end of this section for the full implementation,
+> the real-data verification (all 155 backfillable completed R sessions
+> confirmed populated, live-endpoint checks against real Belgian GP data),
+> and a genuine pre-existing test bug found and fixed along the way
+> (unrelated to Issue A, confirmed via `git stash` against the
+> pre-this-session code).
 
 ### What the feature is supposed to do
 
@@ -131,6 +191,101 @@ in the frontend needs to be read as "replay OR live," not "replay only,"
 when reasoning about live-race behavior — worth keeping in mind for the rest
 of this document too.
 
+### Re-verified 2026-09-18 — measured, and worse than written
+
+All 1052 `strategy_predictions` rows for this session were queried directly.
+
+**Layer 1 confirmed, with a literal match rather than circumstantial
+arithmetic.** The original text hedged that "whether the driver in question
+was actually at lap 38 specifically wasn't independently re-confirmed." It
+now is — and it wasn't one driver, it was the whole field:
+
+```
+SELECT d.code, sp.lap_number, sp.optimal_pit_lap, sp.recommended_pit_lap, sp.tire_life_remaining
+  FROM strategy_predictions sp JOIN drivers d ON d.id = sp.driver_id
+ WHERE sp.session_id = '3ddc84bd-f10e-4870-9e98-631d79695beb' AND sp.lap_number = 38;
+```
+
+returns **19 rows, every single one with `optimal_pit_lap = 78` and
+`tire_life_remaining = 40.00`** (the `MAX_LOOKAHEAD_LAPS` peg), and 17 of
+the 19 with `recommended_pit_lap` NULL (only BOT and PER got 39). So "Lap
+78" was on screen for essentially any driver the user clicked at that
+moment, not a one-off.
+
+Session-wide bounds:
+
+| Measure | Value |
+|---|---|
+| `optimal_pit_lap` range | **41 to 93** (race is 53 laps) |
+| rows with `optimal_pit_lap > 53` | **778 / 1052 = 74.0%** |
+| rows with `recommended_pit_lap` NULL | **995 / 1052 = 94.6%** |
+| rows both NULL-recommendation *and* beyond-race-length | 721 |
+| `recommended_pit_lap` / `window_end` max | **53 / 53** — 0 rows beyond race length |
+
+That last row is the clean confirmation of Layer 1 as originally stated:
+the capped field is genuinely capped and never misbehaved; **only** the
+unbounded `optimal_pit_lap` escapes.
+
+**Layer 2's frequency claim is now measured, and the mechanism is proven,
+not inferred.** The original text explicitly flagged this as "reasoned from
+the code, not independently measured." Computing, for every row, the
+headroom `field_max_lap_at_predict_time − that driver's own lap_number`
+(where `field_max_lap_at_predict_time` is `MAX(lap_data.lap_number)` among
+rows whose `created_at <= sp.predicted_at`):
+
+| `recommended_pit_lap` | rows | min headroom | avg headroom | max headroom |
+|---|---|---|---|---|
+| NULL | 995 | −1 | **0.00** | **0** |
+| present | 57 | **1** | 1.05 | 2 |
+
+**Perfect separation across all 1052 rows**, with no overlap. A
+recommendation exists if and only if the field had already moved at least
+one lap past the lap being predicted for — i.e. only when the Celery worker
+was running *behind* the race. Null-rate by lap bucket confirms the same
+shape from the other direction: laps 1-19 are **100% null** (0 of 400),
+rising only to 23 of 190 in the lap 40-49 bucket as worker backlog grows.
+
+**This is a stronger conclusion than the original section drew.** Even in
+the 57 rows where a recommendation *did* appear, max headroom is 2 — so
+`pit_laps = np.arange(current_lap + 1, max_pit_lap + 1)` was searching a
+**1-2 lap window, never the intended 15**. The pit-window recommendation
+engine is not "degrading to a fallback occasionally" during a live race; it
+is **functionally dead for the entire race**, and on the rare occasions it
+produces a number at all, that number is the output of a search over one or
+two candidate laps. Fixing the unbounded-clamp alone (Layer 1) would
+therefore replace a wrong number with a *capped* wrong number — it does not
+restore the feature.
+
+### `total_laps` has an authoritative source — research question 2 is answered
+
+The original research question 2 listed only speculative options ("(a) add
+a real `total_laps` column, populated from Ergast/FastF1's own
+scheduled-laps data — needs a data source audit, does Ergast reliably carry
+this pre-race?; (b) a live-only fallback heuristic; (c) something else").
+Verified answer: **F1's own live timing feed broadcasts it directly**, and
+this project is simply not subscribed to it.
+
+- `LapCount` is a real live-timing topic — FastF1's own reference SignalR
+  client subscribes to it (`fastf1/livetiming/client.py:103`, alongside
+  `TopThree`/`RcmSeries`), and it is archived per session as
+  `LapCount.jsonStream` (`fastf1/_api.py:53`, "Lap counter").
+- Its `TotalLaps` field is explicitly **the originally scheduled lap
+  count** — FastF1's `Session._load_total_lap_count` (`fastf1/core.py`)
+  reads exactly this to populate its own public `session.total_laps`
+  property, with the comment *"'TotalLaps' is intended lap count, use last
+  value that is not None in case of wrong data being corrected later.
+  Shouldn't usually change."*
+- `ingest_live_session.py`'s `_TOPICS` (line 70) does **not** include
+  `LapCount`.
+
+So both ingestion paths have a real, authoritative source with no heuristic
+and no Ergast dependency: **live** → subscribe to `LapCount`, read
+`TotalLaps`; **historical** → FastF1's `session.total_laps`. What remains a
+genuine open decision is only *where to store it* (a `total_laps` column on
+`sessions` vs. on `races` — `sessions` looks right, since a race's R/Q/FP
+sessions have different lap counts and the column is a session property),
+and the fallback behaviour when the feed never sends it.
+
 ### Files involved
 
 - `backend/workers/prediction_worker.py` — `_run_inference` (the unbounded
@@ -145,12 +300,16 @@ of this document too.
 
 ### What needs investigating / researching before fixing
 
-1. **Independently confirm Layer 2's frequency claim with real data**, not
-   just code-reasoning — instrument or query how often `recommended_pit_lap`
-   was actually `None` across this real race's persisted `StrategyPrediction`
-   rows (the table still has this race's rows; a direct query can settle
-   this precisely) before assuming how bad/common the fallback really was.
-2. **Design a real `total_laps` source.** CLAUDE.md already documents that
+1. ~~**Independently confirm Layer 2's frequency claim with real data**~~ —
+   **✅ answered 2026-09-18, see the re-verification section above.** 94.6%
+   null, and the mechanism proved out with perfect separation on all 1052
+   rows. The follow-on finding (the search window is only ever 1-2 laps
+   wide even when it *does* return a value, so a clamp alone doesn't restore
+   the feature) is new and should drive the fix's scope.
+2. ~~**Design a real `total_laps` source.**~~ — **✅ source identified
+   2026-09-18 (`LapCount.TotalLaps` live / `session.total_laps` historical,
+   see above); only the storage location and no-feed fallback remain open.**
+   Original framing kept below for context: CLAUDE.md already documents that
    no table stores race distance anywhere (`Race`/`Circuit`/`Session` all
    lack a `total_laps` column) — this has been worked around before by using
    `MAX(lap_number)` as a proxy for a *completed* session, where it's
@@ -163,15 +322,134 @@ of this document too.
    than just the pit-window feature — anything computing "laps remaining"
    live inherits the same proxy problem (worth auditing for other call
    sites of this exact query pattern while in there).
-3. **Decide whether `optimal_pit_lap`/`predicted_pit_lap` should be clamped
-   independently**, as a defensive backstop, regardless of the `total_laps`
-   fix above — even a correct `total_laps` elsewhere doesn't help if this
-   specific field is never bounded by anything.
-4. **Re-check `isReplayActive`'s naming/semantics** while in this code —
-   whether it should be renamed for clarity, or whether live and replay
-   genuinely should keep sharing this exact code path (they may legitimately
-   want to diverge once `total_laps` is fixed, since a live session and a
-   replay of a *completed* session have different total-laps reliability).
+3. ~~**Decide whether `optimal_pit_lap`/`predicted_pit_lap` should be
+   clamped independently**~~ — **✅ done 2026-09-19 (CP4).** Clamped to
+   `Session.total_laps` specifically when known — see the fix summary
+   below for why the naive version of this (clamping against
+   `resolved["total_laps"]`, which is real-value-OR-still-the-old-proxy)
+   was a real mistake caught during implementation, not shipped.
+4. **`isReplayActive`'s naming/semantics** — not renamed as part of this
+   fix; still genuinely open, tracked in the Cross-cutting Observations
+   section below rather than re-litigated here.
+
+### Fix summary (2026-09-19)
+
+Four checkpoints, approved and implemented in sequence.
+
+- **CP1 (schema):** `Session.total_laps: int | None`, migration
+  `20260918_add_total_laps_to_sessions` — nullable, non-regressive by
+  construction. Generated and applied via the project's `/migrate` skill
+  (steps 1-8; commit deliberately skipped per instruction). `alembic
+  check` confirmed zero drift between the model and the migration.
+- **CP2 (write path):**
+  - `_ingest_common.get_or_create_session` gained an optional `total_laps`
+    param: sets it on a new row, backfills an existing NULL row, **never**
+    overwrites an existing value.
+  - `ingest_historical.py` passes `fastf1_session.total_laps` through
+    (already loaded via its existing `load(laps=True, ...)` call).
+  - `ingest_live_session.py` subscribed to the `LapCount` topic (was in
+    `_TOPICS` for no functional reason before this — no handler existed)
+    and added `_handle_lap_count`, dispatching a new
+    `update_session_total_laps` Celery task (`telemetry_worker.py`) once
+    per distinct value seen.
+  - `backend/scripts/backfill_session_total_laps.py` (new, `make
+    backfill-session-total-laps`): backfills completed R sessions from
+    `MAX(lap_number)` — correct by construction for a genuinely finished
+    race, no FastF1 fetch needed. Deliberately scoped to `Race.status ==
+    "completed"` only, per this section's own research-question-2
+    decision — a partially-live-ingested session (Monza itself) is left
+    `NULL` rather than backfilled with a value indistinguishable from a
+    real one. **Run for real against the local DB: 155 of 158 R sessions
+    backfilled** (the 3 not backfilled: Monza itself, still
+    `status="scheduled"` as designed, plus 2 completed races with zero
+    `lap_data` rows — one handled gracefully with a warning, the other
+    likewise).
+- **CP3 (read path):** `strategy_service._current_state` and
+  `prediction_worker._resolve_inference_context` now prefer the stored
+  value, falling back to the old `MAX(lap_number)` proxy only when it's
+  genuinely unknown. **A third, previously-undiscovered instance of the
+  identical bug was found and fixed in the same checkpoint:**
+  `strategy_service.get_competitor_predicted_strategy`'s own `total_laps =
+  max(lap.lap_number for lap in latest_laps)` — the same "how far has the
+  race gotten" proxy, computed in Python instead of SQL, feeding
+  `_first_pit_laps_over_threshold_batch`'s horizon calculation directly
+  and silently shrinking every competitor's pit-lap search horizon to 1
+  lap mid-race. This backs `/strategy/{session_id}/overview` — CLAUDE.md's
+  own "single most compute-expensive endpoint" — not a minor code path.
+  This also closes the layer-1 corruption the original investigation
+  flagged but didn't fully trace: `total_laps` collapsing toward
+  `current_lap` mid-race was feeding wrong values into three ML features
+  (`fuel_load_penalty`, `fuel_load_est`, `laps_to_race_end`) on every
+  single live prediction, not just the displayed pit lap — the visible
+  "Lap 78" was the symptom, this was the larger defect underneath.
+- **CP4 (clamp + frontend):** `_run_inference`'s `optimal_pit_lap` is
+  clamped to the real total_laps once known. **A real design mistake was
+  caught mid-implementation, not shipped:** the first draft clamped
+  against `resolved["total_laps"]` — which is *also* true for the
+  meaningless mid-race proxy value, not just a genuinely-known real one.
+  That would have silently replaced one wrong number (obviously
+  implausible, e.g. lap 78 of 53) with a *different* wrong number that
+  looks plausible (≈ current lap, since the proxy tracks progress) —
+  exactly the trap this section's own research-question-3 discussion
+  warned against. Fixed by threading a separate `stored_total_laps` field
+  (the real value specifically, `None` otherwise) through
+  `_resolve_inference_context`'s return and clamping against *that*, not
+  the coalesced value — caught by a fixture in the existing integration
+  test suite (`test_live_prediction_pipeline.py`, proxy=40) before it
+  reached any real verification. On the frontend,
+  `web/src/hooks/useStrategy.ts`'s `PitRecommendationView` gained
+  `isFallbackEstimate: boolean` (true only when
+  `viewFromHistoryEntry` falls back to the raw, potentially-still-unbounded
+  `predicted_pit_lap` — a pre-fix persisted row is never retroactively
+  corrected, and a live session before its first `LapCount` message
+  legitimately still has no real total_laps to clamp against). The
+  frontend has no race-length context of its own to sanity-check the
+  number, so `PitWindowCard.tsx` surfaces the uncertainty honestly instead
+  (a `~` headline prefix, "Estimated" instead of "Recommended," an
+  "Unconfirmed estimate" caption) rather than attempting a client-side
+  clamp. Desktop/mobile were checked directly and confirmed **not**
+  affected — both already, deliberately, only ever render the REST
+  `/pit-window` source (always bounded), never the history-based fallback.
+
+**Verified, not just implemented:**
+- `ruff`/`ruff format`/`mypy --strict` clean on every changed file across
+  all four checkpoints; `tsc -b`/`oxlint` clean on the frontend changes.
+- New/updated unit tests at every checkpoint (schema-adjacent
+  `get_or_create_session` tests, `_handle_lap_count`/Celery task tests,
+  `_current_state`/`_resolve_inference_context`/
+  `get_competitor_predicted_strategy` prefer-vs-fallback tests with
+  captured-argument assertions, `_run_inference` clamp tests using the
+  exact real Monza numbers, frontend `isFallbackEstimate` rendering
+  tests). Full backend unit suite: **429 passed, 0 failed** by CP4
+  (341 baseline + 88 new across the whole fix); full web vitest suite:
+  **56 passed, 0 failed**.
+- **Real integration-test runs against a genuine testcontainer Postgres**
+  at both CP3 (11 passed) and CP4 (4 passed after the bug below was
+  fixed) — not just mocks.
+- **Real-DB/live-API verification**: hit the real running
+  `/strategy/{session_id}/overview` endpoint against Belgian GP R10 (now
+  carrying a real backfilled `total_laps=44`) — responds correctly.
+  Restarted the worker container (Celery doesn't hot-reload) and
+  confirmed clean startup with `update_session_total_laps` correctly
+  registered — no import errors.
+- **A genuine pre-existing test bug found and fixed, unrelated to Issue
+  A:** `test_resilience.py::test_prediction_worker_continues_on_model_exception`
+  asserted `tire_life_remaining == 0.0` on a model-exception fallback, but
+  `_run_inference`'s real, documented, long-standing fallback is
+  `tire_deg_model.MAX_LOOKAHEAD_LAPS` (40.0) — confirmed via `git stash`
+  that this assertion failed identically against the code as it stood
+  *before* any of Issue A's fixes, so this predates and is unrelated to
+  this session's work. Fixed the test's expected values (`40.0`/
+  `lap_number + 40`) to match real production behavior, not the other way
+  around. Not currently wired into any CI workflow (`resilience` isn't a
+  marker any `.github/workflows/*.yml` selects) — a separate, real gap,
+  noted here rather than silently left.
+
+**Honest limitation:** no live race occurred during this fix. The
+real-data checks above (backfill against 155 real historical sessions,
+live-endpoint checks, exact-Monza-number unit tests) are the strongest
+verification available without one — they are not a substitute for
+watching a genuinely live race with the fix in place.
 
 ---
 
@@ -229,10 +507,87 @@ race-state gate before dispatching — so a "100%, but physically
 meaningless at this point in the race" score reaches the user exactly as
 confidently as a genuinely actionable one earlier in the race would.
 
+### Re-verified 2026-09-18 — real, but this section's framing is wrong
+
+The **alerts are real and were persisted**: 33 `UNDERCUT_THREAT` rows exist
+for this session, spanning `13:05:06` to `14:40:16` UTC — i.e. the whole
+race, right up to the closing laps. The code reads exactly as described
+(`_undercut_overcut_probability` takes no race-state input;
+`evaluate_threats` gates only on `score > UNDERCUT_ALERT_THRESHOLD = 0.5`).
+So the feature-level complaint stands. Two corrections, though, one of them
+significant.
+
+**Correction 1 — the specific alert cited above is not what the DB shows.**
+The real late-race alert messages are:
+
+```
+14:40:16  VER  Undercut threat: VER on PIA (55%)
+14:39:12  VER  Undercut threat: VER on PIA (55%)
+14:38:01  VER  Undercut threat: VER on PIA (55%)
+14:23:34  VER  Undercut threat: VER on GAS (100%)
+14:22:26  VER  Undercut threat: VER on GAS (100%)
+14:10:11  ALO  Undercut threat: ALO on PER (100%)
+```
+
+There is no ANT/VER alert. The **100%** alerts were `VER on GAS`, and
+correlating `predicted_at` back to `lap_number` puts them at **lap 30 of
+53** — not lap 38, and not "15 laps remaining." The alerts that *were*
+firing at ~15 laps to go read **55%**, comfortably above the 0.5 threshold
+but not the "100% confidence" the section describes. The user's recollection
+of the pairing and the lap was approximate; the underlying observation (a
+100% undercut alert that didn't reflect a realistic threat) is still real.
+
+**Correction 2 — and this is the important one: the primary defect is score
+*bistability*, not race-state blindness.** Lap 30 of 53 is a perfectly
+ordinary pit window — "there's no realistic chance either car pits again"
+simply does not describe the moment the 100% alert actually fired. What the
+data does show is that the score is numerically unstable lap to lap. VER's
+`undercut_score` across consecutive laps:
+
+```
+lap 29  0.070      lap 34  0.000      lap 39  0.000
+lap 30  1.000  ←   lap 35  0.000      lap 40  0.000
+lap 31  0.010      lap 36  0.035      lap 41  0.550
+lap 32  0.005      lap 37  0.200      lap 42  0.550
+lap 33  0.000      lap 38  0.465      lap 43  0.000
+```
+
+A jump from 0.070 to **1.000** and back to 0.010 on three consecutive laps
+is not a credible probability estimate under *any* race-state policy.
+Session-wide, the distribution is heavily saturated rather than spread:
+**131 of 1052 rows sit at ≥0.999 and 547 at ≤0.001** — 64% of all rows are
+pinned at one extreme or the other, with only ~36% anywhere in between.
+297 rows exceed the 0.5 alert threshold.
+
+**Why this changes the fix.** The originally-proposed remedies (a
+remaining-laps cutoff, a confidence discount that scales with laps
+remaining, a `pit_probability` cross-check) would all have suppressed the
+*late* alerts while leaving the lap-30 100%-then-1% swing completely
+untouched — because that one fires in the middle of the race, where every
+proposed race-state gate would pass it. Any real fix has to address
+calibration/stability first; a race-state gate is a reasonable second layer
+on top, not the fix.
+
+Worth noting what this is **not**: CLAUDE.md documents a separate
+saturation cause in `_resolve_position_context` (no `lap_number <=
+current_lap` bound, producing frozen race-end-anchored scores). That
+mechanism is explicitly scoped to *replaying a fully-ingested historical
+session* — Monza was genuinely live-ingested lap by lap, so "latest lap"
+tracked the real current lap throughout and that bug should not bite here.
+The saturation seen above therefore appears intrinsic to
+`_undercut_overcut_probability`'s own deterministic-delta-vs-noise balance
+(the deterministic stint-delta difference swamping
+`_sampled_noise`'s spread, driving the win fraction to 0 or 200 of 200),
+not inherited from the position-context bug. **This was reasoned from the
+two mechanisms' scopes, not measured** — quantifying the delta/noise ratio
+directly is the right first step of a future fix session.
+
 ### Files involved
 
 - `backend/services/strategy_service.py` — `_undercut_overcut_probability`,
-  `UNDERCUT_PROJECTION_LAPS`/`UNDERCUT_MONTE_CARLO_SIMS` constants
+  `UNDERCUT_PROJECTION_LAPS`/`UNDERCUT_MONTE_CARLO_SIMS` constants,
+  `_sampled_noise` (the noise term whose scale relative to the
+  deterministic delta is the likely saturation driver)
 - `backend/services/alert_service.py` — `evaluate_threats`,
   `UNDERCUT_ALERT_THRESHOLD`
 
@@ -327,6 +682,44 @@ docstring) — so this isn't a "the mechanism has never worked" situation,
 more likely "F1's real feed doesn't always signal a retirement via this one
 specific string," which the existing validation didn't happen to exercise.
 
+### Re-verified 2026-09-18 — confirmed, but research step 1 is impossible
+
+The code is exactly as described: `_RETIRED_MARKER = "RETIRED"` (line 146),
+and `_update_gap_state` (line 623) evicts only on
+`gap_to_leader_raw.strip().upper() == _RETIRED_MARKER`. LEC's DB footprint
+re-confirmed: **1 row**, `lap_number=1`, `position=3`. The other two real
+DNFs are also confirmed (STR 26 laps, ALO 23 laps) — all three stop short
+of the field's 53.
+
+**Research step 1 ("get a real recorded feed sample of LEC's actual
+retirement") cannot be done.** Checked directly:
+
+- `ingest_live_session.py` never persists raw feed messages anywhere — it
+  parses each message and discards it. There is no raw-message log, no
+  `.jsonStream` capture, no replay dump.
+- `FASTF1_CACHE_DIR` (`/tmp/fastf1_cache`) is FastF1's own HTTP cache for
+  its *historical* API, not a live-feed recorder — it holds nothing from
+  this live SignalR session.
+- Race-day container logs are gone; the compose stack has been recreated
+  since (containers are minutes old at re-verification time).
+
+So there is no path to seeing what F1 actually sent for LEC. **This changes
+the fix's sequencing rather than its substance**: either ship a
+marker-independent backstop on reasoning alone (risky — a staleness-based
+eviction heuristic tuned without ground truth can evict healthy cars, e.g.
+a car genuinely stationary in a long pit stop or under a red flag, which
+this very race had), or add raw-feed recording behind a flag *first* so the
+next live race produces the evidence, then fix against real data. The
+latter is slower but is the only option that can actually answer research
+step 2 ("what signals real F1 retirements can look like") rather than
+guessing at it.
+
+Research step 3 (did STR/ALO show the same frozen-tower symptom?) is
+likewise unanswerable retroactively — it depends on what the UI displayed,
+which was never captured — but it is worth explicitly watching for at the
+next live race with a retirement, since "only LEC" vs. "all three" still
+discriminates sharply between a feed-specific quirk and a broken mechanism.
+
 ### Files involved
 
 - `backend/scripts/ingest_live_session.py` — `_update_gap_state`,
@@ -368,7 +761,21 @@ specific string," which the existing validation didn't happen to exercise.
 
 ---
 
-## 4. Issue D — Field-wide bogus lap-4 time (real, but NOT why VER's charts were empty — see Issue E)
+## 4. Issue D — Field-wide bogus lap-4 time (real, but NOT why VER's charts were empty — see Issue E) — ✅ FIXED 2026-09-18
+
+> **✅ Fixed 2026-09-18.** `TrackStatus` now has a real handler
+> (`_handle_track_status`), accumulated per-car per-lap the same way sectors
+> already were, and a new `_is_plausible_lap` (mirroring FastF1's own
+> `Session._check_lap_accuracy`) now derives `is_valid`/`track_status`
+> instead of the old hardcoded `True`/never-set. See "Fix summary
+> (2026-09-18)" at the end of this section for the full implementation,
+> real-data verification (all 21 real lap-4 AND lap-5 rows from this exact
+> race now correctly reject, using only real recorded values), and one
+> honestly-documented residual gap (lap 3 cannot be proven fixed
+> retroactively against this already-ingested race — see that section).
+> Section 0b's re-verification findings below (the lap 3/5/6 extension, the
+> `TrackStatus`-already-subscribed finding) are what this fix is built on
+> and remain accurate.
 
 > **Correction:** this section originally conflated two separate things.
 > The user clarified afterward that during the race, **every other
@@ -456,10 +863,87 @@ reads) queries `lap_data.sector1_seconds`/`sector2_seconds`/
 separate, real observation (either finish wiring it or remove it), but not
 part of either chart incident's root cause.
 
+### Re-verified 2026-09-18 — confirmed, extended, and cheaper to fix than assumed
+
+**Extension 1: the anomaly is not one lap, it's four.** The original section
+found lap 4 only. Aggregating lap time by lap number across the field shows
+a clear multi-lap stoppage window:
+
+| lap | rows | avg | min | max |
+|---|---|---|---|---|
+| 2 | 21 | 88.5 | 86.7 | 92.3 |
+| **3** | 21 | **144.7** | 119.1 | 170.0 |
+| **4** | 21 | **1954.2** | 1948.7 | 1958.3 |
+| **5** | 21 | **197.5** | 194.6 | 200.7 |
+| **6** | 21 | **146.7** | 125.5 | 167.8 |
+| 7 | 21 | 88.1 | 86.3 | 90.8 |
+| 8 | 21 | 87.5 | 85.9 | 89.7 |
+
+Laps 3, 5 and 6 are 1.4x-2.3x a normal Monza lap — individually *plausible*
+(they look like safety-car / slow-down / restart laps, so no simple
+magnitude threshold catches them), but they are just as unrepresentative as
+lap 4 for anything that consumes lap times as real racing pace. A fix that
+only excludes the ~1955s outlier still leaves three distorted laps per
+driver marked `is_valid = True`.
+
+**Extension 2: the red-flag hypothesis is confirmed from the DB alone — no
+external lookup needed.** Research step 1 asked for real-world race-result
+or news confirmation. The DB settles it: counting per-driver compound
+changes between consecutive laps,
+
+```
+lap  4 → 20 compound changes     lap 28 → 5     lap 29 → 2
+lap 13 → 1                       lap 33 → 1     lap 47 → 1
+```
+
+**20 of the 21 running drivers changed tyre compound on the same lap.** A
+simultaneous whole-field tyre change is the unmistakable signature of a red
+flag (a stopped race permits a free tyre change); it is not something that
+can happen under green-flag racing or even under a safety car. Combined
+with a ~32-minute "lap" and the slow laps either side, this is conclusive.
+VER's own rows show it plainly: `SOFT` on laps 1-3, `MEDIUM` from lap 4.
+
+**Extension 3 — the most actionable finding: `TrackStatus` is already
+subscribed and then silently discarded.** The original section's option (b)
+was scoped as "subscribing to `RaceControlMessages`… more correct, more
+work." That's only half right. `_TOPICS` (line 70) already contains
+`TrackStatus` — but the `_on_feed` dispatch has handlers for only six
+topics (`_handle_car_data`, `_handle_position_data`, `_handle_timing_data`,
+`_handle_timing_app_data`, `_handle_weather_data`, `_handle_driver_list`).
+**There is no `_handle_track_status` anywhere in the file.** `TrackStatus`
+(and `SessionInfo`) are requested from F1, received, and dropped on the
+floor. That is also the direct answer to research step 4: `track_status`
+is NULL on all 1052 rows not because the signal is unavailable, but because
+the handler was never written. The red/yellow-flag signal needed to fix
+this issue was arriving on the wire during the whole race.
+
+**Threshold sensitivity, for designing option (a):**
+
+| predicate | rows |
+|---|---|
+| `lap_time_seconds > 600` | 21 |
+| `lap_time_seconds > 300` | **21** |
+| `lap_time_seconds > 200` | 23 |
+| `120 <= lap_time_seconds <= 200` | 65 |
+
+A `> 300s` cut isolates exactly the 21 bogus rows and nothing else, so a
+crude magnitude guard is viable as a backstop — but per Extension 1 it
+provably does *not* catch the 65 distorted-but-plausible laps, which is the
+argument for deriving `is_valid` from `TrackStatus` rather than from
+magnitude alone.
+
+**Other counts re-confirmed unchanged:** 1052 `lap_data` rows total,
+`track_status` non-null on **0**, `is_valid` true on **1052**,
+`session_elapsed_seconds` non-null on **0** (expected — CLAUDE.md documents
+this is deliberately not populated on the live path), and `sector_times`
+holds **0 rows across the entire database**, confirming the dead-table
+observation.
+
 ### Files involved
 
 - `backend/scripts/ingest_live_session.py` — `_handle_timing_data`,
-  `_parse_lap_time`
+  `_parse_lap_time`, `_TOPICS` (already lists `TrackStatus`), `_on_feed`
+  (the handler dispatch with no `TrackStatus` branch)
 - `backend/models/telemetry.py` — `SectorTime` (the unused table, tangential)
 - `backend/services/driver_service.py` — confirmed as the real data source
   for the laps/sector endpoint (reads `lap_data`'s inline columns)
@@ -496,9 +980,106 @@ part of either chart incident's root cause.
    for a live session (e.g. `safety_car_model`'s live inference path, or
    the wet-tyre `wet_track` flag)?
 
+### Fix summary (2026-09-18)
+
+Implemented options (b) and (c) from research step 2 together — a real
+`TrackStatus` handler plus deriving `is_valid` from a real signal, close to
+the full FastF1 `_check_lap_accuracy` standard rather than a bare magnitude
+cap (option (a) alone).
+
+- **`_handle_track_status`** (new) — wired into `_on_feed`'s existing
+  `TrackStatus` dispatch branch (the topic was already subscribed, see
+  section 0b; only the handler was missing). Tracks one session-wide
+  `_current_track_status`, defaulting to `"1"` (AllClear) so laps ingested
+  before this ingestor's first-ever `TrackStatus` message aren't
+  incorrectly treated as under an incident.
+- **Per-car status accumulation** — `_handle_timing_data`'s existing pass 1
+  (where sector accumulation and gap-state updates already happen
+  unconditionally per message) now also records `_current_track_status`
+  into a per-car `set[str]`, cleared into that lap's `track_status` string
+  at completion, mirroring the existing `_sector_accumulator` pattern
+  exactly. A car's previous completed lap's codes are kept separately for
+  the check below.
+- **`_is_plausible_lap`** (new, pure function) — the real replacement for
+  the hardcoded `is_valid = True`. Checks, all must hold: all three sectors
+  and lap time present; lap time under a 300s magnitude backstop (covers
+  laps ingested before any `TrackStatus` message ever arrives); the three
+  sectors sum to the lap time within 0.05s; every status code observed
+  during the lap is green/yellow only (`{"1", "2"}`); and the *previous*
+  lap's codes were clean too (FastF1's own check_3: "first lap after a
+  safety car often has timing issues"). Deliberately does **not** attempt
+  pit in/out-lap exclusion (FastF1's `PitInTime`/`PitOutTime`/
+  `FastF1Generated` checks) — no live equivalent of those fields exists yet;
+  left as a known, narrower residual gap, not attempted here.
+- **`LapDataCreate.track_status`** (new optional field) — the one schema
+  change needed so the derived value actually reaches the `lap_data` table;
+  `LapData.track_status` already existed as a column, just never populated
+  live.
+
+**Real-data verification, not just synthetic fixtures.** All 21 drivers'
+literal, actual `lap_data` values for laps 3, 4, and 5 of this exact race
+were pulled from the local DB and fed through `_is_plausible_lap` directly
+in a new permanent regression test
+(`backend/tests/unit/test_ingest_live_session.py`):
+
+- **Lap 4 (all 21 drivers) and lap 5 (all 21 drivers): confirmed rejected**,
+  using only the real recorded values with the *most charitable possible*
+  status assumption (`{"1"}`, no incident in the previous lap — i.e.
+  assuming nothing at all is known about track status). A query run
+  specifically to verify this found something the original investigation
+  didn't check: **sector1 is `NULL` for every one of the 21 real rows on
+  both lap 4 and lap 5** — so both laps are independently caught by the
+  missing-sector check alone, with no dependency on `TrackStatus` data ever
+  having existed for this race. (Lap 4's ~1955s magnitude also independently
+  fails the 300s backstop — belt and suspenders, not a single point of
+  failure.)
+- **Lap 3: confirmed NOT closeable retroactively for this race, and the
+  test says so rather than hiding it.** A query across all 21 drivers found
+  every field present and self-consistent (0 of 21 rows missing a sector),
+  and lap-3 times (120-170s) are well under the 300s magnitude backstop —
+  the *only* signal that could have caught it is `TrackStatus`, which does
+  not exist as ground truth for this already-ingested session
+  (`track_status` is `NULL` for all 1052 rows — it was ingested before this
+  fix). A dedicated test
+  (`test_is_plausible_lap_real_monza_lap3_is_a_known_uncloseable_gap`)
+  asserts the current, honest behavior (still plausible under a
+  "nothing known" assumption) and documents explicitly that this is a
+  structural gap the fix cannot close for Monza specifically — only for a
+  genuinely live-ingested *future* race, where real `TrackStatus` messages
+  would actually arrive. Lap 6 (partially sector-complete, per section 0b's
+  table) has the same residual gap for its sector-complete rows.
+
+**Checks run:** `ruff check`/`ruff format --check`, `mypy --strict` (all
+three changed files), and the backend unit suite — `test_ingest_live_session
+.py` alone: 78 passed (31 handler/derivation tests + 21 lap-4 + 21 lap-5 +
+5 lap-3 real-data cases); full `backend/tests/unit/` suite: 377 passed, 0
+failed, 0 regressions.
+
+**Explicitly out of scope / not attempted:** pit in/out-lap exclusion (noted
+above); a backfill of the existing Monza rows (`track_status` stays `NULL`
+and `is_valid` stays `True` for this race's 1052 already-ingested rows — a
+partial backfill using only magnitude/sector heuristics would silently miss
+lap 3, which was judged worse than leaving the data as-is and documented,
+matching this document's own earlier "CP5" recommendation); end-to-end
+verification against a real live race (no live race occurred during this
+fix — the real-data verification above is the strongest verification
+available without one, but it is not a substitute for one).
+
 ---
 
-## 5. Issue E — VER's lap/sector charts showed no data all race, while every other driver's updated correctly
+## 5. Issue E — VER's lap/sector charts showed no data all race, while every other driver's updated correctly — ✅ FIXED 2026-09-18
+
+> **✅ Fixed 2026-09-18.** `get_driver_laps`'s long (86400s) cache TTL is now
+> reachable only when the result is non-empty, `_is_session_live` reads
+> `False`, AND the session's `Race.status` is genuinely `"completed"` — a
+> new `_resolve_race_status` check that doesn't depend on the same 30s Redis
+> key `_is_session_live` reads, so a lapsed `gaps` key during a real
+> ingestor reconnect gap can no longer poison the cache for 24h. Verified
+> live against the real Monza session on the running stack (its actual
+> state — `status = "scheduled"`, no `gaps` key — is exactly this bug's
+> precondition): the TTL written for a real `GET /drivers/{id}/laps` call
+> was ~3s, not 86400s. See "Fix summary (2026-09-18)" at the end of this
+> section for the full implementation and test coverage.
 
 ### What the feature is supposed to do
 
@@ -623,6 +1204,51 @@ including for VER. The staleness lived entirely in the **backend's** Redis
 cache (serving the same poisoned response to every one of those refetches),
 not in any frontend polling failure.
 
+### Re-verified 2026-09-18 — mechanism upgraded from hypothesis to documented-recurring
+
+The code is exactly as quoted (`driver_service.py` lines 60/67 for the two
+TTLs, 456-461 for the selection, 373-385 for `_is_session_live`), and the
+frontend claim holds: `driverLapsQueryOptions` uses the shared key
+`["driver", "laps", sessionId, driverId]`, `refetchInterval: 10_000`, and
+`page_size: 100` — one page covers a full race distance, so there is
+**exactly one backend cache entry per driver per session** to poison. That
+is what lets a single poisoned entry blank both charts at once.
+
+**New corroboration — this exact false negative is already documented as
+having happened for real, in this codebase's own comments.** The original
+section inferred the `gaps`-key-expiry risk from the reconnect handling.
+Stronger evidence exists: `ingest_live_session.py`'s `_publish_live_gaps`
+call site carries an inline comment explaining why it republishes on
+*every* message rather than only on change —
+
+> "confirmed live (2026 Dutch GP): gating on 'did anything change' let the
+> 30s Redis TTL lapse for a minute-plus at a time whenever F1 resent
+> identical gap strings for a stretch (two cars holding a stable gap to 3
+> decimal places), which is common enough that **driver_service's
+> live-session detection (checking whether this key exists) intermittently
+> and incorrectly read as 'not live'**."
+
+So `_is_session_live` transiently returning `False` mid-race is not a
+theoretical failure mode — it is a *previously observed, previously
+fixed-once* one, and the earlier fix addressed only one of its causes
+(identical-gap-string suppression). A connection drop longer than 30s is a
+second, independent way to produce the identical lapse, and nothing in
+`get_driver_laps` is resilient to it. This moves Issue E from "leading
+hypothesis" to "known failure mode with a known precedent, one unconfirmed
+instance." It still is **not** directly confirmed for Monza specifically —
+Redis was flushed and the containers recreated long before re-verification,
+so the actual poisoned entry can never be inspected.
+
+**Research step 3 is closed at zero cost:** `_is_session_live` has exactly
+**one call site** in the entire backend — `get_driver_laps` (grep returns
+only its own definition, that one call, and two test references). There are
+no other consumers to audit, so the blast radius of a transient false
+negative is precisely this one cache.
+
+This also means the fix is well-contained: nothing else depends on
+`_is_session_live`'s correctness, so hardening `get_driver_laps` against it
+cannot regress another feature.
+
 ### Files involved
 
 - `backend/services/driver_service.py` — `get_driver_laps`, `_is_session_live`,
@@ -666,6 +1292,60 @@ not in any frontend polling failure.
    happens in practice (the "~2s reconnect loop" comment describes one
    observed bad patch, not a general rate).
 
+### Fix summary (2026-09-18)
+
+Implemented research step 2's option (a) (a status-based TTL floor) plus
+part of (b) (never long-cache an empty result), chosen over touching
+`_is_session_live` itself — its own mechanism is reasonable, per the
+research note; the gap was `get_driver_laps` trusting it alone.
+
+- **`_resolve_race_status`** (new) — a direct `Race.status` query, scoped to
+  the session, independent of the Redis `gaps` key `_is_session_live` reads.
+  A live-ingested race stays `"scheduled"` for its entire life unless
+  separately re-processed by `ingest_historical.py` (confirmed true for
+  Monza itself — `status` is still `"scheduled"` at verification time), so
+  this is a reliable signal a transient Redis gap can't fool.
+- **`get_driver_laps`** rewritten so the 86400s TTL is reachable only when
+  **all three** hold: the result is non-empty, `_is_session_live()` reads
+  `False`, **and** `_resolve_race_status()` returns `"completed"`. An empty
+  result always gets the short TTL regardless of status (research step 2's
+  option (b) — the original Dutch GP dry-run finding this module's own
+  `DRIVER_LAPS_TTL_SECONDS` comment already documents, an empty page is the
+  highest-cost thing to freeze). The extra DB query only runs on the
+  already-uncommon path (cache miss, not currently live-flagged, non-empty)
+  — the common live-polling and genuinely-historical paths cost the same as
+  before.
+
+**Verified two ways**, not just unit tests:
+
+- **Real-DB verification against the actual Monza session on the running
+  stack** — its real state (`Race.status = "scheduled"`, no `gaps` key in
+  Redis) is exactly this bug's precondition. A real authenticated
+  `GET /drivers/{id}/laps?session_id=<monza>` call was made against the live
+  backend; the Redis key written for it showed **TTL ≈ 3s**, not the 86400s
+  the old logic would have written for this exact combination.
+  - **Unit tests** (`backend/tests/unit/test_driver_service.py`): the
+  not-live/not-completed case (short TTL — the Monza-shaped bug),
+  not-live/completed (long TTL — non-regression), empty result never gets
+  the long TTL regardless of status, and a genuinely-live session (`gaps`
+  key present) short-circuits before `_resolve_race_status` is ever
+  called (confirmed via call-count assertion, not just the resulting TTL).
+
+**Checks run:** `ruff check`/`ruff format --check`, `mypy --strict`, and the
+backend unit suite — `test_driver_service.py` alone: 11 passed (4 new); full
+`backend/tests/unit/` suite: 345 passed at the time this fix landed (0
+regressions against the 341 baseline CLAUDE.md's Notes recorded before this
+session).
+
+**Not directly confirmed:** whether this exact mechanism (a transient
+`_is_session_live` false negative poisoning one driver's cache entry) is
+what actually happened to VER's charts at Monza — Redis had already been
+reset by the time of the original investigation, so that remains the
+leading, well-evidenced hypothesis rather than a confirmed root cause (see
+this section's own re-verification note above). What's now fixed is the
+mechanism itself, regardless of whether it's specifically what hit VER that
+race.
+
 ---
 
 ## 6. Cross-cutting observations (not full issues, just worth carrying forward)
@@ -676,7 +1356,20 @@ not in any frontend polling failure.
   verification.
 - **`track_status` is entirely NULL across this whole live session** — a
   standing gap in `ingest_live_session.py`, surfaced while investigating
-  Issue D but not itself chased further here.
+  Issue D but not itself chased further here. **Re-verified 2026-09-18:
+  root cause found — the `TrackStatus` topic is subscribed but has no
+  handler at all, so it is received and discarded. See Issue D's
+  re-verification note.**
+- **`SessionInfo` is likewise subscribed with no handler** (found alongside
+  the `TrackStatus` finding) — same shape, unexamined consequences. Worth a
+  look whenever anyone next touches `_on_feed`'s dispatch.
+- **`LapCount` is NOT subscribed**, and it is the authoritative source of
+  scheduled race distance F1 broadcasts live (see Issue A's re-verification
+  note). Adding it is the cleanest fix for Issue A's `total_laps` gap.
+- **No raw feed message is ever recorded anywhere**, which is what makes
+  Issue C unfixable retroactively. A flag-gated raw-message recorder would
+  make every future live-ingestion bug of this class diagnosable after the
+  fact, rather than requiring the bug to recur while someone is watching.
 - **The `SectorTime` table is dead code** (zero rows, ever, for any
   session) — confirmed unused by the one place that would plausibly read
   it. Not urgent, but worth a decision (finish wiring it, or remove it)
@@ -692,13 +1385,15 @@ not in any frontend polling failure.
 
 ## 7. Gap Summary
 
-| Issue | Correct behavior | Current behavior | Confirmed root cause | Fix complexity (early read, not final) |
+Updated 2026-09-18 to reflect the re-verification pass (section 0b).
+
+| Issue | Correct behavior | Current behavior | Confirmed root cause | Fix complexity (revised 2026-09-18) |
 |---|---|---|---|---|
-| A: pit window > race length | Never recommend past the last lap | Recommended lap 78 on a 53-lap race | Two layers: unbounded `optimal_pit_lap` field + `total_laps` proxy that's meaningless mid-race | Medium — needs a real `total_laps` source decision, plus a defensive clamp |
-| B: undercut alert ignores race state | Alert reflects a realistic strategic threat | 100% threat with 15 laps left, no pit realistically expected | `_undercut_overcut_probability` has zero race-state/remaining-laps awareness | Medium-high — needs a real design decision on what "race state aware" means |
-| C: retired driver frozen in timing tower | Retiree drops out of active standings | LEC shown all race after a lap-1 retirement | `_update_gap_state`'s eviction only fires on the exact string `"RETIRED"` | Unknown until a real feed sample is examined — could be small or could need a structural fallback |
-| D: field-wide bogus lap-4 time | Implausible values excluded/flagged, not charted raw | Every driver's lap 4 shows a ~1955s "lap" | `_parse_lap_time`/`_handle_timing_data` has no plausibility check; `is_valid` hardcoded `True` for all live laps | Low-medium once the red-flag hypothesis is confirmed |
-| E: VER's charts alone showed no data all race | Every driver's live chart updates identically | Only VER's lap/sector charts never updated; every other driver's did | `get_driver_laps`'s live-vs-historical TTL depends on `_is_session_live`, which can transiently read `False` during a real (documented) ingestor reconnect gap, poisoning that one cache entry with an 86400s TTL | Low-medium — the mechanism is well understood, needs a resilience fix (shorter default TTL, or never cache a near-empty result) rather than a new investigation |
+| A: pit window > race length | Never recommend past the last lap | 74% of all predictions exceeded race length (max lap 93); at lap 38 **every** driver showed lap 78 | Two layers: unbounded `optimal_pit_lap` + `total_laps` proxy that collapses to ≈`current_lap` mid-race, making the capped path return NULL 94.6% of the time | **✅ Fixed 2026-09-19 (4 checkpoints)** — real `Session.total_laps` (schema + both ingestion paths), 3 consumers switched to prefer it (a 3rd found beyond the original 2), `optimal_pit_lap` clamped, frontend surfaces uncertainty honestly. 155/158 real sessions backfilled; 429 backend + 56 web tests passing |
+| B: undercut score is bistable and race-state-blind | Alert reflects a realistic, stable strategic threat | Score swings 0.07 → **1.00** → 0.01 on consecutive laps; 64% of rows pinned at 0 or 1; 33 alerts fired | Primarily calibration: the deterministic stint-delta appears to swamp `_sampled_noise`, saturating the win fraction. Race-state blindness is a real but **secondary** layer | High — **re-scoped**: a remaining-laps gate would not have suppressed the observed 100% alert (it fired at lap 30 of 53). Needs calibration measurement first |
+| C: retired driver frozen in timing tower | Retiree drops out of active standings | LEC shown all race after a lap-1 retirement | `_update_gap_state`'s eviction only fires on the exact string `"RETIRED"` | **Blocked on evidence** — no raw feed was recorded and race-day logs are gone, so this cannot be root-caused retroactively. Either guess at a backstop, or add feed recording and fix after the next live race |
+| D: bogus lap times around a red flag | Implausible/unrepresentative laps flagged, not stored as valid racing laps | Laps **3-6** distorted (lap 4 ≈1955s), all marked `is_valid=True`; `track_status` NULL everywhere | No plausibility check; `is_valid` hardcoded `True`; **and `TrackStatus` is subscribed but has no handler**, so the flag signal is received and discarded | **✅ Fixed 2026-09-18** — `_handle_track_status` + `_is_plausible_lap` (FastF1-equivalent checks). All 21 real lap-4 AND lap-5 rows confirmed rejected using real DB values; lap 3 confirmed NOT closeable retroactively for this race (no real `TrackStatus` ground truth exists), documented rather than hidden |
+| E: one driver's charts showed no data all race | Every driver's live chart updates identically | Only VER's lap/sector charts never updated; every other driver's did | `get_driver_laps` picks its TTL from `_is_session_live`, which is **documented to have transiently read `False` mid-race before** (2026 Dutch GP); an unlucky cache population then gets an 86400s TTL | **✅ Fixed 2026-09-18** — `get_driver_laps` now also floors on real `Race.status == "completed"`, independent of the Redis key `_is_session_live` reads. Verified live against the real Monza session (its exact precondition): TTL written dropped from would-be 86400s to ~3s |
 
 None of these affect historically-ingested (post-race, `ingest_historical.py`)
 sessions — all five are specific to the live path
@@ -709,6 +1404,15 @@ frontend hooks that key off live telemetry).
 ---
 
 ## 8. Anchor Prompt for Resumption — paste into the new session
+
+> **Note (2026-09-18):** the prompt below is the ORIGINAL anchor, written
+> before the re-verification pass. It is still broadly accurate, but its
+> summaries of issues B, C and D are now superseded — B's framing was wrong
+> (the defect is score bistability, and the cited ANT/VER lap-38 alert is
+> not what the DB shows), C is blocked on evidence that no longer exists,
+> and D spans laps 3-6 with its red flag now confirmed. A session resuming
+> this work should read section 0b and each issue's dated re-verification
+> note rather than relying on the summary below.
 
 ```
 Read docs/live-race-ingestion-and-strategy-gaps-monza-2026.md in full before

@@ -131,6 +131,7 @@ describe("usePitRecommendation", () => {
       explanation: expect.objectContaining({ narrative: "Test narrative" }) as unknown,
       pitProbability: 0.9999,
       asOfLapNumber: 24,
+      isFallbackEstimate: false,
     })
   })
 
@@ -158,6 +159,7 @@ describe("usePitRecommendation", () => {
     expect(result.current.view?.confidenceScore).toBeNull()
     expect(result.current.view?.windowStart).toBeNull()
     expect(result.current.view?.pitProbability).toBe(0.9999)
+    expect(result.current.view?.isFallbackEstimate).toBe(true)
   })
 
   it("returns a null view during replay when there is no eligible history entry yet", () => {
@@ -187,6 +189,7 @@ describe("usePitRecommendation", () => {
       explanation: null,
       pitProbability: null,
       asOfLapNumber: null,
+      isFallbackEstimate: false,
     })
   })
 

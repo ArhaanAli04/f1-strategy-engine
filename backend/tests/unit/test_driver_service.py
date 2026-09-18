@@ -193,6 +193,12 @@ async def test_get_driver_laps_paginates_correctly(
         # _is_session_live return False (historical TTL), same as this test
         # already implicitly assumed before that call existed.
         _one_or_none_result(None),
+        # Issue E's fix (docs/live-race-ingestion-and-strategy-gaps-monza-
+        # 2026.md): a non-empty result with _is_session_live == False now
+        # also calls _resolve_race_status before the long TTL is granted —
+        # an equally-unresolvable session_id resolves to None here too,
+        # which get_driver_laps treats as "not completed" (short TTL).
+        _one_or_none_result(None),
     ]
 
     result = await driver_service.get_driver_laps(
@@ -202,6 +208,131 @@ async def test_get_driver_laps_paginates_correctly(
     assert result.total == 7
     assert result.page_size == 2
     assert len(result.items) == 2
+
+
+@pytest.mark.unit
+async def test_get_driver_laps_uses_long_ttl_only_when_race_completed(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """Issue E fix: the 86400s TTL requires a genuinely completed race.
+
+    Reproduces the exact failure mode docs/live-race-ingestion-and-strategy-
+    gaps-monza-2026.md's Issue E describes: _is_session_live reads False
+    (e.g. a transient ingestor reconnect gap let the 30s `gaps` key lapse)
+    but the race is NOT actually completed — the old logic would have
+    poisoned this cache entry with an 86400s TTL that never self-corrected
+    for the rest of the race. The fix requires Race.status == "completed"
+    on top of _is_session_live before granting the long TTL.
+    """
+    driver_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    laps = [_fake_lap(driver_id, session_id, 1)]
+    mock_db_session.execute.side_effect = [
+        _scalar_one_result(1),
+        _scalars_all_result(laps),
+        # _is_session_live: resolvable season/round, but no `gaps` key in
+        # Redis (fakeredis is empty) -> reads False, same as a real transient
+        # reconnect gap.
+        _one_or_none_result(SimpleNamespace(season=2026, round_number=13)),
+        # _resolve_race_status: race is still "scheduled", not "completed" —
+        # the exact real state of the Monza session in the doc.
+        _one_or_none_result(SimpleNamespace(status="scheduled")),
+    ]
+
+    await driver_service.get_driver_laps(fakeredis, mock_db_session, driver_id, session_id)
+
+    key = driver_service._key_driver_laps(
+        driver_id, session_id, 1, driver_service.DEFAULT_PAGE_SIZE
+    )
+    ttl = await fakeredis.ttl(key)
+    assert 0 < ttl <= driver_service.DRIVER_LAPS_LIVE_TTL_SECONDS
+
+
+@pytest.mark.unit
+async def test_get_driver_laps_uses_long_ttl_when_genuinely_completed(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """Complement to the test above: a real completed, non-live session still
+    gets the long TTL — the fix must not regress the normal historical path.
+    """
+    driver_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    laps = [_fake_lap(driver_id, session_id, 1)]
+    mock_db_session.execute.side_effect = [
+        _scalar_one_result(1),
+        _scalars_all_result(laps),
+        _one_or_none_result(SimpleNamespace(season=2026, round_number=9)),
+        _one_or_none_result(SimpleNamespace(status="completed")),
+    ]
+
+    await driver_service.get_driver_laps(fakeredis, mock_db_session, driver_id, session_id)
+
+    key = driver_service._key_driver_laps(
+        driver_id, session_id, 1, driver_service.DEFAULT_PAGE_SIZE
+    )
+    ttl = await fakeredis.ttl(key)
+    assert ttl > driver_service.DRIVER_LAPS_LIVE_TTL_SECONDS
+
+
+@pytest.mark.unit
+async def test_get_driver_laps_never_long_caches_an_empty_result(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """An empty result never gets the long TTL, even if the race resolves to
+    "completed" — an empty page is the highest-cost thing to freeze for 24h
+    (the original 2026 Dutch GP dry-run finding this module's own
+    DRIVER_LAPS_TTL_SECONDS comment documents). Only two DB calls happen
+    (count + page query) — _is_session_live/_resolve_race_status are never
+    reached for an empty result, so no further side_effect entries are
+    queued.
+    """
+    driver_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    mock_db_session.execute.side_effect = [
+        _scalar_one_result(0),
+        _scalars_all_result([]),
+    ]
+
+    await driver_service.get_driver_laps(fakeredis, mock_db_session, driver_id, session_id)
+
+    key = driver_service._key_driver_laps(
+        driver_id, session_id, 1, driver_service.DEFAULT_PAGE_SIZE
+    )
+    ttl = await fakeredis.ttl(key)
+    assert 0 < ttl <= driver_service.DRIVER_LAPS_LIVE_TTL_SECONDS
+    assert mock_db_session.execute.call_count == 2
+
+
+@pytest.mark.unit
+async def test_get_driver_laps_uses_live_ttl_when_is_session_live_true(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """A genuinely live session (gaps key present) still gets the short TTL
+    without ever reaching _resolve_race_status — unchanged behavior, just
+    confirming the new status check is short-circuited by the existing live
+    signal rather than always running.
+    """
+    driver_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    laps = [_fake_lap(driver_id, session_id, 1)]
+    mock_db_session.execute.side_effect = [
+        _scalar_one_result(1),
+        _scalars_all_result(laps),
+        _one_or_none_result(SimpleNamespace(season=2026, round_number=13)),
+    ]
+    await fakeredis.setex("f1:2026:13:gaps", 30, "{}")
+
+    await driver_service.get_driver_laps(fakeredis, mock_db_session, driver_id, session_id)
+
+    key = driver_service._key_driver_laps(
+        driver_id, session_id, 1, driver_service.DEFAULT_PAGE_SIZE
+    )
+    ttl = await fakeredis.ttl(key)
+    assert 0 < ttl <= driver_service.DRIVER_LAPS_LIVE_TTL_SECONDS
+    # Only 3 DB calls (count, page query, _is_session_live's own resolve) —
+    # _resolve_race_status must not run when _is_session_live already
+    # answered True.
+    assert mock_db_session.execute.call_count == 3
 
 
 @pytest.mark.unit
