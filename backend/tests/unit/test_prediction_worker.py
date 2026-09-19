@@ -19,7 +19,10 @@ import fakeredis as fakeredis_lib
 import joblib
 import numpy as np
 import pytest
+import redis.asyncio as redis_asyncio
+from celery import exceptions as celery_exceptions
 
+from backend.core.exceptions import NotFoundError
 from backend.services.ml import race_simulator, tire_deg_model
 from backend.workers import prediction_worker
 
@@ -1540,3 +1543,261 @@ def test_peak_projected_pit_lap_ties_resolve_to_earliest_lap() -> None:
         projected_pit_laps=[(20, 0.5), (25, 0.5)],
     )
     assert prediction_worker._peak_projected_pit_lap(distribution) == (20, 0.5)
+
+
+# --- _resolve_position_context: live standings are the primary source for a
+# live session (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+
+
+def _live_position_payload(
+    session_id: uuid.UUID, driver_id: uuid.UUID, ahead_id: uuid.UUID, source: str
+) -> str:
+    return json.dumps(
+        {
+            "session_id": str(session_id),
+            "source": source,
+            "gaps": [
+                {
+                    "driver_id": str(ahead_id),
+                    "position": 1,
+                    "gap_to_ahead_seconds": 0.0,
+                    "gap_to_behind_seconds": 1.8,
+                },
+                {
+                    "driver_id": str(driver_id),
+                    "position": 2,
+                    "gap_to_ahead_seconds": 1.8,
+                    "gap_to_behind_seconds": 0.0,
+                },
+            ],
+        }
+    )
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_uses_live_standings_first_and_skips_the_db(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A live session's DB gaps are cumulative lap-time sums that omit lap 1 for
+    everyone — F1's own live standings must be used before any DB work."""
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, "live")
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_not_called()
+    assert result["position"] == 2
+    assert result["gap_to_car_ahead"] == pytest.approx(1.8)
+    assert result["target_ahead_driver_id"] == ahead_id
+    assert result["target_behind_driver_id"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["replay", "cache"])
+async def test_resolve_position_context_does_not_treat_a_non_live_payload_as_primary(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    source: str,
+) -> None:
+    """A replay (or a cache-aside write) to the same key must not preempt the
+    bounded DB query — that path, bounded by current_lap, is right for it."""
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, source)
+    )
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_called()
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_does_not_use_a_live_payload_for_another_session(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """The gaps key is per season/round — a live FP session's standings must not
+    answer a query about a different session of the same weekend."""
+    session_id, other_session_id = uuid.uuid4(), uuid.uuid4()
+    driver_id, ahead_id = uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(other_session_id, driver_id, ahead_id, "live")
+    )
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_called()
+
+
+# --- always-on pipeline counters (V5): where the neighbours came from ---
+
+
+@pytest.mark.unit
+async def test_counter_records_neighbours_taken_from_the_live_standings(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, "live")
+    )
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert await fakeredis.hgetall("f1:2026:10:pipeline_stats") == {"neighbors_source_live": "1"}
+
+
+@pytest.mark.unit
+async def test_counter_records_neighbours_that_fell_through_to_the_db(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, uuid.uuid4(), uuid.uuid4(), 15, 2026, 10
+    )
+
+    assert await fakeredis.hgetall("f1:2026:10:pipeline_stats") == {"neighbors_source_db": "1"}
+
+
+# --- _persist_and_publish must dispose the engine even when inference raises
+# (found by the V3 shadow race: the dispose used to follow the try block, so a failed
+# prediction leaked a connection bound to a closed event loop into the next task) ---
+
+
+class _EmptyAsyncSession:
+    """Stands in for the `async with session_factory() as db:` block; the body raises first."""
+
+    async def __aenter__(self) -> "_EmptyAsyncSession":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+def _prediction_context() -> dict[str, Any]:
+    return {
+        "session_id": str(uuid.uuid4()),
+        "driver_id": str(uuid.uuid4()),
+        "compound": "MEDIUM",
+        "lap_number": 5,
+        "tyre_age_laps": 5,
+    }
+
+
+def _stub_prediction_worker_for_failure(
+    monkeypatch: pytest.MonkeyPatch, aclose: AsyncMock
+) -> tuple[MagicMock, MagicMock]:
+    """Everything _persist_and_publish touches before inference, stubbed; inference raises."""
+    monkeypatch.setattr(prediction_worker, "_load_models", lambda: {})
+    monkeypatch.setattr(prediction_worker, "_load_encoding_maps", lambda: {})
+    monkeypatch.setattr(prediction_worker, "_load_holdout_mae", lambda: {})
+    redis_stub = MagicMock()
+    redis_stub.aclose = aclose
+    monkeypatch.setattr(redis_asyncio, "from_url", lambda *a, **k: redis_stub)
+    monkeypatch.setattr(prediction_worker, "_get_session_factory", lambda: _EmptyAsyncSession)
+
+    async def _no_lap_yet(*args: object, **kwargs: object) -> dict[str, Any]:
+        raise NotFoundError("No lap data for driver in session")
+
+    monkeypatch.setattr(prediction_worker, "_resolve_inference_context", _no_lap_yet)
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(prediction_worker, "get_engine", lambda: engine)
+    publish = MagicMock()
+    monkeypatch.setattr(prediction_worker, "_publish_prediction", publish)
+    return engine, publish
+
+
+@pytest.mark.unit
+async def test_persist_and_publish_disposes_the_engine_even_when_inference_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, publish = _stub_prediction_worker_for_failure(monkeypatch, AsyncMock())
+
+    with pytest.raises(NotFoundError):
+        await prediction_worker._persist_and_publish(_prediction_context())
+
+    engine.dispose.assert_awaited_once()
+    publish.assert_not_called()  # a prediction that failed must not be announced
+
+
+@pytest.mark.unit
+async def test_persist_and_publish_still_disposes_when_closing_redis_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _stub_prediction_worker_for_failure(
+        monkeypatch, AsyncMock(side_effect=OSError("redis connection lost"))
+    )
+
+    with pytest.raises(OSError, match="redis connection lost"):
+        await prediction_worker._persist_and_publish(_prediction_context())
+
+    engine.dispose.assert_awaited_once()
+
+
+# --- run_strategy_prediction retries when its lap is not in lap_data yet (V3 finding) ---
+
+
+def _fail_persist_with(monkeypatch: pytest.MonkeyPatch, error: Exception | None) -> MagicMock:
+    persist = AsyncMock(side_effect=error)
+    monkeypatch.setattr(prediction_worker, "_persist_and_publish", persist)
+    retry = MagicMock(side_effect=celery_exceptions.Retry())
+    monkeypatch.setattr(prediction_worker.run_strategy_prediction, "retry", retry)
+    return retry
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_retries_when_the_lap_is_not_persisted_yet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = NotFoundError("No lap data for driver in session")
+    retry = _fail_persist_with(monkeypatch, error)
+
+    with pytest.raises(celery_exceptions.Retry):
+        prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_called_once_with(exc=error, countdown=3)
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_does_not_retry_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry = _fail_persist_with(monkeypatch, ValueError("bad feature vector"))
+
+    with pytest.raises(ValueError, match="bad feature vector"):
+        prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_not_called()
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_does_not_retry_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry = _fail_persist_with(monkeypatch, None)
+
+    prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_not_called()

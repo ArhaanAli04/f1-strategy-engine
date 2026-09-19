@@ -22,7 +22,9 @@ import re
 import threading
 import time as time_module
 import zlib
+from collections import Counter
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import fastf1
@@ -46,6 +48,7 @@ from backend.scripts._ingest_common import (
     get_or_create_session,
     resolve_scheduled_start,
 )
+from backend.scripts._raw_feed_recorder import RawFeedRecorder
 
 # All three use the redundant "as X" alias, not a plain import — tests (and
 # verify_live_feed_parity.py) reach them via ingest_live_session.process_lap/
@@ -137,6 +140,12 @@ _MAX_PLAUSIBLE_LAP_SECONDS = 300.0
 # a 77.655s reported gap vs an actual ~11.5s) never runs while live data is
 # flowing, and still serves as the fallback once this key naturally expires.
 _GAPS_KEY_TTL_SECONDS = 30
+
+# f1:{season}:{round}:ingest_stats — a JSON snapshot of this session's counters
+# (see F1SignalRIngestor.stats_snapshot), refreshed at most this often and kept
+# a day, so what the live feed actually did can be read after the race.
+_STATS_KEY_TTL_SECONDS = 86400
+_STATS_PUBLISH_INTERVAL_SECONDS = 15.0
 
 
 def _decode_z(payload: str) -> dict[str, Any]:
@@ -237,13 +246,12 @@ def _is_plausible_lap(
     return abs(sector_sum - lap_time_seconds) <= _SECTOR_SUM_TOLERANCE_SECONDS
 
 
-_LAPS_BEHIND_PATTERN = re.compile(r"^\+?\s*(\d+)\s*LAPS?$", re.IGNORECASE)
-
-# F1's live feed sends this exact string as GapToLeader once a car is out of
-# the race (see _parse_gap_string's own docstring, which already anticipated
-# it as one of several unparseable inputs) — _update_gap_state below treats
-# it as an explicit retirement signal, not just "no update this message".
-_RETIRED_MARKER = "RETIRED"
+# Real F1 lapped-car gap strings, confirmed against Monza 2026's archived
+# TimingData stream (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+# Issue C): "1 L", "1L", "52L" — not the "+1 LAP"/"2 LAPS" spelling this
+# pattern originally required, which meant a lapped car's gap was silently
+# never updated again and its last numeric gap was held forever.
+_LAPS_BEHIND_PATTERN = re.compile(r"^\+?\s*(\d+)\s*L(?:AP)?S?$", re.IGNORECASE)
 
 
 def _extract_string_field(raw: Any) -> str | None:
@@ -262,9 +270,11 @@ def _parse_gap_string(value: str | None) -> tuple[float | None, int]:
 
     "+1:18.234" / "1:18.234" -> (78.234, 0)
     "+0.123"                 -> (0.123, 0)
+    "1 L" / "1L" / "52L"     -> (None, 1) / (None, 1) / (None, 52)  (F1's real format)
     "+1 LAP" / "+2 LAPS"     -> (None, 1) / (None, 2)
-    "", "RETIRED", None, or anything else unparseable -> (None, 0) — the
-    caller treats this as "no update this message", not "gap is zero".
+    "", None, "LAP 14" (the leader's own lap counter), or anything else
+    unparseable -> (None, 0) — the caller treats this as "no update this
+    message", not "gap is zero".
     """
     if not value:
         return None, 0
@@ -292,6 +302,7 @@ class F1SignalRIngestor:
         driver_code_to_id: dict[str, Any],
         redis_client: redis.Redis,  # type: ignore[type-arg]
         no_auth: bool,
+        recorder: RawFeedRecorder | None = None,
     ) -> None:
         self._season = season
         self._round_number = round_number
@@ -300,6 +311,15 @@ class F1SignalRIngestor:
         self._driver_code_to_id = driver_code_to_id
         self._redis = redis_client
         self._no_auth = no_auth
+        # Optional raw-feed recorder (off unless RECORD_RAW_FEED) — see
+        # _raw_feed_recorder.py. Only ever written to, never read back here.
+        self._recorder = recorder
+        # Always-on counters describing what this session's feed actually did,
+        # published to Redis by publish_stats and logged at the end. Answers,
+        # after a live race: did F1's Position field stream (and when), which
+        # ranking source ran, how many cars were flagged out, reconnects.
+        self._stats: Counter[str] = Counter()
+        self._stats_published_at = 0.0
 
         self._laps_seen: dict[str, int] = {}
         # Per-car accumulator: sector index ("0"/"1"/"2") -> seconds, populated
@@ -334,6 +354,25 @@ class F1SignalRIngestor:
         # "gap_to_ahead" (float|None), "laps_behind" (int, deficit to the car
         # immediately ahead). Published to Redis via _publish_live_gaps.
         self._car_live_gap_state: dict[str, dict[str, Any]] = {}
+        # Per-car F1 race-status flags, from TimingData's own boolean fields:
+        # "retired" (Retired), "hidden" (ShowPosition false), "stopped"
+        # (Stopped). A car with ANY of them set is left out of the ranking and
+        # the published standings (see _is_out_of_ranking) — its gap state is
+        # kept, not deleted, so a car that recovers from a stop (LEC stopped
+        # and restarted twice at Monza 2026) rejoins with its history intact.
+        self._car_status_flags: dict[str, dict[str, bool]] = {}
+        # True once a Position field has arrived on a live "feed" diff (not
+        # just the Subscribe snapshot). F1's own archive carries frequent
+        # Position updates, but earlier live runs (2026 Dutch GP) saw it only
+        # in the snapshot — so _recompute_positions trusts F1's Position for
+        # ranking only after it has actually been seen streaming this session,
+        # and otherwise falls back to the gap-based ranking.
+        self._position_diff_seen: bool = False
+        # Counts TimingData messages handled. The feed carries no timestamps,
+        # so this arrival order is what says which of two cars crossed the line
+        # first on the same lap — used to order lapped cars (see _rank_by_gaps).
+        # Deterministic in a replay too, unlike a wall clock.
+        self._message_seq: int = 0
         # Global track status (F1's TrackStatus topic is session-wide, not
         # per-car). Defaults to AllClear so laps ingested before this
         # ingestor's first TrackStatus message ever arrives aren't
@@ -391,11 +430,16 @@ class F1SignalRIngestor:
 
     def _on_open(self) -> None:
         logger.info("Live timing connection established")
+        self._stats["connections_opened"] += 1
+        if self._recorder is not None:
+            self._recorder.record_event("opened")
         self._opened.set()
         self._closed.clear()
 
     def _on_close(self) -> None:
         logger.warning("Live timing connection closed")
+        if self._recorder is not None:
+            self._recorder.record_event("closed")
         self._opened.clear()
         self._closed.set()
 
@@ -403,6 +447,10 @@ class F1SignalRIngestor:
         if len(args) < 2:
             return
         topic, data = args[0], args[1]
+        # Recorded before handling, so a message the handler chokes on is still
+        # in the record.
+        if self._recorder is not None:
+            self._recorder.record(topic, data)
         try:
             if topic == "CarData.z":
                 self._handle_car_data(data)
@@ -653,6 +701,8 @@ class F1SignalRIngestor:
         commonly carries updates for several cars at once, and the car whose
         lap just completed is not guaranteed to be processed last).
         """
+        self._message_seq += 1
+        self._stats["timing_messages"] += 1
         lines = payload.get("Lines", {})
 
         for car_number, entry in lines.items():
@@ -683,6 +733,20 @@ class F1SignalRIngestor:
             # unlike the sector accumulator above it must NOT be gated behind
             # the "laps_completed increased" check below.
             self._update_gap_state(car_number, entry)
+            # Only a Position that arrives on a live feed diff counts — the
+            # Subscribe snapshot goes through _on_subscribe_result instead,
+            # never this method — see _position_diff_seen's own comment.
+            position_raw = entry.get("Position")
+            if isinstance(position_raw, str) and position_raw.strip().isdigit():
+                if not self._position_diff_seen:
+                    self._stats["position_first_message_seq"] = self._message_seq
+                    logger.info(
+                        "F1's Position field is streaming on the live feed: first seen on "
+                        "TimingData message %d (car %s) — ranking now follows it",
+                        self._message_seq,
+                        car_number,
+                    )
+                self._position_diff_seen = True
 
             # Record the status current AS OF this message for this car's
             # in-progress lap — unconditional (every message this car
@@ -765,6 +829,7 @@ class F1SignalRIngestor:
             }
             process_lap.delay(raw_lap)
             run_strategy_prediction.delay(raw_lap)
+            self._stats["laps_dispatched"] += 1
 
         # Republish on every message, not only when _update_gap_state detects
         # a changed value — confirmed live (2026 Dutch GP): gating on "did
@@ -777,6 +842,7 @@ class F1SignalRIngestor:
         # regardless of whether any single field's value changed, so this
         # keeps the TTL reliably warm at negligible extra cost.
         self._publish_live_gaps()
+        self.publish_stats()
 
     def _current_tyre_age(self, car_number: str, lap_number: int) -> int:
         """tyre_age_laps for a just-completed lap, from the tracked stint start_lap.
@@ -801,55 +867,116 @@ class F1SignalRIngestor:
         start_lap = self._car_stint_start_lap.get(car_number, 1)
         return max(lap_number - start_lap + 1, 0)
 
+    def _is_out_of_ranking(self, car_number: str) -> bool:
+        """Whether F1 has flagged this car retired, hidden from the tower, or stopped.
+
+        Confirmed against Monza 2026's archived feed: F1 never sends a
+        "RETIRED" gap string. It sends booleans on the car's own entry —
+        Retired, ShowPosition (false once removed from the tower) and Stopped.
+        LEC got Stopped, then Retired, then ShowPosition=false; STR got
+        Stopped then ShowPosition=false and NEVER Retired, so any one flag is
+        enough. Stopped is included because Retired can arrive 25 minutes
+        after a car actually stops (LEC), and a stationary car is not a
+        realistic undercut target; it only ever flagged the three retiring
+        cars in that race, never a pit stop (107 InPit events, zero Stopped).
+        """
+        flags = self._car_status_flags.get(car_number)
+        if not flags:
+            return False
+        return (
+            flags.get("retired", False) or flags.get("hidden", False) or flags.get("stopped", False)
+        )
+
     def _recompute_positions(self) -> None:
-        """Re-rank every known car by cumulative GapToLeader.
+        """Re-rank every car still in the race and blank the position of the rest.
 
-        F1's live feed sends the Position field exactly once, in the
-        Subscribe snapshot — never again on a later "feed" diff (confirmed
-        live, see _on_subscribe_result's docstring). Left alone,
-        _car_live_gap_state's "position" stays frozen at its pre-race value
-        for the entire session, silently going wrong on the very first pit
-        stop or overtake. GapToLeader/IntervalToPositionAhead DO stream
-        continuously, so this reconstructs a live ranking from GapToLeader
-        instead — called once per _handle_timing_data message, after every
-        car in that message has had its gap state updated.
+        Two ranking sources, chosen per call:
 
-        F1 sends a blank/unparseable GapToLeader for whoever currently leads
-        (so _update_gap_state never writes a value for them, and their state
-        stays at its None default), which makes the leader identifiable as
-        the one car with gap_to_leader still None. Everyone else ranks by
-        their own gap_to_leader, ascending. If more than one car has no
-        gap_to_leader (e.g. right after Subscribe, before any GapToLeader
-        message has arrived for anyone — or several cars that retired before
-        ever posting one), the leader can't be disambiguated from gap data
-        alone: those cars fall back to their last-known position instead of a
-        guess. This correctly reproduces the original Subscribe-snapshot
-        order for the common "no gap data at all yet" case, since every car
-        is in that fallback bucket together and _update_gap_state already
-        seeded "position" from F1's own snapshot Position field.
+        1. F1's own Position field — used once a Position update has been seen
+           streaming on a live "feed" diff (_position_diff_seen) AND every
+           ranked car has one AND they are pairwise distinct. Cars flagged out
+           of the race are dropped first and the rest ranked densely by F1's
+           order, so a retired car's slot never leaves a hole. Distinctness is
+           the transient-safety check: F1 sends one car's new Position per
+           message, so two cars can briefly share a value mid-overtake.
+        2. Otherwise the original gap-based ranking (_rank_by_gaps): needed
+           right after Subscribe, and whenever a live connection does not
+           actually stream Position (earlier live runs saw it only in the
+           snapshot, which is why this ingestor was gap-based to begin with).
+
+        A car out of the ranking (_is_out_of_ranking) gets position None, so
+        _publish_live_gaps leaves it out of the standings.
 
         Args:
             None — operates on self._car_live_gap_state.
         Returns:
             None. Mutates every known car's "position" entry in place.
         """
-        with_gap = [
-            (car, state["gap_to_leader"])
-            for car, state in self._car_live_gap_state.items()
-            if state["gap_to_leader"] is not None
-        ]
-        no_gap = [
-            car for car, state in self._car_live_gap_state.items() if state["gap_to_leader"] is None
-        ]
+        ranking: list[str] = []
+        for car, state in self._car_live_gap_state.items():
+            if self._is_out_of_ranking(car):
+                state["position"] = None
+            else:
+                ranking.append(car)
+
+        f1_positions = {car: self._car_live_gap_state[car].get("f1_position") for car in ranking}
+        f1_usable = (
+            self._position_diff_seen
+            and all(isinstance(p, int) for p in f1_positions.values())
+            and len(set(f1_positions.values())) == len(ranking)
+        )
+        ordered = (
+            sorted(ranking, key=lambda car: f1_positions[car] or 0)
+            if f1_usable
+            else self._rank_by_gaps(ranking)
+        )
+        self._stats["rankings_by_f1_position" if f1_usable else "rankings_by_gaps"] += 1
+        for i, car in enumerate(ordered, start=1):
+            self._car_live_gap_state[car]["position"] = i
+
+    def _rank_by_gaps(self, cars: list[str]) -> list[str]:
+        """Order cars by cumulative GapToLeader (the pre-Position-field method).
+
+        F1 sends a blank/unparseable GapToLeader for whoever currently leads
+        (so _update_gap_state never writes a value for them, and their state
+        stays at its None default), which makes the leader identifiable as
+        the one lead-lap car with gap_to_leader still None. Every other
+        lead-lap car ranks by its own gap_to_leader, ascending. If more than
+        one lead-lap car has no gap_to_leader (e.g. right after Subscribe,
+        before any GapToLeader message has arrived for anyone), the leader
+        can't be disambiguated from gap data alone: those cars fall back to
+        their last-known position instead of a guess, which reproduces the
+        Subscribe-snapshot order for the common "no gap data at all yet" case.
+
+        Lapped cars (F1 sends "1 L", "2L"... — see _LAPS_BEHIND_PATTERN) have
+        no seconds gap to the leader, so they go behind every lead-lap car,
+        ordered by laps down and then by their previous position. Without
+        this split a lapped car's gap_to_leader (None) would be mistaken for
+        "the leader".
+
+        Args:
+            cars: Car numbers to order (already excluding out-of-race cars).
+        Returns:
+            The same car numbers, best position first.
+        """
+        state_of = self._car_live_gap_state
+        lapped = [car for car in cars if state_of[car].get("laps_down", 0) > 0]
+        lead_lap = [car for car in cars if car not in set(lapped)]
+        with_gap = [car for car in lead_lap if state_of[car]["gap_to_leader"] is not None]
+        no_gap = [car for car in lead_lap if state_of[car]["gap_to_leader"] is None]
 
         if len(no_gap) != 1:
-            no_gap.sort(key=lambda car: self._car_live_gap_state[car]["position"] or 999)
+            no_gap.sort(key=lambda car: state_of[car]["position"] or 999)
+        lapped.sort(
+            key=lambda car: (
+                state_of[car]["laps_down"],
+                -state_of[car].get("laps_completed", 0),
+                state_of[car].get("lap_seq", 0),
+                state_of[car]["position"] or 999,
+            )
+        )
 
-        ranked: list[str] = list(no_gap)
-        ranked.extend(car for car, _ in sorted(with_gap, key=lambda pair: pair[1]))
-
-        for i, car in enumerate(ranked, start=1):
-            self._car_live_gap_state[car]["position"] = i
+        return [*no_gap, *sorted(with_gap, key=lambda car: state_of[car]["gap_to_leader"]), *lapped]
 
     def _update_gap_state(self, car_number: str, entry: dict[str, Any]) -> bool:
         """Parse Position/GapToLeader/IntervalToPositionAhead for one car.
@@ -858,43 +985,59 @@ class F1SignalRIngestor:
         potential future use/diagnostics — the caller no longer gates on every
         single TimingData message regardless of content).
 
-        A car whose GapToLeader is the explicit "RETIRED" marker is evicted
-        from _car_live_gap_state entirely rather than left in place. Without
-        this, _parse_gap_string correctly returns None for "RETIRED" (an
-        unparseable value), but the "gap_to_leader is not None" guard below
-        then means that None is simply never written — the car's gap stays
-        FROZEN at its last real value forever, and _recompute_positions keeps
-        ranking that stale entry against every other car's still-advancing
-        gap. Confirmed live via the core-feature-rebuild Checkpoint 7
-        recorded-feed harness (verify_live_feed_parity.py) against a real
-        session with 3 retirements: a retired car's frozen gap eventually
-        ranks ahead of still-racing cars whose own gap keeps growing (once
-        their real gap grows past the retiree's stale one), silently
-        shifting every trailing driver's derived position by one for the
-        rest of the race — not specific to synthesized data, this is real
-        production behavior any live race with a retirement would hit.
+        Also records F1's own race-status booleans for the car — Retired,
+        ShowPosition, Stopped (see _is_out_of_ranking for why these, and not
+        a "RETIRED" gap string, are what retirement really looks like) — and
+        F1's own Position value (kept separately as "f1_position" so the
+        derived rank in "position" and F1's raw one never overwrite each
+        other). A lapped car's GapToLeader ("1 L", "52L") sets "laps_down"
+        instead of being dropped as unparseable, which used to leave its last
+        numeric gap frozen for the rest of the race.
         """
-        gap_to_leader_raw = _extract_string_field(entry.get("GapToLeader"))
-        if gap_to_leader_raw is not None and gap_to_leader_raw.strip().upper() == _RETIRED_MARKER:
-            was_present = self._car_live_gap_state.pop(car_number, None) is not None
-            return was_present
+        flags = self._car_status_flags.setdefault(car_number, {})
+        was_out = self._is_out_of_ranking(car_number)
+        for feed_key, flag in (("Retired", "retired"), ("Stopped", "stopped")):
+            if isinstance(entry.get(feed_key), bool):
+                flags[flag] = entry[feed_key]
+        if isinstance(entry.get("ShowPosition"), bool):
+            flags["hidden"] = not entry["ShowPosition"]
 
         state = self._car_live_gap_state.setdefault(
             car_number,
             {"position": None, "gap_to_leader": None, "gap_to_ahead": None, "laps_behind": 0},
         )
-        changed = False
+        now_out = self._is_out_of_ranking(car_number)
+        changed = was_out != now_out
+        if now_out and not was_out:
+            self._stats["cars_flagged_out"] += 1
+
+        laps_completed = entry.get("NumberOfLaps")
+        if isinstance(laps_completed, int) and laps_completed > state.get("laps_completed", 0):
+            state["laps_completed"] = laps_completed
+            state["lap_seq"] = self._message_seq
+            changed = True
 
         position_raw = entry.get("Position")
         if isinstance(position_raw, str) and position_raw.strip().isdigit():
             position = int(position_raw.strip())
+            state["f1_position"] = position
             if state["position"] != position:
                 state["position"] = position
                 changed = True
 
-        gap_to_leader, _ = _parse_gap_string(_extract_string_field(entry.get("GapToLeader")))
-        if gap_to_leader is not None and state["gap_to_leader"] != gap_to_leader:
-            state["gap_to_leader"] = gap_to_leader
+        gap_to_leader, leader_laps_down = _parse_gap_string(
+            _extract_string_field(entry.get("GapToLeader"))
+        )
+        if gap_to_leader is not None:
+            if state["gap_to_leader"] != gap_to_leader or state.get("laps_down", 0) != 0:
+                state["gap_to_leader"] = gap_to_leader
+                state["laps_down"] = 0
+                changed = True
+        elif leader_laps_down > 0 and (
+            state.get("laps_down", 0) != leader_laps_down or state["gap_to_leader"] is not None
+        ):
+            state["gap_to_leader"] = None
+            state["laps_down"] = leader_laps_down
             changed = True
 
         gap_to_ahead, laps_behind = _parse_gap_string(
@@ -975,6 +1118,38 @@ class F1SignalRIngestor:
             json.dumps(payload),
         )
 
+    def stats_snapshot(self) -> dict[str, Any]:
+        """Counters for this session: what the live feed actually did.
+
+        Returns:
+            timing_messages, laps_dispatched, rankings_by_f1_position /
+            rankings_by_gaps (which ranking source ran, per TimingData
+            message), cars_flagged_out, connections_opened, subscribe_snapshots,
+            position_first_message_seq (the TimingData message on which F1's
+            Position field first streamed on a live diff — None if it never
+            did), the recording path (or None), and updated_at.
+        """
+        stats: dict[str, Any] = dict(self._stats)
+        stats["position_first_message_seq"] = self._stats.get("position_first_message_seq")
+        stats["recording"] = str(self._recorder.path) if self._recorder is not None else None
+        stats["updated_at"] = datetime.now(UTC).isoformat()
+        return stats
+
+    def publish_stats(self, *, force: bool = False) -> None:
+        """Write stats_snapshot to f1:{season}:{round}:ingest_stats (throttled unless forced)."""
+        now = time_module.monotonic()
+        if not force and now - self._stats_published_at < _STATS_PUBLISH_INTERVAL_SECONDS:
+            return
+        self._stats_published_at = now
+        try:
+            self._redis.setex(
+                f"f1:{self._season}:{self._round_number}:ingest_stats",
+                _STATS_KEY_TTL_SECONDS,
+                json.dumps(self.stats_snapshot()),
+            )
+        except redis.RedisError:
+            logger.warning("Could not publish ingest stats to Redis", exc_info=True)
+
     def start(self) -> None:
         """Connect and stream until stop() is called, reconnecting with backoff on drops."""
         backoff = 1.0
@@ -1030,6 +1205,9 @@ class F1SignalRIngestor:
             if not isinstance(result, dict):
                 return
             logger.info("Subscribe snapshot received for topics: %s", list(result.keys()))
+            self._stats["subscribe_snapshots"] += 1
+            if self._recorder is not None:
+                self._recorder.record_snapshot(result)
             driver_list = result.get("DriverList")
             if isinstance(driver_list, dict):
                 self._handle_driver_list(driver_list)
@@ -1128,6 +1306,22 @@ async def _resolve_context(
     return session_row.id, car_number_to_driver_id, driver_code_to_id
 
 
+def _log_session_summary(stats: dict[str, Any]) -> None:
+    """Log what the live feed did this session; warn if Position never streamed.
+
+    That warning is the answer to the open question from
+    docs/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c (V5):
+    if it fires after a real race, the whole race ran on the gap-based fallback.
+    """
+    logger.info("Live ingest summary: %s", stats)
+    if stats.get("timing_messages", 0) > 0 and stats.get("position_first_message_seq") is None:
+        logger.warning(
+            "F1's Position field never streamed on the live feed this session "
+            "(%d TimingData messages): ranking used the gap-based fallback throughout",
+            stats["timing_messages"],
+        )
+
+
 def run_live_ingestor(
     season: int,
     round_number: int,
@@ -1166,6 +1360,15 @@ def run_live_ingestor(
             car_number,
         )
 
+    recorder: RawFeedRecorder | None = None
+    live_settings = get_live_timing_settings()
+    if live_settings.record_raw_feed:
+        recorder = RawFeedRecorder.try_create(
+            Path(live_settings.raw_feed_record_dir), season, round_number, session_type
+        )
+        if recorder is not None:
+            logger.info("Recording the raw live feed to %s", recorder.path)
+
     ingestor = F1SignalRIngestor(
         season=season,
         round_number=round_number,
@@ -1174,6 +1377,7 @@ def run_live_ingestor(
         driver_code_to_id=driver_code_to_id,
         redis_client=redis_client,
         no_auth=no_auth,
+        recorder=recorder,
     )
 
     timer = threading.Timer(max_duration.total_seconds(), ingestor.stop)
@@ -1183,6 +1387,10 @@ def run_live_ingestor(
         ingestor.start()
     finally:
         timer.cancel()
+        ingestor.publish_stats(force=True)
+        _log_session_summary(ingestor.stats_snapshot())
+        if recorder is not None:
+            recorder.close()
         redis_client.close()
 
 

@@ -1,6 +1,26 @@
 # Live Race Ingestion & Strategy-Feature Gaps — Italian GP 2026 (Monza)
 
-> **Status: investigation only, NOT fixed.** Discovered 2026-09-11 reviewing
+> **Status (updated 2026-09-19): all five issues are now fixed** — A, D and E
+> in earlier sessions, B and C in the 2026-09-19 five-checkpoint session (see
+> each issue's own "Fix summary" and section 0c, which also lists where that
+> session **corrected** claims made elsewhere in this document). The text
+> below began as an investigation-only document and keeps its original
+> findings and dated re-verification notes for provenance.
+>
+> **Where things stand at the end of the 2026-09-19 session — read this first.**
+> Fixed and measured: B, C (plus A, D, E earlier). Built: the replay harness (V1),
+> property tests (V4), next-race counters and raw-feed recorder (V5), and the
+> **shadow-race harness (V3)**, which passed a 14-check smoke run (start to lap 12
+> of 53) and, along the way, found and fixed two real production bugs in
+> `prediction_worker.py` that no earlier check could see (section 7d). **Not done:**
+> the full-race shadow run (V3), historical calibration of the score (V2, with V6),
+> the conditional lead-lap fallback work, and anything that needs a real live race.
+> A **throwaway shadow race (season 2098) is still in the local database** and must be
+> cleaned up (section 7d, "State left behind"). Section 8 has the anchor prompt for the
+> next session; sections 7b (what was done), 7c (what remains) and 7d (V3 in full) hold
+> the detail. Nothing has been committed by the session.
+>
+> Original status: investigation only, NOT fixed. Discovered 2026-09-11 reviewing
 > the local Docker DB after a real live-ingested race — Italian GP 2026,
 > Round 13, Monza, 53 laps — that the stack ingested end-to-end while the
 > user watched the UI during the actual race. This is the first real-world,
@@ -85,6 +105,53 @@ the `tire_life_remaining = 40.00` pegging that drives Issue A's arithmetic
 — comes from the **pre-retrain** models. The structural bugs are real and
 independent of model quality, but the observed *magnitudes* should not be
 assumed to still hold on current models without re-measuring.
+
+---
+
+## 0c. Fix session (2026-09-19) — Issues B and C fixed, and what it corrected
+
+Issues B and C were fixed in five checkpoints (CP1-CP5), each with its own
+tests and checks; the per-issue "Fix summary" sections hold the detail. This
+section records what the session established about the evidence itself,
+including where it **contradicts** earlier text in this document.
+
+**The evidence source that made this possible.** Issue C's re-verification
+note said the raw feed sample for LEC's retirement "cannot be done" — that no
+recording exists or can be recovered. That was wrong. `ingest_live_session.py`
+keeps no raw messages, but F1 publishes the same per-session streams
+(`TimingData.jsonStream`, `TimingAppData`, `TrackStatus`, `DriverList`, ... —
+the files FastF1 reads) and for Monza 2026 R they are retrievable read-only
+(`fastf1._api.fetch_page`; 53,795 `TimingData` messages). Everything below
+about what F1 actually sent comes from that archive.
+
+### Corrections to earlier text
+
+| Earlier claim (where) | What the evidence showed |
+|---|---|
+| F1 signals a retirement with the string `"RETIRED"` in `GapToLeader`; the eviction was "validated against a real session with 3 retirements" (`ingest_live_session.py` docstring, this document's Issue C) | That string appears **nowhere** in Monza's 53,795 messages. F1 sends booleans on the car's own entry: `Retired`, `ShowPosition`, `Stopped`. The earlier "validation" ran `verify_live_feed_parity.py`, which **synthesized** the `"RETIRED"` marker itself from database rows — it validated the harness's own assumption, not F1's feed. |
+| Only one car (LEC) froze in the tower (Issue C) | Three retirees and four lapped cars. LEC: `Stopped` true/false/true/false, then `Retired`+`Stopped`, then `ShowPosition=false` ~27 min later. ALO: `Retired` then `ShowPosition=false`. STR: `Stopped` then `ShowPosition=false` and **never** `Retired`. Lapped cars (BOT, PER, ALB, OCO) send `"1 L"`, `"1L"`, `"52L"`, which the ingestor's `LAPS?`-only pattern never matched, so their last numeric gap was held for the rest of the race. |
+| F1 sends `Position` only once, in the Subscribe snapshot (`ingest_live_session.py`, from the 2026 Dutch GP live run) | In the archived stream `Position` arrives 14-44 times per car and forms a valid 1..N ranking at **1052 of 1052** lap completions. The archive is what F1 recorded server-side, not proof of what the live socket delivers, so the gap-based ranking was kept as a fallback (see Issue C's fix summary). |
+| Issue B's primary defect is score *bistability* — the deterministic tyre delta swamping the noise term (this document's Issue B "Correction 2") | The swings tracked the **starting gap** fed into the calculation, which was wrong (Issue B's fix summary). Once it was corrected the same model gives mostly in-between scores when the gap is under 4s; what looked like saturation is largely a legitimate near-zero for gaps too large to close in a lap. |
+
+### Verification, all measured
+Monza is the only live-ingested full race in the database, so every
+before/after number below is on that one race. Unit suite: 429 at the start
+of the session → 458 (CP1) → 481 (CP2) → 501 (CP3) → 513 (CP4) → 539 (CP5) → 564 (V4, V1) → 568 (gap-only fallback fix) → 607 (V5), always with
+`mypy --strict` and `ruff` clean repo-wide; integration tests (real Postgres
+and Redis) 4 → 16 → 23 passed across CP2, CP3 and CP5.
+
+### What this session did NOT establish
+- **No genuinely live race has run with these fixes.** The evidence is a
+  replay of F1's archived feed through the unmodified ingestor, plus tests.
+- **The archive is not the live socket.** Whether the live connection streams
+  `Position` is only observable at the next live race — the ingestor flips a
+  flag (`_position_diff_seen`) when it does.
+- **Existing Monza rows are not corrected** — stored `lap_data.position`,
+  `strategy_predictions` and alerts are as they were. CP4 re-scored them
+  offline only.
+- **Models changed since race day** (the 2026-09-11 retrain), so CP4's
+  stored-vs-rescored comparison mixes a model change with the gap change; its
+  old-gaps-vs-live-gaps comparison holds models constant and isolates the gap.
 
 ---
 
@@ -453,7 +520,16 @@ watching a genuinely live race with the fix in place.
 
 ---
 
-## 2. Issue B — Undercut threat alert ignored overall race state
+## 2. Issue B — Undercut threat alert ignored overall race state — ✅ FIXED 2026-09-19
+
+> **✅ Fixed 2026-09-19 (CP3-CP5).** The real defect was not race-state
+> blindness or score bistability as first written: a live session's undercut
+> gap came from summed lap times that omit lap 1 for every driver, and the
+> rival was chosen from stored positions that still contained retired cars.
+> Live sessions now take both from F1's own live standings, and the alert
+> layer was fixed separately (its own defect, found while measuring). See
+> "Fix summary (2026-09-19)" at the end of this section, and section 0c for
+> the corrections it makes to this section's earlier text.
 
 ### What the feature is supposed to do
 
@@ -618,9 +694,125 @@ directly is the right first step of a future fix session.
    entirely per CLAUDE.md) has any related gap — not checked in this
    session, flagged only as a "look here too" note.
 
+### Root cause, re-established 2026-09-19 (supersedes "Correction 2" above)
+
+Reading the score against the inputs it was fed, VER's `undercut_score`
+tracked the starting gap almost exactly: lap 30 (target GAS) had a summed-time
+deficit of **−0.99s** (VER "ahead") and scored 1.000; lap 33 (target ANT)
++7.85s scored 0.000; lap 37-38 (target PIA) +1.59s/+0.98s scored 0.200/0.465.
+That gap was wrong for a live session:
+
+- `_cumulative_race_time` falls back to `SUM(lap_time_seconds)` (live rows
+  have no `session_elapsed_seconds`), and **lap 1 has no recorded time for
+  any of the 22 drivers**, so every gap that opened on lap 1 is missing.
+  The red-flag laps (lap 4, ~1949-1958s, different for each driver) also feed
+  the sums with up to ~10s of cross-driver spread.
+- Over the 784 predictions that had a car ahead, the summed gap said the
+  requester was already ahead of it in **258 (33%)**, against **33 (4%)** by
+  the actual lap-crossing timestamps; median absolute error 2.56s. 66 of the
+  109 scores at >= 0.999 and 142 of the 245 above 0.5 sat on such a
+  wrong-signed gap.
+- The *rival* was also wrong: it came from stored `lap_data.position`, where
+  a car retired on lap 1 (LEC) stayed in the field for the whole race — see
+  Issue C.
+
+### Fix summary (2026-09-19)
+
+- **CP3 — gap and target from F1's live standings.**
+  `strategy_service._live_gap_deficit` reads `f1:{season}:{round}:gaps` and
+  returns the difference of the two drivers' gap-to-leader (leader = 0). It
+  only trusts a payload with `source == "live"` and a `session_id` matching
+  the session being evaluated (the key is per season/round, and a replay
+  writes to it too). It declines — and the old summed-time deficit is kept —
+  when either driver is absent (retired) or lapped, since a lapped car has no
+  seconds gap to the leader. `_undercut_overcut_probability` gained a `client`
+  argument and uses the live deficit when present; `get_undercut_score` /
+  `get_overcut_score` pass it through. `strategy_service._resolve_field_neighbors`
+  and `prediction_worker._resolve_position_context` resolve a live session from
+  the same standings *first* (target and `pit_predictor`'s gap features from
+  one source); their existing DB-then-Redis fallback is unchanged for replays
+  and historical sessions. The snapshot is the current tower, not the tower
+  as of the lap being predicted; on Monza the worker was level with the race
+  on 95% of predictions.
+- **CP4 — measured offline** (`backend/scripts/evaluate_undercut_live_gaps.py`,
+  read-only): all 1052 stored predictions re-scored on current models, old
+  gap/target vs live gap/target, same random draws.
+
+  | Measure | Old gaps | Live gaps |
+  |---|---|---|
+  | Requester "already ahead" of its target | 29.9% (299/999) | 0.5% (5/942) |
+  | Median error vs on-road crossing gap | 2.15s | 0.28s |
+  | Target was a car that had already stopped | 81 (LEC 53, ALO 28) | 2 |
+  | Scores >= 0.999 | 185 | 74 |
+  | Alert-eligible (> 0.5) | 338 | 202 |
+  | Lap-to-lap swings >= 0.9 | 57 | 37 |
+
+  VER lap 30: stored 1.000; old gaps on current models 0.665 (deficit
+  −1.00s); live gaps **0.220** (deficit +0.22s). The target changed on 182 of
+  999 comparable rows; 57 rows had no live answer and fell back to the summed
+  time. With live gaps, most scores when the gap is under 4s are in-between
+  (67%); 90% of scores at gaps over 4s are near zero, which is a legitimate
+  answer, so the earlier "64% pinned at 0 or 1" was not the defect it looked.
+- **CP5 — the alert layer had its own defect, and two gates.**
+  `alert_service.evaluate_threats` built its adjacent pairs from each
+  driver's latest stored lap row, which keeps a retiree in the order at its
+  last recorded position for the rest of the race, and it alerted the
+  trailing driver's own score against whichever car happened to be adjacent.
+  In the CP4 replay with corrected scores this produced `VER on LEC` ×16 of 44
+  alerts. It now takes the running order from the live standings
+  (`_live_standing_order`, same live-and-same-session rule as above) and
+  keeps the old order for replays and historical sessions. Two gates
+  (`_alert_suppressed_by_race_state`) suppress the *alert* — the stored
+  `undercut_score` is unchanged — when the trailing driver's tyres are 3 laps
+  old or less (`UNDERCUT_ALERT_MIN_TYRE_AGE_LAPS = 4`: 45 of the 202
+  alert-eligible predictions) or fewer than 15 laps remain
+  (`UNDERCUT_ALERT_MIN_LAPS_REMAINING = 15`: 25 of them; only applied when the
+  real distance, `Session.total_laps`, is known, never the laps-so-far proxy).
+  The gates run before the subscriber lookup and the dedup claim so a
+  suppressed alert does not use up the pair's 60s claim.
+
+  Alert replay (single subscriber, VER + ALO, current models, live gaps):
+
+  | Alert pairing | Alerts | Involving an already-stopped car |
+  |---|---|---|
+  | as sent on race day (replayed; the race sent 33) | 32 | 2 |
+  | live gaps, old alert pairing | 44 | 16 |
+  | + live-standings pairing | 46 | 2 |
+  | + both gates | **29** | 1 |
+
+  The replay reproduces 32 of the 33 real alerts (per-pair counts match for
+  ALO on PER, VER on PIA, VER on LEC, VER on GAS; the gap is ALO's early alerts
+  on ALB/BOT/STR, 11 vs 12, from ties in early-race stored positions).
+  Tyre-age alone takes 46 to 35, laps-remaining alone 46 to 40; neighbouring
+  thresholds give 26-35 alerts, so the choice is not on a knife edge. The
+  1-2 remaining "stopped car" alerts are from before F1 itself flagged LEC as
+  stopped.
+
+### Not done / limits
+- The remaining-laps gate needs `Session.total_laps`, filled live from F1's lap
+  count (Issue A). **Monza's own row is NULL**, so that gate would not have run
+  on Monza; the replay above treats it as 53. F1's feed carries `TotalLaps: 53`.
+- A driver with no stored lap row is not suppressed (nothing to judge by).
+- Replays and historical sessions still form the alert pairing from stored
+  rows (retirees linger). Left as is.
+- The alert target is not stored with the prediction: the alert pairs the
+  trailing car with the live-adjacent one, which is the same source the worker
+  used a moment earlier, but if the order changes in between they could differ.
+- The remaining alerts (`VER on RUS` ×12, `VER on ANT` ×7 in the final replay)
+  are on genuine adjacent pairs; whether they were *right* cannot be judged
+  without ground truth.
+- The 0.5 alert threshold, the two gate constants and the 60s dedup were not
+  re-derived from data beyond the sensitivity check above.
+
 ---
 
-## 3. Issue C — Retired driver (LEC) never left the timing tower
+## 3. Issue C — Retired driver (LEC) never left the timing tower — ✅ FIXED 2026-09-19
+
+> **✅ Fixed 2026-09-19 (CP1-CP2).** The "research step 1 is impossible" note
+> below was wrong: F1's archived per-session feed was retrievable and showed
+> what F1 really sends for a retirement — three boolean fields, not a
+> `"RETIRED"` string — and that lapped cars were frozen the same way. See
+> "Archive findings and fix summary (2026-09-19)" at the end of this section.
 
 ### What the feature is supposed to do
 
@@ -758,6 +950,145 @@ discriminates sharply between a feed-specific quirk and a broken mechanism.
    point to a *different*, frontend-side stale-selection bug rather than
    this backend eviction gap — worth clarifying/re-observing next race
    before assuming this is the same root cause for both UI surfaces.
+
+### Archive findings and fix summary (2026-09-19)
+
+**What F1 actually sends** (Monza 2026 R archive, `TimingData`, 53,795
+messages; stream time h:mm:ss):
+
+| Car | Signals |
+|---|---|
+| LEC (16) | `Stopped` true 1:00:58 → false 1:11:56 → true 1:12:32 → false 1:12:38; `Retired`+`Stopped` true 1:26:29; `ShowPosition` false 1:53:33. Last numeric gap `+1.759` at 1:11:56, then only `""` and `"1 L"`. |
+| ALO (14) | `Retired`+`Stopped` 2:07:58; `ShowPosition` false 2:10:42 |
+| STR (18) | `Stopped` 2:11:58; `ShowPosition` false 2:15:31; **never `Retired`** |
+
+The string `"RETIRED"` does not occur in any `GapToLeader` or
+`IntervalToPositionAhead` value. `Stopped` was only ever true for those three
+retirees (107 `InPit` events, none with `Stopped`). Lapped cars send `"1 L"`,
+`"1L"`, `"52L"` (and the leader's own counter `"LAP 14"`, which is not a
+lapped car).
+
+**Why the tower broke.** The ingestor ranks cars by `GapToLeader`, so a car
+whose gap stops updating keeps its last value: LEC held `+1.759` (P2-P3) for
+the rest of the race, shifting everyone behind it by one place. Lapped cars
+were frozen the same way, because `_LAPS_BEHIND_PATTERN` required the word
+`LAP`/`LAPS`.
+
+**Baseline** (CP1: a replay harness, `backend/scripts/verify_live_feed_archive.py`,
+that drives the unmodified ingestor with F1's recorded messages and audits what
+it publishes against F1's own per-car state; no database, Redis or Celery):
+
+- lap-completion position matched F1's own `Position` field on **117 of 1052
+  (11.1%)**; the published tower's rank was wrong for 82.7% of active-car
+  samples (+1 offset on 702,551 of them, +2 on 141,105, +4 on 27,012);
+- LEC, ALO and STR remained published to the end of the race;
+- stale numeric gaps held for lapped cars: BOT 23,225, PER 23,018, ALB 6,106,
+  OCO 2,620 published samples;
+- after dropping ghost cars and re-ranking, 11.1% were still wrong — the
+  lapped-car freeze — so fixing retirements alone would not have been enough.
+
+**Fix (CP2, `ingest_live_session.py`):**
+- A car is out of the ranking and the published standings when any of
+  `Retired`, `ShowPosition == false` or `Stopped` is set (`_is_out_of_ranking`).
+  Its gap state is kept, so a car that recovers from a stop (LEC restarted
+  twice) rejoins with its history intact. The dead `"RETIRED"` check was removed.
+- Lapped strings are parsed (`"1 L"`, `"52L"`, ...) into a `laps_down` count and
+  such cars rank behind every lead-lap car, ordered by laps down.
+- The ranking uses F1's own `Position` field once a `Position` update has been
+  seen on a live feed diff (`_position_diff_seen`; the Subscribe snapshot does
+  not count), only while every ranked car has a distinct value, and otherwise
+  falls back to the gap-based ranking. Retired cars are dropped first so no
+  hole is left.
+- `verify_live_feed_parity.py` now sends the real Retired/Stopped/ShowPosition
+  booleans instead of the invented string.
+
+**Result** (same archive, full race): lap-completion position match **100.0%**
+(1052/1052) with `Position` streaming and **94.1%** on the gap-only fallback
+(`--no-position-diffs`); ghost cars and stale lapped gaps **0** in both;
+0 swallowed handler errors. The older DB-driven harness is unchanged at
+99.0% position / 94.1% tyre age. The gap-only path's remaining misses are the
+inherent noise of gap-based ranking around pit stops.
+
+**Tests:** 29 harness tests (CP1, including a 31 KB excerpt of real F1 messages
+committed as `backend/tests/unit/fixtures/monza_2026_r13_timing_excerpt.json`
+so the fix is pinned on real messages, in CI, without network), then CP2
+replaced the four tests that pinned the invented `"RETIRED"` string with tests
+of the real signals, lapped-car parsing and the Position-vs-gap ranking choice
+in `test_ingest_live_session.py`, plus real-message regressions (both ranking
+modes) in the harness tests.
+
+**Not covered:** whether the live socket delivers `Position` (the archive is
+what F1 recorded, and the 2026 Dutch GP run saw it only in the snapshot — the
+fallback exists for that reason; the first live race will show which path runs);
+existing Monza `lap_data.position` rows keep their pre-fix values.
+
+### Multi-race replay (V1, 2026-09-19) — and a weakness it found in the gap-only fallback
+
+Monza was the only race the fix had been measured on. The replay harness
+(`--rounds 1-14`) then replayed all 14 completed 2026 races, each twice: with
+F1's `Position` field streaming, and gap-only (`Position`/`Line` stripped from
+every replayed diff — the fallback that runs if the live socket does not stream
+`Position`). Each race's snapshot boundary is detected from its own archive.
+`ret` = cars F1 flagged Retired, `hid` = cars hidden from the tower without
+ever being Retired, `F1 pos valid` = share of lap completions at which F1's own
+`Position` field formed a clean 1..N ranking.
+
+| rd | Race | Laps | ret | hid | Flags | F1 pos valid | Match (`Position`) | Gap-only, before | Gap-only, after |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | Australian | 1003 | 4 | 2 | VSC | 100.0% | 100.0% | 85.6% | 92.0% |
+| 2 | Chinese | 919 | 6 | 1 | SC | 100.0% | 100.0% | 90.9% | 96.4% |
+| 3 | Japanese | 1106 | 1 | 1 | SC | 100.0% | 100.0% | 94.1% | 94.8% |
+| 4 | Miami | 1038 | 2 | 2 | SC | 87.8% | 100.0% | 92.4% | 94.1% |
+| 5 | Canadian | 1206 | 3 | 3 | VSC | 99.7% | 99.3% | 73.4% | 90.5% |
+| 6 | Monaco | 1445 | 4 | 2 | RED, SC | 100.0% | 100.0% | 81.0% | 95.2% |
+| 7 | Barcelona | 1234 | 6 | 1 | VSC | 96.4% | 98.8% | 72.2% | 90.0% |
+| 8 | Austrian | 1338 | 4 | 0 | VSC | 100.0% | 100.0% | 81.5% | 93.8% |
+| 9 | British | 1111 | 1 | 1 | SC, VSC | 100.0% | 99.6% | 79.8% | 93.2% |
+| 10 | Belgian | 871 | 2 | 1 | SC, VSC | 100.0% | 100.0% | 92.2% | 92.2% |
+| 11 | Hungarian | 1429 | 2 | 1 | VSC | 100.0% | 99.4% | 78.2% | 92.0% |
+| 12 | Dutch | 1366 | 3 | 3 | RED, VSC | 100.0% | 100.0% | 65.3% | 86.3% |
+| 13 | Italian | 1052 | 2 | 1 | RED, SC, VSC | 100.0% | 100.0% | 94.1% | 94.1% |
+| 14 | Spanish | 1105 | 3 | 1 | VSC | 100.0% | 100.0% | 80.3% | 87.4% |
+| | **All 14** | **16,223** | | | | | **99.8%** | **82.0%** | **92.2%** |
+
+Across every race and both modes: **0 ghost cars, 0 stale lapped gaps, 0
+swallowed handler errors.** The `Position`-streaming result (98.8%-100% per
+race) is unchanged by the fix below. Where F1's own `Position` was not always a
+clean ranking (Miami 87.8%, Barcelona 96.4%) the ingestor briefly used the gap
+ranking and still matched at 100% and 98.8%.
+
+**The weakness.** Gap-only accuracy was 82.0% overall and ranged from 94.1%
+(Monza, the race the fix was built on) down to 65.3% (Dutch). If the live socket
+does not stream `Position` this is what production would have run on.
+
+**Diagnosis** (Dutch GP, gap-only replay; every adjacent pair of published cars
+compared with F1's order; 1,368,479 pairs): 12.6% were in the wrong order, and
+**128,017 of the 171,790 wrong pairs (74.5%) were two lapped cars** — lapped/lapped
+neighbours were wrong **34.9%** of the time, against 4.4% for two lead-lap cars
+and 3.4% for a lapped car next to a lead-lap one. The cause was the tie-break
+added for lapped cars in the Issue C fix: a lapped car has no seconds gap, so
+they were ordered by laps down and then by their *previous position*, which
+never updates — two lapped cars that pass each other stayed in the old order.
+(The errors were symmetric swaps, −1 and +1, not a shift.)
+
+**Fix (`ingest_live_session.py`, `_rank_by_gaps`).** Lapped cars are ordered the
+way timing orders them: fewer laps down, then more laps completed, then whoever
+crossed the line first on that lap. The feed carries no timestamps, so "first"
+is the arrival order of the message in which each car's lap count last rose
+(`_message_seq`, `lap_seq`), which is also deterministic in a replay. The
+previous position remains only a last tie-break.
+
+**Result:** the Dutch GP's lapped/lapped inversion rate fell 34.9% → 5.5%, its
+lap-completion match 65.3% → 86.3%, and gap-only accuracy over all 14 races
+82.0% → **92.2%** (range now 86.3%-96.4%).
+
+**Still open.** Gap-only is not as good as `Position`. What remains on the Dutch
+GP (4.7% of pairs in the wrong order) is mostly two lead-lap cars: of those
+42,268 wrong pairs about 34% have held gaps under 1s (ordinary noise), about 26%
+involve a car in or just out of the pits, and about 35% involve a gap update more
+than 40s old. Those are observations; no hypothesis for the stale updates has
+been tested and nothing was changed for them. The weakest races are now Dutch
+(86.3%) and Spanish (87.4%).
 
 ---
 
@@ -1363,13 +1694,16 @@ race.
 - **`SessionInfo` is likewise subscribed with no handler** (found alongside
   the `TrackStatus` finding) — same shape, unexamined consequences. Worth a
   look whenever anyone next touches `_on_feed`'s dispatch.
-- **`LapCount` is NOT subscribed**, and it is the authoritative source of
-  scheduled race distance F1 broadcasts live (see Issue A's re-verification
-  note). Adding it is the cleanest fix for Issue A's `total_laps` gap.
-- **No raw feed message is ever recorded anywhere**, which is what makes
-  Issue C unfixable retroactively. A flag-gated raw-message recorder would
-  make every future live-ingestion bug of this class diagnosable after the
-  fact, rather than requiring the bug to recur while someone is watching.
+- **`LapCount` is now subscribed and handled** (Issue A's fix, 2026-09-19); it
+  was the authoritative source of the scheduled race distance. *(Originally
+  written as "not subscribed"; kept as a dated correction.)*
+- **The live ingestor still records no raw feed message**, but this turned out
+  not to make Issue C unfixable: F1 publishes the same per-session streams
+  and they can be downloaded afterwards (see section 0c) — which is how Issue
+  C was actually root-caused. A flag-gated raw recorder would still be worth
+  having: the archive is what F1 recorded server-side, and only a recording
+  made by the ingestor itself can show what the live socket really delivered
+  (e.g. whether `Position` streams live).
 - **The `SectorTime` table is dead code** (zero rows, ever, for any
   session) — confirmed unused by the one place that would plausibly read
   it. Not urgent, but worth a decision (finish wiring it, or remove it)
@@ -1390,8 +1724,8 @@ Updated 2026-09-18 to reflect the re-verification pass (section 0b).
 | Issue | Correct behavior | Current behavior | Confirmed root cause | Fix complexity (revised 2026-09-18) |
 |---|---|---|---|---|
 | A: pit window > race length | Never recommend past the last lap | 74% of all predictions exceeded race length (max lap 93); at lap 38 **every** driver showed lap 78 | Two layers: unbounded `optimal_pit_lap` + `total_laps` proxy that collapses to ≈`current_lap` mid-race, making the capped path return NULL 94.6% of the time | **✅ Fixed 2026-09-19 (4 checkpoints)** — real `Session.total_laps` (schema + both ingestion paths), 3 consumers switched to prefer it (a 3rd found beyond the original 2), `optimal_pit_lap` clamped, frontend surfaces uncertainty honestly. 155/158 real sessions backfilled; 429 backend + 56 web tests passing |
-| B: undercut score is bistable and race-state-blind | Alert reflects a realistic, stable strategic threat | Score swings 0.07 → **1.00** → 0.01 on consecutive laps; 64% of rows pinned at 0 or 1; 33 alerts fired | Primarily calibration: the deterministic stint-delta appears to swamp `_sampled_noise`, saturating the win fraction. Race-state blindness is a real but **secondary** layer | High — **re-scoped**: a remaining-laps gate would not have suppressed the observed 100% alert (it fired at lap 30 of 53). Needs calibration measurement first |
-| C: retired driver frozen in timing tower | Retiree drops out of active standings | LEC shown all race after a lap-1 retirement | `_update_gap_state`'s eviction only fires on the exact string `"RETIRED"` | **Blocked on evidence** — no raw feed was recorded and race-day logs are gone, so this cannot be root-caused retroactively. Either guess at a backstop, or add feed recording and fix after the next live race |
+| B: undercut score is bistable and race-state-blind | Alert reflects a realistic, stable strategic threat | Score swings 0.07 → **1.00** → 0.01 on consecutive laps; 33 alerts fired, mostly for a back-marker or a retired rival | **Re-established 2026-09-19:** the starting gap was wrong for a live session (summed lap times omit lap 1 for every driver; the rival came from stored positions that still contained retirees), plus an alert-layer defect (pairs built from each driver's latest stored row, so a retiree stayed in the order) | **✅ Fixed 2026-09-19 (CP3-CP5)** — gap and rival from F1's live standings (live-and-same-session payloads only, old path kept otherwise); alert pairing from the live standings; alerts suppressed for tyres <= 3 laps old and < 15 laps left (stored score unchanged). Monza offline: 'already ahead' 29.9% → 0.5%, gap error 2.15s → 0.28s, scores >= 0.999 185 → 74, alerts 46 → 29 (16 → 1-2 involving a stopped car). Not yet seen on a real live race |
+| C: retired driver frozen in timing tower | Retiree drops out of active standings | LEC shown all race after a lap-1 retirement; ALO/STR and four lapped cars frozen too | F1 never sends a `"RETIRED"` string — it sends `Retired`/`ShowPosition`/`Stopped` booleans; lapped cars send `"1 L"`/`"52L"`, which the parser never matched | **✅ Fixed 2026-09-19 (CP1-CP2)** — root-caused from F1's archived feed (not impossible, as first written). Retired/hidden/stopped cars leave the ranking; lapped strings parsed; ranking from F1's `Position` once streaming, gap-based fallback. Full-race replay: position match 11.1% → 100% (94.1% on the fallback), ghost cars 3 → 0, stale lapped gaps 0. Across 14 archived 2026 races: 99.8% with `Position`, 92.2% gap-only (82.0% before the lapped-car ordering fix), 0 ghost cars. Live-socket delivery of `Position` unconfirmed |
 | D: bogus lap times around a red flag | Implausible/unrepresentative laps flagged, not stored as valid racing laps | Laps **3-6** distorted (lap 4 ≈1955s), all marked `is_valid=True`; `track_status` NULL everywhere | No plausibility check; `is_valid` hardcoded `True`; **and `TrackStatus` is subscribed but has no handler**, so the flag signal is received and discarded | **✅ Fixed 2026-09-18** — `_handle_track_status` + `_is_plausible_lap` (FastF1-equivalent checks). All 21 real lap-4 AND lap-5 rows confirmed rejected using real DB values; lap 3 confirmed NOT closeable retroactively for this race (no real `TrackStatus` ground truth exists), documented rather than hidden |
 | E: one driver's charts showed no data all race | Every driver's live chart updates identically | Only VER's lap/sector charts never updated; every other driver's did | `get_driver_laps` picks its TTL from `_is_session_live`, which is **documented to have transiently read `False` mid-race before** (2026 Dutch GP); an unlucky cache population then gets an 86400s TTL | **✅ Fixed 2026-09-18** — `get_driver_laps` now also floors on real `Race.status == "completed"`, independent of the Redis key `_is_session_live` reads. Verified live against the real Monza session (its exact precondition): TTL written dropped from would-be 86400s to ~3s |
 
@@ -1403,8 +1737,458 @@ frontend hooks that key off live telemetry).
 
 ---
 
+## 7b. Progress log — the 2026-09-19 session
+
+### Starting point and scope
+Issues A, D and E were already fixed (2026-09-18/19). This session's brief was
+to re-verify the document's findings against the code and the real Monza data,
+then fix **B** and **C**, then build the verification needed to trust the
+fixes. Nothing was committed or deployed by the session; committing, the PR and
+the CLAUDE.md update are left to the project owner.
+
+### What was done, in order
+
+| Step | What | Outcome |
+|---|---|---|
+| Re-verification | Re-read B and C against the code and the local Monza data; downloaded F1's archived per-session feed for the race (`fastf1._api.fetch_page`) | B's cause was the starting gap, not bistability; C's "evidence impossible" was wrong — the archive showed F1 never sends `"RETIRED"` (section 0c) |
+| **CP1** | Replay harness `verify_live_feed_archive.py`: drives the unmodified ingestor with F1's recorded messages, audits the published standings against F1's own per-car state; 31 KB real-message fixture | Baseline: position match 11.1%, ghost cars LEC/ALO/STR, stale gaps on 4 lapped cars |
+| **CP2** | Ingestor: retirement by `Retired`/`ShowPosition`/`Stopped`, lapped-string parsing (`"1 L"`, `"52L"`), ranking from F1's `Position` once seen streaming with a gap-based fallback | Monza: position match 100% (94.1% on the fallback), ghost cars and stale lapped gaps 0 |
+| **CP3** | `strategy_service._live_gap_deficit`; undercut/overcut gap and neighbours from F1's live standings (live + same-session payloads only, old path kept otherwise) | Spot check: VER lap 30 deficit +0.22s vs −0.99s from summed lap times |
+| **CP4** | Offline re-score of all 1052 Monza predictions, old gaps vs live gaps (`evaluate_undercut_live_gaps.py`, read-only) | "Already ahead" 29.9% → 0.5%; gap error 2.15s → 0.28s; scores ≥ 0.999 185 → 74 |
+| **CP5** | `alert_service`: pairing from live standings; alerts suppressed for tyres ≤ 3 laps old and < 15 laps left | Alert replay 46 → 29; alerts involving a stopped car 16 → 1 |
+| **CP6** | This document | Sections 0c, B/C fix summaries, table rows |
+| Data | Monza `sessions.total_laps = 53` (local Postgres; guarded `WHERE total_laps IS NULL`) | Value from F1's own `TotalLaps`; `Race.status` deliberately left `scheduled` |
+| Ops | `docker compose restart worker` (bind-mounted `backend/`, so a restart loads the new code); verified `ready`, changed symbols present in the container, imports clean | — |
+| **V4** | 13 property-test cases (scoring, live deficit, ranking, alert gates), plus a mutation check | 8 of 8 deliberate breakages caught by the property tests (and by the example tests); files restored, checksums verified |
+| **V1** | Replayed all 14 completed 2026 races, both ranking modes (`--rounds 1-14`) | 16,223 lap completions; ghosts/stale lapped gaps/handler errors 0; `Position` 99.8%, gap-only 82.0% |
+| Fallback fix | Diagnosed the gap-only weakness on the Dutch GP (74.5% of wrong pairs were lapped/lapped); lapped cars now ordered by laps completed then line-crossing order | Gap-only 82.0% → 92.2%; `Position` path unchanged |
+| **V5** | Always-on counters and logs; flag-gated raw-feed recorder (`recordings/`; on by default in the Docker stack); harness `--recording` mode; worker recreated for the new env and mount | Built and verified on replayed data; awaiting a live race (section 7c) |
+| **V3** | Shadow-race harness `shadow_race.py` (`run` / `verify` / `cleanup`): feeds Monza's archived messages through the real ingestor into the running Docker stack under a throwaway season-2098 race, then runs 14 automatic checks | Smoke (start to lap 12 of 53, 1x): 14 of 14 pass after two production fixes. It first found a `dispose()` bug that could wedge the pipeline and a lap-persist ordering race (6.4% of laps without a prediction), both fixed (section 7d). Full-race run not done yet |
+
+### Decisions and the reasons
+- **B: gap and target from F1's live standings (Option 1), not a patched lap-time sum.** F1's gap is authoritative; a corrected sum would still be an approximation from ingest-time jitter. Live payloads are trusted only with `source == "live"` and a matching `session_id`; otherwise the old path runs, so replays and historical sessions are unchanged.
+- **C: `Stopped` hides a car** until cleared. It was only ever true for the three retirees in Monza (107 `InPit` events, none with `Stopped`), and `Retired` can arrive ~25 minutes after a car stops.
+- **C: `Position` first, gap-based fallback kept.** The archive shows `Position` complete, but the 2026 Dutch GP live run saw it only in the snapshot, so `Position` is trusted only after it has been seen on a live diff.
+- **CP5: the gates suppress the alert, not the score.** The stored `undercut_score` stays an honest probability; thresholds (tyre age ≥ 4, laps left ≥ 15) came from the measured Monza buckets and give 26-35 alerts at neighbouring values (29 chosen), so they are not on a knife edge. The remaining-laps gate needs the real `Session.total_laps` and is off when unknown.
+- **Monza `total_laps`: filled, status not flipped.** Marking Monza `completed` would change which race the Strategy Simulator and Driver Style page pick, and Driver Style would likely break for 2026 (no tyre-degradation backfill for Monza).
+
+### Corrections made along the way
+- The lapped-car tie-break added in CP2 (previous position) was the largest source of gap-only error; V1 exposed it and the fallback fix replaced it.
+- CP4 found a defect that was not in the original brief: `alert_service` built its pairs from each driver's latest stored lap row, so a retiree stayed in the order (CP5).
+- A test helper (`_scalar_result`) only stubs `scalar_one`, so a query reading `scalar_one_or_none` silently got `float(MagicMock()) == 1.0`; one existing undercut test passes on that coincidence. Left as is; new tests use an explicit `_elapsed_result`.
+- The unit-suite baseline at the start of the session was 429, not the older 341 in CLAUDE.md.
+
+### Files
+- **Production code changed:** `backend/scripts/ingest_live_session.py` (CP2, lapped ordering), `backend/services/strategy_service.py` and `backend/workers/prediction_worker.py` (CP3), `backend/services/alert_service.py` (CP5).
+- **Dev tools:** new `backend/scripts/verify_live_feed_archive.py` (CP1; `--rounds`, `--no-position-diffs`, `--excerpt`, `--write-excerpt`, `on_publish` hook) and `backend/scripts/evaluate_undercut_live_gaps.py` (CP4/CP5); `backend/scripts/verify_live_feed_parity.py` now sends the real Retired/Stopped/ShowPosition booleans instead of the invented string.
+- **Tests:** new `test_verify_live_feed_archive.py`, `test_evaluate_undercut_live_gaps.py`, fixture `backend/tests/unit/fixtures/monza_2026_r13_timing_excerpt.json` (31 KB of real F1 messages); extended `test_ingest_live_session.py`, `test_strategy_service.py`, `test_prediction_worker.py`, `test_alert_service.py`.
+- **V5:** new `backend/scripts/_raw_feed_recorder.py` and `backend/tests/unit/test_raw_feed_recorder.py`; counters in `ingest_live_session.py`, `strategy_service.py`, `prediction_worker.py`, `alert_service.py`; `--recording` in `verify_live_feed_archive.py`; settings in `backend/core/config.py`; `.env.example`, `.gitignore` (`/recordings/`) and `infra/docker/docker-compose.yml` (worker env + `./recordings` mount).
+- **V3 (added later the same day):** new `backend/scripts/shadow_race.py` and `backend/tests/unit/test_shadow_race.py` (36 tests); **two production fixes in `backend/workers/prediction_worker.py`** (the engine `dispose()` in `_persist_and_publish`, and the bounded retry in `run_strategy_prediction`) with five new tests in `test_prediction_worker.py`. See section 7d. These two are outside the original B/C scope; they were made because the shadow race exposed them.
+- **Data / environment:** local Postgres `sessions.total_laps` for Monza; the worker container restarted several times (plain `docker restart docker-worker-1` is enough for code changes — `backend/` is bind-mounted; recreate with `--env-file .env` only when compose settings change). Supabase, S3 (read-only use), and the real Monza rows and Redis keys were not modified (the shadow harness checks this itself). A throwaway season-2098 race remains locally (section 7d).
+
+### Checks, end of session
+Unit suite 429 → 458 (CP1) → 481 (CP2) → 501 (CP3) → 513 (CP4) → 539 (CP5) → 564
+(V4, V1) → 568 (fallback fix) → **607** (V5), 0 failures throughout. Integration tests (real
+Postgres and Redis): 4 (CP2), 16 (CP3), 23 (CP5), 4 (fallback fix, ingestor
+tests only), 23 (V5). `mypy backend/ --strict` and `ruff check` / `ruff format --check`
+clean repo-wide at every checkpoint (154 files at the end). The older DB-driven
+parity harness stayed at 99.0% position / 94.1% tyre age (Belgian GP).
+
+### Reproducing the measurements
+```
+python -m backend.scripts.verify_live_feed_archive --season 2026 --round 13            # one race
+python -m backend.scripts.verify_live_feed_archive --season 2026 --rounds 1-14         # V1 table (~7 min)
+python -m backend.scripts.verify_live_feed_archive --season 2026 --round 12 --no-position-diffs   # gap-only fallback
+python -m backend.scripts.verify_live_feed_archive --excerpt backend/tests/unit/fixtures/monza_2026_r13_timing_excerpt.json
+python -m backend.scripts.evaluate_undercut_live_gaps                                  # CP4/CP5 (~90 s; needs DB + S3)
+```
+
+---
+
+## 7c. Remaining verification and open work
+
+The fixes are proven on the inputs (gaps, targets, rankings) and on one real race
+plus 14 archived ones. Four things are not yet established: that the score means
+what it says (V2), that the pieces work together across real processes (V3),
+what the live socket actually delivers (V5), and how good the gap-only fallback
+can get (lead-lap work). Planned order: **V5 (now built), then V3 and V2 while the next
+race is awaited, then the lead-lap fallback only if V5 shows the fallback is
+what runs live.** V6 (case studies) folds into V2. V4 and V1 are done (7b).
+**Status at the end of the 2026-09-19 session:** V3 is built and smoke-tested (full
+results and the two bugs it found are in section 7d); its full-race run is still to do.
+V2 and the lead-lap work are untouched.
+
+### V5 — next-race instrumentation and a raw-feed recorder (built 2026-09-19; awaiting a live race)
+**Goal.** Settle whether the live socket streams `Position`, and make a real live
+race replayable exactly as delivered.
+
+**What was built.**
+- **Always-on counters and logs.**
+  - The ingestor logs once when F1's race-order `Position` field first streams on a
+    live diff (with the TimingData message number), and at the end of a session logs a
+    summary — with a **warning if `Position` never streamed**, meaning the whole race
+    ran on the gap-based fallback.
+  - The ingestor keeps counters (`timing_messages`, `laps_dispatched`,
+    `rankings_by_f1_position` / `rankings_by_gaps`, `cars_flagged_out`,
+    `connections_opened`, `subscribe_snapshots`, `position_first_message_seq`, the
+    recording path) and writes them as JSON to **`f1:{season}:{round}:ingest_stats`**
+    (at most every 15s, kept 24h).
+  - The strategy pipeline keeps a Redis hash **`f1:{season}:{round}:pipeline_stats`**
+    (24h): `gap_source_live` / `gap_source_summed` (which gap the undercut maths used),
+    `neighbors_source_live` / `neighbors_source_db`, `alert_order_source_live` /
+    `alert_order_source_db`, `alerts_suppressed_tyre_age`,
+    `alerts_suppressed_laps_remaining`, `alerts_dispatched`. Counting is best-effort: a
+    Redis error is logged and ignored, never raised. Counts include non-live sessions
+    (replays, historical), so read them in the context of the session.
+- **Raw-feed recorder** (`backend/scripts/_raw_feed_recorder.py`), **on by default in the
+  Docker stack** (the code's own default is off, so a manual run on the host does not record
+  unless asked).
+  With `RECORD_RAW_FEED=true` the ingestor also writes every message it receives from
+  F1's socket to one gzip'd JSONL file per session,
+  `recordings/<season>_R<round>_<type>_<UTC start>.jsonl.gz`: one line per message
+  (`t` receive time, `topic`, `data`), the Subscribe snapshot (the only place the
+  initial state arrives), and `opened`/`closed` connection events. Recorded topics:
+  TimingData, TimingAppData, TrackStatus, DriverList, LapCount, WeatherData,
+  SessionInfo. **`CarData.z` / `Position.z` are never recorded** — they need F1TV and
+  carry nothing in no_auth mode (CLAUDE.md), and they are unrelated to the ranking,
+  gap and alert logic. (Not to be confused with the `Position` *field inside
+  TimingData*, the race order, which needs no F1TV and is what this is about.)
+  A write failure (`OSError`) or an unserialisable message is logged and never raised
+  into the feed callback; a disk error stops recording for the session, not ingestion.
+- **Harness:** `--recording PATH` (with `--season/--round`) prints a summary, the answer
+  to "did `Position` stream on the live socket?", a per-topic table of recording vs F1's
+  archive of the same session, and then replays the recording through the ingestor.
+- **Wiring:** `RECORD_RAW_FEED` (code default false; `docker-compose.yml` defaults it to true) and `RAW_FEED_RECORD_DIR` in
+  `core/config.py`'s `LiveTimingSettings`; `.env.example`; `docker-compose.yml`'s worker
+  gets both variables and mounts the host's `./recordings` at `/recordings`;
+  `/recordings/` is in `.gitignore`.
+
+**Runbook — no manual step.** Starting the containers is enough: `docker-compose.yml`
+defaults `RECORD_RAW_FEED` to `true` for the worker, and the auto-launched ingestor
+inherits it. Leave the stack running — `beat` checks every 5 minutes, the worker launches
+the ingestor about 30 minutes before the race start (auto race detection is on by
+default), and the ingestor opens its file in `./recordings/`. One file of a few MB per
+auto-detected race (Race sessions only; practice and qualifying are not auto-launched).
+Recordings are not cleaned up automatically.
+- **Turn it off:** set `RECORD_RAW_FEED=false` in `.env` and recreate the worker so it
+  re-reads the environment (a plain `restart` does not):
+  `docker compose -f infra/docker/docker-compose.yml --env-file .env up -d --force-recreate worker`.
+- **Only applies to the Docker worker.** A manual run on the host (`make ingest-live`) uses
+  the code default (off) unless `RECORD_RAW_FEED=true` is in the host environment / `.env`,
+  and then writes to `recordings/` in the working directory. The counters are always on.
+
+**After the race.** Read the counters the same day (24h TTL):
+`docker exec docker-redis-1 redis-cli GET f1:<season>:<round>:ingest_stats` and
+`... HGETALL f1:<season>:<round>:pipeline_stats`; the ingestor's log lines are in the
+worker's output (`docker logs docker-worker-1 2>&1 | grep -E "Position field|Live ingest summary|never streamed"`).
+With a recording:
+`python -m backend.scripts.verify_live_feed_archive --recording recordings/<file> --season <s> --round <n>`.
+
+**Verified.** 39 new tests (recorder, ingestor hooks, counters, the harness's recording
+mode, and a round trip: the committed real-message excerpt is fed through a recording
+ingestor, written, read back, replayed, and compared with its source archive
+message-for-message); a mutation check (6 deliberate breakages — recording the `.z`
+topics, a disk error raising into the callback, the once-only log, the replay offset,
+the counter names, the dropped snapshot — all caught, files restored and
+hash-verified); the recorder wrote through the worker container's mount to the host;
+the flag reads `False` by default and `True` when set; replay accuracy unchanged
+(Monza 100.0% / 94.1% gap-only, DB-driven harness 99.0% / 94.1%). Unit suite 607
+passed, integration 23 passed, `mypy --strict` and `ruff` clean.
+
+**Done when.** After a live race we can state: whether and when `Position` first
+streamed (or that it never did), the share of rankings by source, the socket-vs-archive
+message-count difference per topic, and that the recording replays through the harness.
+
+**Limits and open points.**
+- **Nothing here has met a real socket yet.** The recorder and counters are proven on
+  replayed data and in tests; whether they behave on a live connection is confirmed by
+  the first race with the flag on.
+- Only the first Subscribe snapshot is replayed as a snapshot; later ones (reconnects)
+  are counted in the summary but not replayed as snapshots.
+- The compressed size per race has not been measured (raw TimingData was ~6 MB for
+  Monza); expect a few MB at most.
+- Local development only: a Fly.io production container's disk is temporary, so a
+  persistent volume or an S3 upload would be needed there (live ingestion is not wired
+  into a Fly.io process yet).
+- **CLAUDE.md** (updated 2026-09-19): the two new Redis keys (`f1:{season}:{round}:ingest_stats`,
+  string JSON, 24h; `f1:{season}:{round}:pipeline_stats`, hash, 24h), the two environment
+  variables (`RECORD_RAW_FEED`, `RAW_FEED_RECORD_DIR`) and a note under Auto Race Detection.
+**Effort.** Done. **Cannot show** anything before a race with the flag on.
+
+### V3 — shadow race on the local stack (built and smoke-tested 2026-09-19; full race pending — results in section 7d)
+**Goal.** Verify the cross-process wiring that unit tests mock: ingestor → real
+Redis → Celery worker → `_resolve_position_context` / `_live_gap_deficit` →
+`strategy_predictions` → `evaluate_threats` → `alerts`.
+**Method.** Feed Monza's archived messages through the real ingestor into the
+running docker stack under a **throwaway session and race** (never the real Monza
+rows), sped up, with a test subscriber. Assert automatically: `total_laps` set from
+the lap count; no retired car in the published `gaps` after its flag; predictions
+used live deficits (needs V5's counter or a log check); no alert involves a
+stopped car, a driver on tyres ≤ 3 laps old, or with < 15 laps left; persisted
+`lap_data.position` matches F1's archived positions (target ≥ 99% in `Position`
+mode); no worker errors. Delete the throwaway rows afterwards.
+**Risks.** Speed-up changes worker lag relative to real time (report it, don't
+hide it); DB pollution (isolate and clean up); alert delivery to real users
+(use a test user only). **Cannot show** live-socket behaviour.
+**Effort.** Medium. Easier after V5.
+
+### V2 — historical outcome calibration (with V6 folded in)
+**Goal.** The only check of whether `probability_pit_now_gains_position` means
+what it says — nothing so far has tested the score against what happened.
+**Method.** From 2018-2025 (163,623 laps; historical gaps are correct via
+`session_elapsed_seconds`), find real situations where driver D is directly
+behind T within a few seconds, D pits at lap L while T stays out and pits later;
+label the outcome as whether D is ahead of T after both have stopped. Compute the
+score as of lap L with the promoted models and compare with the outcome:
+reliability curve, Brier score, AUC, against a gap-only baseline. Evaluate on a
+season the models were not trained on (they were trained on 2018-2024 with 2025
+held out). Also report outcome rates for the gate conditions.
+**Step 0.** Count the eligible events first; if the held-out season has too few
+for meaningful intervals, widen it and say so.
+**V6 inside it.** Review the Monza alerts that remain (`VER on RUS` ×12, `VER on
+ANT` ×7) against the race's real pit stops in `tire_stints`.
+**Caveats.** Selection bias (teams pit when they expect it to work, so only
+attempted undercuts are observed); the score assumes a specific "pit now vs next
+lap" framing that real stops only approximate. **Decision rule.** If calibration
+is poor or no better than the gap-only baseline, the score and the 0.5 alert
+threshold need redesign — that is a finding, not a failure of the fixes above,
+which concern the inputs.
+**Effort.** Medium-high.
+
+### Lead-lap gap-only fallback (conditional on V5)
+**Where it stands.** Gap-only position match is 92.2% over 14 races (range
+86.3%-96.4%; weakest Dutch 86.3%, Spanish 87.4%) against 99.8% with `Position`.
+On the Dutch GP 4.7% of adjacent pairs are still in the wrong order, mostly two
+lead-lap cars (42,268 wrong pairs, 4.4% of that pair type): ~34% have held gaps
+under 1s, ~26% involve a car in or just out of the pits, ~35% involve a gap
+update more than 40s old. No hypothesis has been tested.
+**Hypotheses, one at a time, each measured on the 14 races.**
+1. *Stale gaps (> 40s old):* find what produces them (message patterns, pit lane,
+   red-flag/safety-car periods) and whether to discount or extrapolate them.
+2. *Pit lane / pit exit:* a car's gap through the pits may not track its position
+   order; test special handling around `InPit`/`PitOut`.
+3. *Small-gap noise (< 1s):* hysteresis on adjacent swaps, weighing the lag it
+   adds to genuine overtakes.
+**Method.** Promote the scratch diagnosis (classifying adjacent inversions by pair
+type, gap size, staleness, pit involvement) into the harness (`--diagnose`); keep
+a change only if gap-only accuracy improves without hurting the `Position` path or
+the lapped-car result; add unit and property tests for what stays.
+**Proposed targets (to be agreed):** gap-only ≥ 95% overall and ≥ 90% on the worst race.
+**Trigger.** Only if V5 shows the live socket does not stream `Position`; if it
+does, this path is a rarely-used safety net and the effort is better spent elsewhere.
+**Effort.** Medium.
+
+### Other open limits (from sections 0c, B and C)
+- Live-socket delivery of `Position` — V5 (built; answered by the first race run with the recorder on).
+- `alert_worker._dispatch` (`backend/workers/alert_worker.py`, around line 112) has the same flaw as the one fixed in `prediction_worker._persist_and_publish`: its `get_engine().dispose()` sits after the `try`, so an exception skips it. Deliberately **not** changed (outside the brief; it is the FCM push path, which is not configured here). Small fix, same pattern, needs the owner's OK (section 7d).
+- The prediction retry (section 7d) is bounded: 4 retries, 3 s apart. A lap that never reaches `lap_data` still ends as a failed task, and a retried prediction is delayed by a few seconds (p95 lag 14 s → 31 s in the smoke run). It is a mitigation for an ordering the design does not guarantee; chaining the two tasks would remove the race but touches the telemetry worker, the ingestor, and the replay/parity tools.
+- The 0.5 alert threshold, the gate constants and the 60s dedup are not derived
+  from outcomes — V2.
+- Existing Monza rows (`lap_data.position`, `strategy_predictions`, alerts) keep
+  their pre-fix values.
+- Replays and historical sessions still form the alert pairing from stored rows,
+  where retirees linger.
+- The alert target is not stored with the prediction; the alert pairs the trailing
+  car with the live-adjacent one, which is normally the worker's target too.
+- The remaining-laps gate needs `Session.total_laps`; live sessions get it from the
+  lap count, but any session without it runs with that gate off.
+- Model artifacts load on the dev host with scikit-learn/XGBoost version-mismatch
+  warnings (saved on 1.9.1, loaded on 1.9.0); evaluation numbers were produced under it.
+
+### Unrelated leftovers noticed
+`SessionInfo` is subscribed with no handler; the `SectorTime` table is unused
+(section 6); `isReplayActive` is misnamed (section 6); the `resilience` test
+marker is not selected by any CI workflow (Issue A's fix summary).
+
+---
+
+## 7d. V3 — the shadow race: what was built, what it found, what is left (2026-09-19)
+
+### What it is
+`backend/scripts/shadow_race.py` (tests: `backend/tests/unit/test_shadow_race.py`, 36 tests).
+It replays Monza's archived F1 messages through the **real** `F1SignalRIngestor` into the
+**running Docker stack** (real Redis, the real Celery worker, real Postgres) under a
+throwaway race — **season 2098, event name starting "SHADOW RACE"** — so nothing real is
+touched, then checks the outcome automatically. It proves the cross-process wiring that
+unit tests mock; it cannot say anything about F1's live socket.
+
+```
+python -m backend.scripts.shadow_race run --until-lap 12 --speed 1 --manifest recordings/shadow/smoke.json   # smoke (~25 min)
+python -m backend.scripts.shadow_race run --speed 2 --manifest recordings/shadow/full.json                   # full race (roughly an hour, estimated)
+python -m backend.scripts.shadow_race verify  --manifest <path>     # waits for the queues to drain, then runs the checks
+python -m backend.scripts.shadow_race cleanup --manifest <path>     # omit --manifest to remove every shadow race
+```
+Other `run` options: `--prerace-speed` (default 60: the pre-race hour is skipped quickly until the
+first lap completes — without it the first attempt spent an hour before lap 1), `--max-gap`
+(cap on dead air, 5 s), `--source-season/--source-round/--real-session-id` (default Monza). `run`
+refuses to start while a real live race is being ingested — **never run it during a real race**.
+Cleanup only deletes season-2098 "SHADOW RACE" races (cascading to sessions, laps, predictions,
+alerts) and that race's Redis keys.
+
+### The 14 checks (all automatic)
+Queues drained; `sessions.total_laps` set from F1's lap count (53); no out-of-race car or stale
+lapped gap in the published standings and no swallowed handler errors; every lap completion
+reached `lap_data` through Celery; persisted `lap_data.position` matches F1's (>= 99%); a
+prediction exists for every dispatched lap (>= 99%); prediction lag (reported, not judged);
+gaps, neighbours and alert pairing all came from live standings (counters); no alert involves a
+stopped car, tyres <= 3 laps old or < 15 laps left; ingest stats show F1's `Position` streamed and
+drove the ranking; the raw-feed recording matches what was fed, topic for topic; the real Monza
+rows and Redis keys are unchanged; no `ERROR`/`CRITICAL` line in the worker log during the run
+(WARNING-level noise such as an Ergast traceback is ignored on purpose); peak queue depth
+(reported). Queue depth counts kombu's `unacked` hash too, because a task the worker has prefetched
+leaves the Redis list and would otherwise make a busy worker look idle.
+
+### What it found — two real production bugs, both fixed
+1. **`prediction_worker._persist_and_publish` skipped `get_engine().dispose()` when anything
+   raised.** The dispose came after the `try` block, so one failed prediction left a pooled
+   asyncpg connection bound to a closed event loop, which the next task's `asyncio.run` then
+   collided with. In a real race one bad prediction could therefore take down the predictions
+   that followed it. Same shape as the bugs already fixed in `_run_simulation` and `telemetry_worker`
+   (CLAUDE.md, Notes). Fixed by disposing in a nested `finally` (Redis client closed first; a failing
+   Redis close still disposes). Two new tests fail against the old shape and pass against the fix.
+2. **A prediction could run before its lap was written.** The ingestor sends `process_lap` to
+   `telemetry_queue` and `run_strategy_prediction` to `prediction_queue` back to back
+   (`ingest_live_session.py`, lines ~830-831); one `--pool=solo` worker consumes both queues and nothing
+   orders them. At a lap boundary, when every driver completes together (queue peak 21 tasks), some
+   predictions ran first and raised `NotFoundError: No lap data for driver in session`: **15 of 233
+   laps (6.4%) had no prediction, so no undercut score and no alert for them.** This existed before
+   this session; bug 1 was hiding it (it wedged the pipeline first). Fixed with a bounded retry in
+   `run_strategy_prediction` (bound task, up to 4 retries, 3 s apart, `NotFoundError` only; once the
+   retries are spent the error still fails the task). Three new tests: retries on `NotFoundError`,
+   does not retry other errors, does not retry on success.
+
+Tool bugs fixed along the way (not production): multiple `asyncio.run` calls on the shared SQLAlchemy
+engine gave "Event loop is closed" (the tool now uses a fresh pool per phase); the log check counted a
+WARNING-level traceback as an error; queue depth ignored prefetched tasks.
+
+### Results of the smoke run (start to lap 12 of 53, 1x, 233 lap completions)
+| | Run 1 (before the retry) | Run 2 (with the retry) |
+|---|---|---|
+| Predictions per dispatched lap | 218 of 233 (93.6%) — FAIL | **233 of 233 (100%)** |
+| `NotFoundError` lines in the worker log | 15 — FAIL | **0** |
+| Laps persisted / position correct | 233 / 233 (100%) | 233 / 233 (100%) |
+| Prediction lag median / p95 / max | 3.7 / 13.7 / 18.7 s | 4.0 / 30.9 / 37.5 s |
+| Gaps live/summed; neighbours live/db; alert pairing live/db | 423/0; 233/0; 218/0 | 445/0; 247/0; 233/0 |
+| Alerts (stopped car / fresh tyre / late race) | 12 (0/0/0) | 12 (0/0/0) |
+| Ghost cars, stale lapped gaps, swallowed handler errors | 0 | 0 |
+| F1 `Position` drove the ranking | yes (first seen at message 2206; 3 cars flagged out) | same |
+| Recording matches what was fed | yes | yes |
+| Real Monza data untouched | yes | yes |
+| Queue peak | 21 | 21 |
+**Run 2: 14 of 14 checks pass.** The rise in p95 lag is the retried laps waiting a few seconds; it is well
+under a lap. Run 1's numbers are kept in `recordings/shadow/smoke_run1.{json,log}` (local, gitignored).
+
+### What this does and does not show
+- **Shows:** the live-standings path (gaps, neighbours, alert pairing) is used end to end across real
+  processes; persisted positions match F1's; the pipeline survives load at a lap boundary once the two
+  fixes are in; the recorder and counters work through the worker; and the harness catches this class of
+  bug (it found two in its first proper run).
+- **Does not show:** anything from F1's real socket (V5's job, on the next race); behaviour after lap 12
+  — most pit stops, later retirements (the smoke run flagged 3 cars out), safety cars, the
+  finish and `total_laps`-driven gates late in the race are only covered by the full run; whether the
+  score means what it says (V2). It ran at 1x, so the speed-up's effect on worker lag is untested.
+  It ran on a warm worker; a cold start (~88 s of imports) was not exercised.
+
+### State left behind (clean this up)
+- **A throwaway race is still in the local Postgres and Redis:** season 2098, round 1 ("SHADOW RACE ..."),
+  from smoke run 2; manifest `recordings/shadow/smoke.json`, log `recordings/shadow/smoke.log`, recording
+  `recordings/2098_R01_R_20260919T142436Z.jsonl.gz`, and the run-1 copies `smoke_run1.*`. All of `recordings/`
+  is gitignored. Run `python -m backend.scripts.shadow_race cleanup` (no manifest = every shadow race) **before
+  starting the full run** so the round number and Redis keys start clean, then delete the leftover files under
+  `recordings/`.
+- The worker container was restarted (`docker restart docker-worker-1`) and is running the fixed code;
+  confirmed by grepping the constant `_LAP_NOT_YET_PERSISTED_RETRIES` inside the container. Use
+  `MSYS_NO_PATHCONV=1` for `docker exec` paths from Git Bash.
+- Real Monza data was verified intact by the harness (row counts unchanged, no new real Redis keys).
+
+### Checks at the end of the session
+`pytest backend/tests/unit -m unit`: **648 passed**. Integration (`test_live_prediction_pipeline`,
+`test_race_simulation_serialization`, `test_strategy_endpoint`): **14 passed** (the wider set of 23 was last run
+before the V3 changes; re-run the whole integration folder before committing). `mypy backend/ --strict` and
+`ruff check` / `ruff format --check`: clean (158 files).
+
+### To do next for V3, in order
+1. `shadow_race cleanup`, then the **full race**: `run --speed 2 --manifest recordings/shadow/full.json`, then
+   `verify`. Expect roughly an hour (12 laps took 25 minutes at 1x). Watch for: `NotFoundError` and retry exhaustion,
+   every retired car (LEC lap 1, ALO/STR and others) leaving the standings and the alerts, the late-race laps gate, lag at 2x, the
+   queue peak at each pit-stop cluster, and total worker errors.
+2. Add the full-run results to this section, replacing the "full run pending" wording here, in section 7b and in the
+   top status note.
+3. Run `shadow_race cleanup` again and confirm season 2098 is gone (and the real Monza counts still match).
+4. Decide with the project owner: fix `alert_worker._dispatch`'s dispose (section 7c, open limits), and whether to chain
+   `process_lap` → prediction instead of retrying.
+5. ~~CLAUDE.md note~~ — done: a Notes entry for the two `prediction_worker` fixes and `shadow_race.py` was added
+   (2026-09-19). Update it with the full-run result once step 1 is done.
+
+---
+
 ## 8. Anchor Prompt for Resumption — paste into the new session
 
+### Current anchor (2026-09-19, end of the B/C/V-series session)
+
+```
+Read docs/live-race-ingestion-and-strategy-gaps-monza-2026.md before anything
+else: first the status note at the very top, then section 0c, 7b, 7c and 7d
+(7d is the most recent work). Then read CLAUDE.md as usual.
+
+Context. The Italian GP 2026 (Monza, Round 13) was the first full live-ingested
+race. Five issues (A-E) were found. All five are fixed: A, D, E earlier; B (undercut
+score/alert inflated by a wrong starting gap and ghost rivals) and C (retired cars
+frozen in the timing tower) on 2026-09-19, by taking gaps, rivals and the ranking
+from F1's live standings. Verification tooling built: a replay harness over F1's
+archived feed (verify_live_feed_archive.py; V1 replayed 14 races), property tests
+(V4), next-race counters + a raw-feed recorder that is on by default in Docker (V5),
+and a shadow-race harness (backend/scripts/shadow_race.py, V3). V3's smoke run
+(start to lap 12 of 53) found and got fixed two real bugs in
+backend/workers/prediction_worker.py: a skipped engine dispose() after a failed
+prediction, and a race where a prediction ran before its lap was persisted (fixed
+with a bounded retry). The smoke run now passes 14 of 14 checks.
+
+What is NOT done:
+ 1. V3's full-race run (a throwaway season-2098 race from the smoke run is still in
+    the local DB/Redis — run `python -m backend.scripts.shadow_race cleanup` first,
+    then `run --speed 2 --manifest recordings/shadow/full.json`, then `verify`),
+    documenting its results in 7d/7b/the top note, and cleaning up again.
+ 2. Two decisions for the owner: fix alert_worker._dispatch (same dispose-after-try
+    flaw, deliberately untouched) and whether to chain process_lap -> prediction
+    instead of the retry.
+ 3. V2 (historical calibration of probability_pit_now_gains_position, with V6 folded
+    in) — not started; needs owner approval. The 0.5 alert threshold and the gate
+    constants are not derived from outcomes.
+ 4. The lead-lap gap-only fallback work — only if V5 shows F1's Position field does
+    not stream on the live socket. Both V5 questions can only be answered by the
+    next real race with the stack running (recording is on by default).
+
+Working rules for this project (also in the user's CLAUDE.md files): do not run any
+git command — the owner commits, pushes and opens PRs; state a brief plan and wait
+for approval before code touching more than 2 files, and confirm between checkpoints
+when a task is long; ask before adding any dependency; no debug print (use logging),
+no TODO comments, no bare `except Exception`, type hints everywhere; if an error is
+not resolved in 2 attempts, stop and show what was tried, the exact error, the likely
+cause and two options. Never run the shadow race while a real live race is running.
+
+Environment notes: Windows + Git Bash; the Docker stack is docker-compose in
+infra/docker (containers docker-worker-1, docker-redis-1, docker-postgres-1);
+the worker mounts backend/, so `docker restart docker-worker-1` picks up code changes
+(recreate with `--env-file .env` only when compose settings change); Celery runs
+`--pool=solo` on three queues; avoid backslashes in inline shell/Python heredocs (the
+shell layer mangles them); use MSYS_NO_PATHCONV=1 for docker exec paths. Checks to run
+before saying anything is done: `ruff check`, `ruff format --check`,
+`mypy backend/ --strict`, `pytest backend/tests/unit -m unit` (648 at the end of the
+last session) and the integration tests that touch the worker/prediction pipeline.
+
+First, report back in a few lines what you understood the state to be and what you
+propose to do first, and wait for approval.
+```
+
+### Superseded notes and the original anchor (kept as history)
+
+> **Note (2026-09-19): all five issues are now fixed.** The prompt below is
+> kept only as history of how the investigation was framed; a session opening
+> this document should start from section 0c, then 7b (what was done) and 7c
+> (what remains: V5, V3, V2 and the conditional lead-lap fallback work), and
+> the "Not done / limits" notes in Issue B and Issue C's fix summaries.
+>
 > **Note (2026-09-18):** the prompt below is the ORIGINAL anchor, written
 > before the re-verification pass. It is still broadly accurate, but its
 > summaries of issues B, C and D are now superseded — B's framing was wrong

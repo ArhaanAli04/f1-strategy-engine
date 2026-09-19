@@ -77,8 +77,16 @@ services:
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
       AWS_REGION: "${AWS_REGION:-ap-south-1}"
+      # Raw live-feed recorder: ON by default here, so simply starting the stack
+      # records the next auto-detected race with no manual step (one .jsonl.gz of a
+      # few MB per race). Set RECORD_RAW_FEED=false in .env and recreate the worker
+      # to turn it off. The auto-launched ingestor subprocess inherits this
+      # environment and writes into /recordings (the host's ./recordings, below).
+      RECORD_RAW_FEED: "${RECORD_RAW_FEED:-true}"
+      RAW_FEED_RECORD_DIR: /recordings
     volumes:
       - ../../backend:/app/backend
+      - ../../recordings:/recordings
       # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the
       # dir to pre-exist (replay_pipeline.py / ingest_*.py makedirs it), and
       # a persisted volume means the ~30-60s per-session download happens

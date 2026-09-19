@@ -8,17 +8,22 @@ core-feature-rebuild session):
    ever sends the Position field once, in the Subscribe snapshot) — now
    re-derived continuously from the streaming GapToLeader field
    (_recompute_positions), and threaded into raw_lap.
-3. Checkpoint 7 (verification): a retired car's GapToLeader freezing
-   _car_live_gap_state at its last real value — discovered via the
-   recorded-feed harness (verify_live_feed_parity.py) against a real
-   session with 3 retirements, not a pre-existing test gap — is now fixed
-   by evicting the car on an explicit "RETIRED" GapToLeader marker.
+3. A retired car's gap freezing in the live standings for the rest of the
+   race. An earlier fix waited for a "RETIRED" GapToLeader string that F1's
+   real feed was later confirmed (Monza 2026 archive,
+   docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C) to never
+   send — it sends Retired/ShowPosition/Stopped booleans instead, which are
+   what the retirement, lapped-car ("1 L"/"52L") and Position-vs-gap ranking
+   tests below pin.
 
 F1SignalRIngestor's __init__ has no network/DB side effects (those only
 happen in start()/_build_connection()), so it's constructed directly here
 with plain in-memory stand-ins — no real Redis, no real Celery broker.
 """
 
+import json
+import random
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -246,72 +251,298 @@ def test_handle_timing_data_recomputes_positions_before_dispatching_within_one_m
     assert dispatched[0]["position"] == 1  # car "1" is still the leader
 
 
-# --- _update_gap_state: retirement eviction (Checkpoint 7) ---
+# --- retirement: F1's real signals are Retired / ShowPosition / Stopped booleans ---
+# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C — F1 never
+# sends a "RETIRED" gap string; confirmed against Monza 2026's archived feed)
 
 
-@pytest.mark.unit
-def test_update_gap_state_evicts_car_on_retired_marker() -> None:
-    ingestor = _make_ingestor()
-    ingestor._car_live_gap_state["44"] = {
-        "position": 5,
-        "gap_to_leader": 12.3,
-        "gap_to_ahead": 1.1,
-        "laps_behind": 0,
-    }
-
-    changed = ingestor._update_gap_state("44", {"GapToLeader": "RETIRED"})
-
-    assert changed is True
-    assert "44" not in ingestor._car_live_gap_state
-
-
-@pytest.mark.unit
-def test_update_gap_state_retired_marker_is_case_and_whitespace_insensitive() -> None:
-    ingestor = _make_ingestor()
-    ingestor._car_live_gap_state["44"] = {
-        "position": 5,
-        "gap_to_leader": 12.3,
+def _gap_state(position: int | None, gap_to_leader: float | None, **extra: Any) -> dict[str, Any]:
+    return {
+        "position": position,
+        "gap_to_leader": gap_to_leader,
         "gap_to_ahead": None,
         "laps_behind": 0,
+        **extra,
     }
 
-    ingestor._update_gap_state("44", {"GapToLeader": "  retired  "})
 
-    assert "44" not in ingestor._car_live_gap_state
-
-
-@pytest.mark.unit
-def test_update_gap_state_retired_marker_on_unseen_car_is_a_no_op() -> None:
-    """A car retiring before it was ever tracked (no prior TimingData) must
-    not crash and must not create a phantom entry."""
-    ingestor = _make_ingestor()
-
-    changed = ingestor._update_gap_state("99", {"GapToLeader": "RETIRED"})
-
-    assert changed is False
-    assert "99" not in ingestor._car_live_gap_state
-
-
-@pytest.mark.unit
-def test_recompute_positions_excludes_retired_car() -> None:
-    """The actual bug this fixes: without eviction, a retired car's stale
-    gap_to_leader would keep occupying a ranking slot forever, shifting
-    every trailing driver's position by one — confirmed live via
-    verify_live_feed_parity.py against a real session with 3 retirements."""
+def _three_car_field() -> ingest_live_session.F1SignalRIngestor:
     ingestor = _make_ingestor()
     ingestor._car_live_gap_state = {
-        "1": {"position": 1, "gap_to_leader": None, "gap_to_ahead": None, "laps_behind": 0},
-        "2": {"position": 2, "gap_to_leader": 5.0, "gap_to_ahead": None, "laps_behind": 0},
-        "3": {"position": 3, "gap_to_leader": 10.0, "gap_to_ahead": None, "laps_behind": 0},
+        "1": _gap_state(1, None),
+        "2": _gap_state(2, 5.0),
+        "3": _gap_state(3, 10.0),
     }
+    return ingestor
 
-    # Car "2" retires — its stale 5.0s gap must no longer occupy rank 2.
-    ingestor._update_gap_state("2", {"GapToLeader": "RETIRED"})
+
+@pytest.mark.unit
+def test_retired_flag_takes_car_out_of_ranking_and_promotes_those_behind() -> None:
+    """The actual bug: a retired car's frozen gap kept occupying a ranking slot
+    all race, shifting every trailing driver by one (LEC at Monza 2026)."""
+    ingestor = _three_car_field()
+
+    changed = ingestor._update_gap_state("2", {"Retired": True, "Stopped": True})
     ingestor._recompute_positions()
 
-    assert "2" not in ingestor._car_live_gap_state
-    assert ingestor._car_live_gap_state["1"]["position"] == 1
-    assert ingestor._car_live_gap_state["3"]["position"] == 2  # promoted, not stuck at 3
+    assert changed is True
+    state = ingestor._car_live_gap_state
+    assert state["2"]["position"] is None
+    assert state["1"]["position"] == 1
+    assert state["3"]["position"] == 2  # promoted, not stuck at 3
+
+
+@pytest.mark.unit
+def test_show_position_false_alone_takes_car_out_of_ranking() -> None:
+    """STR at Monza 2026 was hidden from the tower without F1 ever sending Retired."""
+    ingestor = _three_car_field()
+
+    ingestor._update_gap_state("2", {"ShowPosition": False})
+    ingestor._recompute_positions()
+
+    assert ingestor._car_live_gap_state["2"]["position"] is None
+    assert ingestor._car_live_gap_state["3"]["position"] == 2
+
+
+@pytest.mark.unit
+def test_stopped_flag_hides_car_and_it_rejoins_with_its_gap_history_when_cleared() -> None:
+    """LEC at Monza 2026 stopped and restarted twice before finally retiring;
+    a stop must not permanently delete the car's state."""
+    ingestor = _three_car_field()
+
+    ingestor._update_gap_state("2", {"Stopped": True})
+    ingestor._recompute_positions()
+    assert ingestor._car_live_gap_state["2"]["position"] is None
+
+    ingestor._update_gap_state("2", {"Stopped": False})
+    ingestor._recompute_positions()
+    assert ingestor._car_live_gap_state["2"]["gap_to_leader"] == 5.0  # history intact
+    assert ingestor._car_live_gap_state["2"]["position"] == 2
+
+
+@pytest.mark.unit
+def test_snapshot_flags_that_are_all_clear_do_not_exclude_anyone() -> None:
+    """The Subscribe snapshot carries Retired=false/Stopped=false/ShowPosition=true
+    for every car."""
+    ingestor = _three_car_field()
+
+    for car in ("1", "2", "3"):
+        ingestor._update_gap_state(car, {"Retired": False, "Stopped": False, "ShowPosition": True})
+    ingestor._recompute_positions()
+
+    assert [ingestor._car_live_gap_state[c]["position"] for c in ("1", "2", "3")] == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_retirement_flag_on_a_car_never_seen_before_does_not_crash_or_get_ranked() -> None:
+    ingestor = _make_ingestor()
+
+    ingestor._update_gap_state("99", {"Retired": True})
+    ingestor._recompute_positions()
+
+    assert ingestor._car_live_gap_state["99"]["position"] is None
+
+
+@pytest.mark.unit
+def test_retired_car_is_left_out_of_the_published_standings() -> None:
+    redis_mock = MagicMock()
+    ingestor = ingest_live_session.F1SignalRIngestor(
+        season=2026,
+        round_number=13,
+        session_id="s",
+        car_number_to_driver_id={"1": "d1", "2": "d2", "3": "d3"},
+        driver_code_to_id={},
+        redis_client=redis_mock,
+        no_auth=True,
+    )
+    ingestor._car_live_gap_state = {
+        "1": _gap_state(1, None),
+        "2": _gap_state(2, 5.0),
+        "3": _gap_state(3, 10.0),
+    }
+    ingestor._update_gap_state("2", {"Retired": True})
+    ingestor._recompute_positions()
+
+    ingestor._publish_live_gaps()
+
+    payload = json.loads(redis_mock.setex.call_args.args[2])
+    assert [(e["driver_id"], e["position"]) for e in payload["gaps"]] == [("d1", 1), ("d3", 2)]
+
+
+# --- lapped cars: F1 sends "1 L" / "1L" / "52L" ---
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1 L", (None, 1)),
+        ("1L", (None, 1)),
+        ("52L", (None, 52)),
+        ("+1 LAP", (None, 1)),
+        ("2 LAPS", (None, 2)),
+        ("+1.759", (1.759, 0)),
+        ("LAP 14", (None, 0)),  # the LEADER's own lap counter, not a lapped car
+        ("", (None, 0)),
+        (None, (None, 0)),
+    ],
+)
+def test_parse_gap_string_handles_real_f1_lapped_formats(
+    value: str | None, expected: tuple[float | None, int]
+) -> None:
+    assert ingest_live_session._parse_gap_string(value) == expected
+
+
+@pytest.mark.unit
+def test_lapped_gap_to_leader_replaces_the_frozen_numeric_gap() -> None:
+    """BOT at Monza 2026 kept its last numeric +82.238s for the rest of the race."""
+    ingestor = _make_ingestor()
+    ingestor._update_gap_state("77", {"GapToLeader": "+82.238"})
+
+    changed = ingestor._update_gap_state("77", {"GapToLeader": "1 L"})
+
+    state = ingestor._car_live_gap_state["77"]
+    assert changed is True
+    assert state["gap_to_leader"] is None
+    assert state["laps_down"] == 1
+
+
+@pytest.mark.unit
+def test_lapped_car_that_unlaps_itself_returns_to_a_numeric_gap() -> None:
+    ingestor = _make_ingestor()
+    ingestor._update_gap_state("77", {"GapToLeader": "1 L"})
+
+    ingestor._update_gap_state("77", {"GapToLeader": "+40.5"})
+
+    state = ingestor._car_live_gap_state["77"]
+    assert state["gap_to_leader"] == 40.5
+    assert state["laps_down"] == 0
+
+
+@pytest.mark.unit
+def test_interval_to_car_ahead_in_laps_updates_laps_behind() -> None:
+    ingestor = _make_ingestor()
+    ingestor._update_gap_state("77", {"IntervalToPositionAhead": {"Value": "+3.2"}})
+
+    ingestor._update_gap_state("77", {"IntervalToPositionAhead": {"Value": "1 L"}})
+
+    state = ingestor._car_live_gap_state["77"]
+    assert state["gap_to_ahead"] is None
+    assert state["laps_behind"] == 1
+
+
+@pytest.mark.unit
+def test_gap_ranking_puts_lapped_cars_behind_lead_lap_cars_not_mistaken_for_the_leader() -> None:
+    """A lapped car's gap_to_leader is None — the same value that marks the
+    leader — so without the laps_down split it would be ranked P1."""
+    ingestor = _make_ingestor()
+    ingestor._car_live_gap_state = {
+        "77": _gap_state(4, None, laps_down=2),
+        "5": _gap_state(3, None, laps_down=1),
+        "1": _gap_state(1, None),
+        "2": _gap_state(2, 5.0),
+    }
+
+    ingestor._recompute_positions()
+
+    ranks = {car: s["position"] for car, s in ingestor._car_live_gap_state.items()}
+    assert ranks == {"1": 1, "2": 2, "5": 3, "77": 4}  # 1 lap down before 2 laps down
+
+
+# --- ranking source: F1's Position field vs. the gap-based fallback ---
+
+
+def _position_field(order: dict[str, int], *, gaps: dict[str, float | None]) -> dict[str, Any]:
+    return {
+        car: _gap_state(None, gaps[car], f1_position=position) for car, position in order.items()
+    }
+
+
+@pytest.mark.unit
+def test_recompute_uses_f1_position_once_seen_streaming_even_where_gaps_disagree() -> None:
+    ingestor = _make_ingestor()
+    ingestor._position_diff_seen = True
+    # Gaps would rank 1,2,3 — F1 says 3 leads (an overtake the gap data hasn't caught up to).
+    ingestor._car_live_gap_state = _position_field(
+        {"1": 2, "2": 3, "3": 1}, gaps={"1": None, "2": 5.0, "3": 10.0}
+    )
+
+    ingestor._recompute_positions()
+
+    assert [ingestor._car_live_gap_state[c]["position"] for c in ("3", "1", "2")] == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_recompute_ignores_f1_position_until_it_has_been_seen_on_a_live_diff() -> None:
+    """Position present only from the Subscribe snapshot may be stale for the
+    whole race (2026 Dutch GP) — the gap-based ranking must stay in charge."""
+    ingestor = _make_ingestor()
+    assert ingestor._position_diff_seen is False
+    ingestor._car_live_gap_state = _position_field(
+        {"1": 2, "2": 3, "3": 1}, gaps={"1": None, "2": 5.0, "3": 10.0}
+    )
+
+    ingestor._recompute_positions()
+
+    assert [ingestor._car_live_gap_state[c]["position"] for c in ("1", "2", "3")] == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_recompute_falls_back_to_gaps_while_f1_positions_collide_mid_overtake() -> None:
+    """F1 sends one car's new Position per message, so two cars can briefly
+    share a value."""
+    ingestor = _make_ingestor()
+    ingestor._position_diff_seen = True
+    ingestor._car_live_gap_state = _position_field(
+        {"1": 1, "2": 2, "3": 2}, gaps={"1": None, "2": 5.0, "3": 10.0}
+    )
+
+    ingestor._recompute_positions()
+
+    assert [ingestor._car_live_gap_state[c]["position"] for c in ("1", "2", "3")] == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_recompute_falls_back_to_gaps_when_a_ranked_car_has_no_f1_position() -> None:
+    ingestor = _make_ingestor()
+    ingestor._position_diff_seen = True
+    ingestor._car_live_gap_state = _position_field(
+        {"1": 2, "2": 3, "3": 1}, gaps={"1": None, "2": 5.0, "3": 10.0}
+    )
+    del ingestor._car_live_gap_state["3"]["f1_position"]
+
+    ingestor._recompute_positions()
+
+    assert [ingestor._car_live_gap_state[c]["position"] for c in ("1", "2", "3")] == [1, 2, 3]
+
+
+@pytest.mark.unit
+def test_f1_position_ranking_is_dense_after_a_car_drops_out() -> None:
+    """A retired car's F1 slot is removed and everyone behind moves up — no hole."""
+    ingestor = _make_ingestor()
+    ingestor._position_diff_seen = True
+    ingestor._car_live_gap_state = _position_field(
+        {"1": 1, "2": 2, "3": 3}, gaps={"1": None, "2": 5.0, "3": 10.0}
+    )
+    ingestor._update_gap_state("2", {"Retired": True})
+
+    ingestor._recompute_positions()
+
+    assert ingestor._car_live_gap_state["2"]["position"] is None
+    assert ingestor._car_live_gap_state["3"]["position"] == 2
+
+
+@pytest.mark.unit
+def test_position_diff_seen_is_set_by_a_live_diff_but_not_by_the_subscribe_snapshot() -> None:
+    ingestor = _make_ingestor()
+
+    ingestor._on_subscribe_result(
+        SimpleNamespace(result={"TimingData": {"Lines": {"1": {"Position": "1"}}}})
+    )
+    assert ingestor._position_diff_seen is False
+
+    ingestor._handle_timing_data({"Lines": {"1": {"Position": "1"}}})
+    assert ingestor._position_diff_seen is True
 
 
 # --- _is_plausible_lap (Issue D: docs/live-race-ingestion-and-strategy-
@@ -655,9 +886,10 @@ def test_handle_timing_data_publishes_gaps_with_recomputed_positions() -> None:
         }
     )
 
-    assert redis_client.setex.called
-    key = redis_client.setex.call_args.args[0]
-    assert key == "f1:2026:10:gaps"
+    # The gaps snapshot is one of the writes; the always-on ingest_stats write
+    # (see publish_stats) follows it, so look for the key rather than the last call.
+    keys = [call.args[0] for call in redis_client.setex.call_args_list]
+    assert "f1:2026:10:gaps" in keys
 
 
 # --- Real-world verification: actual field data from the 2026 Italian GP
@@ -782,3 +1014,202 @@ def test_is_plausible_lap_real_monza_lap3_is_a_known_uncloseable_gap(
     ingested data, and this test says so rather than implying otherwise.
     """
     assert ingest_live_session._is_plausible_lap(lap_time, sector1, sector2, sector3, {"1"}, set())
+
+
+# --- property tests: invariants of the live ranking that must hold for ANY field
+# (retirements, lapped cars, either ranking source), not just hand-picked ones.
+# Seeded stdlib randomness, so every run is reproducible. ---
+
+_RANKING_SEED = 20260919
+
+
+def _random_field(
+    rng: random.Random,
+) -> tuple[dict[str, dict[str, Any]], set[str], dict[str, int]]:
+    """A random field. Returns (per-car gap state, cars F1 has flagged out, F1 positions).
+
+    One lead-lap leader (no gap), lead-lap chasers with strictly increasing gaps,
+    some lapped cars (no seconds gap, laps_down >= 1), a random subset flagged out.
+    """
+    n = rng.randint(4, 22)
+    cars = [str(i) for i in range(1, n + 1)]
+    rng.shuffle(cars)
+    n_lapped = rng.randint(0, min(4, n - 2))
+    lead_lap, lapped = cars[: n - n_lapped], cars[n - n_lapped :]
+
+    gap = 0.0
+    state: dict[str, dict[str, Any]] = {}
+    previous_positions = rng.sample(range(1, n + 1), n)
+    for index, car in enumerate(lead_lap):
+        gap += rng.uniform(0.05, 9.0)
+        state[car] = _gap_state(previous_positions[index], None if index == 0 else gap)
+    for offset, car in enumerate(lapped):
+        state[car] = _gap_state(
+            previous_positions[len(lead_lap) + offset],
+            None,
+            laps_down=rng.randint(1, 3),
+            laps_completed=rng.randint(30, 40),
+            lap_seq=rng.randint(1, 500),
+        )
+    out = {car for car in cars if rng.random() < 0.2}
+    f1_positions = dict(zip(rng.sample(cars, n), range(1, n + 1), strict=True))
+    for car in cars:
+        state[car]["f1_position"] = f1_positions[car]
+    return state, out, f1_positions
+
+
+def _ranked(
+    state: dict[str, dict[str, Any]], out: set[str], *, f1_streaming: bool, order: list[str]
+) -> dict[str, int | None]:
+    ingestor = _make_ingestor()
+    ingestor._position_diff_seen = f1_streaming
+    ingestor._car_live_gap_state = {car: dict(state[car]) for car in order}
+    for car in sorted(out):
+        ingestor._update_gap_state(car, {"Retired": True})
+    ingestor._recompute_positions()
+    return {car: s["position"] for car, s in ingestor._car_live_gap_state.items()}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("f1_streaming", [False, True], ids=["gap-based", "f1-position"])
+def test_property_ranking_is_a_dense_permutation_independent_of_insertion_order(
+    f1_streaming: bool,
+) -> None:
+    rng = random.Random(_RANKING_SEED)  # noqa: S311 - seeded on purpose, not security
+    for _ in range(300):
+        state, out, _ = _random_field(rng)
+        cars = list(state)
+        shuffled = cars[:]
+        rng.shuffle(shuffled)
+
+        positions = _ranked(state, out, f1_streaming=f1_streaming, order=cars)
+        reordered = _ranked(state, out, f1_streaming=f1_streaming, order=shuffled)
+
+        included = [car for car in cars if car not in out]
+        assert sorted(p for car in included if (p := positions[car]) is not None) == list(
+            range(1, len(included) + 1)
+        )
+        assert all(positions[car] is None for car in out)
+        assert positions == reordered
+
+
+@pytest.mark.unit
+def test_property_gap_ranking_orders_lead_lap_by_gap_and_puts_lapped_cars_last() -> None:
+    rng = random.Random(_RANKING_SEED + 1)  # noqa: S311 - seeded on purpose, not security
+    for _ in range(300):
+        state, out, _ = _random_field(rng)
+        positions = _ranked(state, out, f1_streaming=False, order=list(state))
+        included = [car for car in state if car not in out]
+        lapped = [car for car in included if state[car].get("laps_down", 0) > 0]
+        lead_lap = [car for car in included if car not in lapped]
+
+        # Lead-lap cars: better position <=> smaller gap (the leader has no gap = smallest).
+        gaps = {
+            car: -1.0 if state[car]["gap_to_leader"] is None else state[car]["gap_to_leader"]
+            for car in lead_lap
+        }
+        by_position = sorted(lead_lap, key=lambda car: positions[car] or 0)
+        assert [gaps[car] for car in by_position] == sorted(gaps.values())
+        # Every lapped car is behind every lead-lap car; more laps down is never ahead.
+        if lapped and lead_lap:
+            assert min(positions[car] or 0 for car in lapped) > max(
+                positions[car] or 0 for car in lead_lap
+            )
+        # Lapped cars: fewer laps down first, then more laps completed, then whoever
+        # crossed the line first.
+        lapped_order = sorted(lapped, key=lambda car: positions[car] or 0)
+        keys = [
+            (state[car]["laps_down"], -state[car]["laps_completed"], state[car]["lap_seq"])
+            for car in lapped_order
+        ]
+        assert keys == sorted(keys)
+
+
+@pytest.mark.unit
+def test_property_f1_position_ranking_follows_f1s_order_and_ignores_the_gaps() -> None:
+    rng = random.Random(_RANKING_SEED + 2)  # noqa: S311 - seeded on purpose, not security
+    for _ in range(300):
+        state, out, f1_positions = _random_field(rng)
+        positions = _ranked(state, out, f1_streaming=True, order=list(state))
+        included = [car for car in state if car not in out]
+
+        assert sorted(included, key=lambda car: positions[car] or 0) == sorted(
+            included, key=lambda car: f1_positions[car]
+        )
+
+
+# --- lapped cars are ordered by crossing order, not by a frozen previous position
+# (V1: on 14 archived 2026 races, adjacent lapped/lapped pairs were in the wrong
+# order ~35% of the time on the Dutch GP with the old previous-position tie-break) ---
+
+
+@pytest.mark.unit
+def test_update_gap_state_records_laps_completed_and_arrival_order_only_when_the_count_rises() -> (
+    None
+):
+    ingestor = _make_ingestor()
+    ingestor._message_seq = 7
+    ingestor._update_gap_state("5", {"NumberOfLaps": 40})
+    ingestor._message_seq = 9
+    ingestor._update_gap_state("5", {"NumberOfLaps": 40})  # repeated value: not a new crossing
+    ingestor._update_gap_state("5", {"NumberOfLaps": 39})  # never goes backwards
+
+    state = ingestor._car_live_gap_state["5"]
+    assert state["laps_completed"] == 40
+    assert state["lap_seq"] == 7
+
+    ingestor._message_seq = 12
+    ingestor._update_gap_state("5", {"NumberOfLaps": 41})
+    assert (state["laps_completed"], state["lap_seq"]) == (41, 12)
+
+
+@pytest.mark.unit
+def test_handle_timing_data_counts_messages() -> None:
+    ingestor = _make_ingestor()
+
+    ingestor._handle_timing_data({"Lines": {}})
+    ingestor._handle_timing_data({"Lines": {}})
+
+    assert ingestor._message_seq == 2
+
+
+@pytest.mark.unit
+def test_lapped_cars_rank_by_laps_completed_then_who_crossed_the_line_first() -> None:
+    """Car 5 held the better previous position, but car 6 completes the next lap first."""
+    ingestor = _make_ingestor()
+    # Previous positions 5 -> 3, 6 -> 4; both a lap down on 40 completed laps.
+    ingestor._handle_timing_data(
+        {
+            "Lines": {
+                "1": {"Position": "1"},
+                "2": {"GapToLeader": "+5.0"},
+                "5": {"GapToLeader": "1 L", "NumberOfLaps": 40, "Position": "3"},
+                "6": {"GapToLeader": "1 L", "NumberOfLaps": 40, "Position": "4"},
+            }
+        }
+    )
+    assert (
+        ingestor._car_live_gap_state["5"]["position"]
+        < ingestor._car_live_gap_state["6"]["position"]
+    )
+
+    ingestor._handle_timing_data({"Lines": {"6": {"NumberOfLaps": 41}}})  # 6 gets a lap ahead
+    state = ingestor._car_live_gap_state
+    assert state["6"]["position"] < state["5"]["position"]
+
+    ingestor._handle_timing_data({"Lines": {"5": {"NumberOfLaps": 41}}})  # same count, later
+    assert state["6"]["position"] < state["5"]["position"]  # 6 crossed first, stays ahead
+
+
+@pytest.mark.unit
+def test_lapped_ordering_never_lets_a_lapped_car_ahead_of_a_lead_lap_car() -> None:
+    ingestor = _make_ingestor()
+    ingestor._car_live_gap_state = {
+        "1": _gap_state(1, None),
+        "2": _gap_state(2, 30.0),
+        "9": _gap_state(3, None, laps_down=1, laps_completed=99, lap_seq=1),
+    }
+
+    ingestor._recompute_positions()
+
+    assert ingestor._car_live_gap_state["9"]["position"] == 3

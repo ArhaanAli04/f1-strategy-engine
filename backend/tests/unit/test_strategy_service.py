@@ -12,6 +12,7 @@ tests against real Redis, not this tier.
 """
 
 import json
+import random
 import uuid
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ import fakeredis as fakeredis_lib
 import joblib
 import numpy as np
 import pytest
+from redis.exceptions import RedisError
 
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
 from backend.schemas.strategy_schema import PitWindowResponse
@@ -1675,3 +1677,711 @@ async def test_cumulative_race_time_defaults_to_zero_when_no_laps(
     result = await strategy_service._cumulative_race_time(mock_db_session, session_id, driver_id, 1)
 
     assert result == 0.0
+
+
+# --- live gaps drive the undercut/overcut deficit and neighbour lookup
+# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+
+
+def _elapsed_result(value: float) -> MagicMock:
+    """The first query _cumulative_race_time makes (latest session_elapsed_seconds).
+    _scalar_result only stubs scalar_one, which this query does not call — a bare
+    MagicMock there silently reads as float(MagicMock()) == 1.0."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
+
+
+def _live_gaps_payload(
+    session_id: uuid.UUID, entries: list[dict[str, Any]], source: str = "live"
+) -> str:
+    return json.dumps({"session_id": str(session_id), "gaps": entries, "source": source})
+
+
+def _live_entry(
+    driver_id: uuid.UUID, position: int, gap_to_leader: float | None, **extra: Any
+) -> dict[str, Any]:
+    return {
+        "driver_id": str(driver_id),
+        "position": position,
+        "gap_to_leader_seconds": gap_to_leader,
+        "gap_to_ahead_seconds": extra.pop("gap_to_ahead", None),
+        "gap_to_behind_seconds": extra.pop("gap_to_behind", None),
+        "laps_behind": 0,
+        **extra,
+    }
+
+
+async def _set_gaps(
+    client: fakeredis_lib.FakeAsyncRedis, session_id: uuid.UUID, entries: list[dict[str, Any]]
+) -> None:
+    await client.set(f"f1:{SEASON}:{ROUND_NUMBER}:gaps", _live_gaps_payload(session_id, entries))
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_is_difference_of_gaps_to_leader_positive_when_now_trails(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, now_id, next_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis,
+        session_id,
+        [_live_entry(next_id, 3, 4.0), _live_entry(now_id, 4, 5.5)],
+    )
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit == pytest.approx(1.5)  # now is 1.5s behind next
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_negative_when_now_is_ahead(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, now_id, next_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis, session_id, [_live_entry(now_id, 3, 4.0), _live_entry(next_id, 4, 5.0)]
+    )
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit == pytest.approx(-1.0)
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_treats_the_leader_as_zero_gap_even_with_no_gap_value(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, now_id, leader_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis, session_id, [_live_entry(leader_id, 1, None), _live_entry(now_id, 2, 2.4)]
+    )
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, leader_id
+    )
+
+    assert deficit == pytest.approx(2.4)
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_is_none_for_a_lapped_driver(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A lapped car has no seconds gap to the leader — must not be read as 0."""
+    session_id, now_id, next_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis,
+        session_id,
+        [_live_entry(next_id, 5, 30.0), _live_entry(now_id, 18, None, laps_behind=1)],
+    )
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit is None
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_is_none_when_a_driver_is_absent_from_the_standings(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """E.g. a retired car, which the live ingestor no longer publishes."""
+    session_id, now_id, next_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(fakeredis, session_id, [_live_entry(now_id, 2, 2.0)])
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["replay", None])
+async def test_live_gap_deficit_ignores_a_payload_that_is_not_from_the_live_feed(
+    fakeredis: fakeredis_lib.FakeAsyncRedis, source: str | None
+) -> None:
+    session_id, now_id, next_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    payload: dict[str, Any] = {
+        "session_id": str(session_id),
+        "gaps": [_live_entry(next_id, 3, 4.0), _live_entry(now_id, 4, 5.0)],
+    }
+    if source is not None:
+        payload["source"] = source
+    await fakeredis.set(f"f1:{SEASON}:{ROUND_NUMBER}:gaps", json.dumps(payload))
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit is None
+
+
+@pytest.mark.unit
+async def test_live_gap_deficit_ignores_a_live_payload_for_a_different_session(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """The key is per season/round; e.g. FP2's live payload must not answer a race query."""
+    other_session, session_id = uuid.uuid4(), uuid.uuid4()
+    now_id, next_id = uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis, other_session, [_live_entry(next_id, 3, 4.0), _live_entry(now_id, 4, 5.0)]
+    )
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, session_id, now_id, next_id
+    )
+
+    assert deficit is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stored", [None, "not valid json", json.dumps([1, 2, 3])])
+async def test_live_gap_deficit_tolerates_missing_or_malformed_payload(
+    fakeredis: fakeredis_lib.FakeAsyncRedis, stored: str | None
+) -> None:
+    if stored is not None:
+        await fakeredis.set(f"f1:{SEASON}:{ROUND_NUMBER}:gaps", stored)
+
+    deficit = await strategy_service._live_gap_deficit(
+        fakeredis, SEASON, ROUND_NUMBER, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert deficit is None
+
+
+async def _undercut_projected_gap(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    target_id: uuid.UUID,
+) -> float:
+    """get_undercut_score's projected gap with a deterministic (constant-delta)
+    tyre model, so only the starting deficit can move the result. The DB mock
+    holds exactly the two _current_state reads — any cumulative-time read would
+    exhaust it and fail the test."""
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=2)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+    ]
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {"tire_deg_medium.pkl": _constant_delta_pipeline(0.1)},
+    )
+    result = await strategy_service.get_undercut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, driver_id, target_id
+    )
+    return float(result["projected_gap_seconds"])
+
+
+@pytest.mark.unit
+async def test_undercut_uses_the_live_gap_and_never_reads_summed_lap_times(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monza 2026 lap 30: summed lap times said VER led GAS by 1.0s; on the road
+    GAS was ahead. The live standings must win, and the DB sum must not be read."""
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await _set_gaps(
+        fakeredis, session_id, [_live_entry(target_id, 7, 40.0), _live_entry(driver_id, 8, 40.6)]
+    )
+    trailing = await _undercut_projected_gap(
+        mock_db_session, fakeredis, monkeypatch, session_id, driver_id, target_id
+    )
+
+    await fakeredis.flushall()
+    mock_db_session.reset_mock()
+    await _set_gaps(
+        fakeredis, session_id, [_live_entry(target_id, 7, 40.0), _live_entry(driver_id, 8, 30.0)]
+    )
+    leading = await _undercut_projected_gap(
+        mock_db_session, fakeredis, monkeypatch, session_id, driver_id, target_id
+    )
+
+    # Same tyres, same models: the projected gap moves by exactly the change in
+    # starting deficit (0.6 - (-10.0) = 10.6s), within Monte Carlo noise.
+    assert leading - trailing == pytest.approx(10.6, abs=1.0)
+
+
+@pytest.mark.unit
+async def test_undercut_falls_back_to_summed_lap_times_when_no_live_gap_exists(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replayed/historical session has no live payload — the DB path stays in charge."""
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=2)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        _elapsed_result(1810.0),  # driver's session_elapsed_seconds: 10s behind
+        _elapsed_result(1800.0),
+    ]
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {"tire_deg_medium.pkl": _constant_delta_pipeline(0.1)},
+    )
+
+    result = await strategy_service.get_undercut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, driver_id, target_id
+    )
+
+    # 10s behind and identical tyres: the projected gap must still be negative.
+    assert result["projected_gap_seconds"] < -5.0
+
+
+@pytest.mark.unit
+async def test_overcut_uses_the_live_gap_with_the_pit_roles_reversed(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """get_overcut_score routes the SAME live deficit through the shared helper
+    with driver/target swapped; the live payload must reach it too."""
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=2)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+    ]  # exhausted by any cumulative-time read
+    await _set_gaps(
+        fakeredis, session_id, [_live_entry(driver_id, 5, 20.0), _live_entry(target_id, 6, 24.0)]
+    )
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {"tire_deg_medium.pkl": _constant_delta_pipeline(0.1)},
+    )
+
+    result = await strategy_service.get_overcut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, driver_id, target_id
+    )
+
+    # Target trails the driver by 4s; a pit stop costs ~22s, so staying out
+    # retains the position with near certainty.
+    assert result["probability_stay_out_retains_position"] > 0.9
+
+
+@pytest.mark.unit
+async def test_resolve_field_neighbors_prefers_live_standings_and_skips_the_db(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, ahead_id, behind_id = (uuid.uuid4() for _ in range(4))
+    await _set_gaps(
+        fakeredis,
+        session_id,
+        [
+            _live_entry(ahead_id, 1, None, gap_to_ahead=0.0, gap_to_behind=2.5),
+            _live_entry(driver_id, 2, 2.5, gap_to_ahead=2.5, gap_to_behind=4.0),
+            _live_entry(behind_id, 3, 6.5, gap_to_ahead=4.0, gap_to_behind=0.0),
+        ],
+    )
+
+    result = await strategy_service._resolve_field_neighbors(
+        fakeredis, mock_db_session, session_id, driver_id, 15, SEASON, ROUND_NUMBER
+    )
+
+    mock_db_session.execute.assert_not_called()
+    assert result["position"] == 2
+    assert result["gap_to_car_ahead"] == pytest.approx(2.5)
+    assert result["gap_to_car_behind"] == pytest.approx(4.0)
+    assert result["target_ahead_driver_id"] == ahead_id
+    assert result["target_behind_driver_id"] == behind_id
+
+
+@pytest.mark.unit
+async def test_resolve_field_neighbors_ignores_a_replay_payload_and_uses_the_db_path(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        f"f1:{SEASON}:{ROUND_NUMBER}:gaps",
+        _live_gaps_payload(
+            session_id,
+            [
+                _live_entry(ahead_id, 1, None, gap_to_ahead=0.0),
+                _live_entry(driver_id, 2, 2.5, gap_to_ahead=2.5),
+            ],
+            source="replay",
+        ),
+    )
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await strategy_service._resolve_field_neighbors(
+        fakeredis, mock_db_session, session_id, driver_id, 15, SEASON, ROUND_NUMBER
+    )
+
+    # The DB path ran; the replay payload did not short-circuit it.
+    mock_db_session.execute.assert_called()
+
+
+# --- property tests: invariants of the undercut/overcut maths and the live-gap
+# deficit that must hold for ANY input, not just hand-picked cases. A sign or
+# convention error (e.g. reading the requester as "ahead" when it trails) breaks
+# these for a whole family of inputs. Randomness is a seeded stdlib Random, so
+# every run is reproducible. ---
+
+_PROPERTY_SEED = 20260919
+
+
+def _common_random_numbers(monkeypatch: pytest.MonkeyPatch, seed: int = 4242) -> None:
+    """Give every Monte Carlo call the SAME noise draws, so a property about the
+    inputs is not muddied by sampling noise between two calls."""
+    real_default_rng = np.random.default_rng
+    monkeypatch.setattr(np.random, "default_rng", lambda *a, **k: real_default_rng(seed))
+
+
+async def _undercut_for_gaps(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    target_id: uuid.UUID,
+    driver_gap: float,
+    target_gap: float,
+    *,
+    reverse_roles: bool = False,
+) -> dict[str, Any]:
+    """_undercut_overcut_probability on a live tower where the two drivers sit at the
+    given gaps to the leader (both well behind it)."""
+    await fakeredis.flushall()
+    await _set_gaps(
+        fakeredis,
+        session_id,
+        [_live_entry(uuid.uuid4(), 1, None), _live_entry(target_id, 5, target_gap)]
+        + [_live_entry(driver_id, 6, driver_gap)],
+    )
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=6)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+    ]
+    now, nxt = (target_id, driver_id) if reverse_roles else (driver_id, target_id)
+    return await strategy_service._undercut_overcut_probability(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, now, nxt
+    )
+
+
+@pytest.fixture
+def constant_tyre_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {"tire_deg_medium.pkl": _constant_delta_pipeline(0.1)},
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_property_undercut_probability_never_rises_as_the_deficit_grows(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The further the pitting driver trails, the less likely pitting gains the place."""
+    _common_random_numbers(monkeypatch)
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    deficits = [-12.0, -8.0, -4.0, -2.0, -1.0, -0.25, 0.0, 0.25, 1.0, 2.0, 4.0, 8.0, 12.0]
+
+    probabilities = []
+    for deficit in deficits:
+        result = await _undercut_for_gaps(
+            mock_db_session, fakeredis, session_id, driver_id, target_id, 40.0 + deficit, 40.0
+        )
+        probabilities.append(result["probability_pit_now_gains_position"])
+
+    assert all(a >= b for a, b in zip(probabilities, probabilities[1:], strict=False))
+    assert probabilities[0] > 0.99  # 12s ahead: pitting certainly still leads
+    assert probabilities[-1] < 0.01  # 12s behind: cannot make it up
+    assert 0.3 < probabilities[deficits.index(0.0)] < 0.7  # level: a toss-up
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_property_projected_gap_falls_one_for_one_with_the_deficit(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _common_random_numbers(monkeypatch)
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    gaps = [
+        (
+            await _undercut_for_gaps(
+                mock_db_session, fakeredis, session_id, driver_id, target_id, 40.0 + d, 40.0
+            )
+        )["projected_gap_seconds"]
+        for d in (0.0, 3.0, 9.0)
+    ]
+
+    # Same noise draws, so the only change is the starting deficit: each extra
+    # second behind is exactly one second less of projected gap.
+    assert gaps[0] - gaps[1] == pytest.approx(3.0)
+    assert gaps[1] - gaps[2] == pytest.approx(6.0)
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_property_only_the_gap_difference_matters_not_where_on_track_it_is(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _common_random_numbers(monkeypatch)
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    near = await _undercut_for_gaps(
+        mock_db_session, fakeredis, session_id, driver_id, target_id, 12.0 + 1.5, 12.0
+    )
+    far = await _undercut_for_gaps(
+        mock_db_session, fakeredis, session_id, driver_id, target_id, 95.0 + 1.5, 95.0
+    )
+
+    assert near == far
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_property_result_is_deterministic_for_a_fixed_seed(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _common_random_numbers(monkeypatch)
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    first = await _undercut_for_gaps(
+        mock_db_session, fakeredis, session_id, driver_id, target_id, 41.0, 40.0
+    )
+    second = await _undercut_for_gaps(
+        mock_db_session, fakeredis, session_id, driver_id, target_id, 41.0, 40.0
+    )
+
+    assert first == second
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_property_overcut_is_the_exact_complement_of_the_reversed_undercut(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P(driver keeps the place by staying out) + P(target gains it by pitting now) = 1,
+    and the projected gap flips sign."""
+    _common_random_numbers(monkeypatch)
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    driver_gap, target_gap = 43.0, 40.0
+    reversed_undercut = await _undercut_for_gaps(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        driver_id,
+        target_id,
+        driver_gap,
+        target_gap,
+        reverse_roles=True,
+    )
+
+    await fakeredis.flushall()
+    await _set_gaps(
+        fakeredis,
+        session_id,
+        [
+            _live_entry(uuid.uuid4(), 1, None),
+            _live_entry(target_id, 5, target_gap),
+            _live_entry(driver_id, 6, driver_gap),
+        ],
+    )
+    circuit_id = uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=6)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+    ]
+    overcut = await strategy_service.get_overcut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, driver_id, target_id
+    )
+
+    assert overcut["probability_stay_out_retains_position"] + reversed_undercut[
+        "probability_pit_now_gains_position"
+    ] == pytest.approx(1.0)
+    assert overcut["projected_gap_seconds"] == pytest.approx(
+        -reversed_undercut["projected_gap_seconds"]
+    )
+
+
+def _random_live_tower(
+    rng: random.Random, session_id: uuid.UUID
+) -> tuple[list[dict[str, Any]], list[uuid.UUID]]:
+    """A random live tower: leader, lead-lap cars with strictly increasing gaps, and
+    some lapped cars (no seconds gap). Returns (entries, lead-lap driver ids in order)."""
+    n_lead_lap = rng.randint(3, 16)
+    gap, lead_lap = 0.0, []
+    entries: list[dict[str, Any]] = []
+    for position in range(1, n_lead_lap + 1):
+        driver_id = uuid.uuid4()
+        gap += rng.uniform(0.05, 9.0)
+        entries.append(_live_entry(driver_id, position, None if position == 1 else gap))
+        lead_lap.append(driver_id)
+    for i in range(rng.randint(0, 4)):
+        entries.append(
+            _live_entry(uuid.uuid4(), n_lead_lap + 1 + i, None, laps_behind=rng.randint(1, 2))
+        )
+    rng.shuffle(entries)  # the payload need not be in position order
+    return entries, lead_lap
+
+
+@pytest.mark.unit
+async def test_property_live_gap_deficit_is_antisymmetric_additive_and_matches_track_order(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    rng = random.Random(_PROPERTY_SEED)  # noqa: S311 - seeded on purpose, not security
+    session_id = uuid.uuid4()
+
+    async def deficit(a: uuid.UUID, b: uuid.UUID) -> float | None:
+        return await strategy_service._live_gap_deficit(
+            fakeredis, SEASON, ROUND_NUMBER, session_id, a, b
+        )
+
+    for _ in range(150):
+        entries, lead_lap = _random_live_tower(rng, session_id)
+        await _set_gaps(fakeredis, session_id, entries)
+        a, b, c = rng.sample(lead_lap, 3)
+
+        d_ab, d_ba = await deficit(a, b), await deficit(b, a)
+        d_bc, d_ac = await deficit(b, c), await deficit(a, c)
+
+        assert d_ab is not None
+        assert d_ba is not None
+        assert d_bc is not None
+        assert d_ac is not None
+        assert d_ab == pytest.approx(-d_ba)
+        assert d_ab + d_bc == pytest.approx(d_ac)
+        # Positive exactly when `a` is further back than `b` in the running order.
+        assert (d_ab > 0) == (lead_lap.index(a) > lead_lap.index(b))
+        assert await deficit(a, a) == pytest.approx(0.0)
+
+
+@pytest.mark.unit
+async def test_property_live_gap_deficit_is_none_whenever_either_driver_is_lapped(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    rng = random.Random(_PROPERTY_SEED + 1)  # noqa: S311 - seeded on purpose, not security
+    session_id = uuid.uuid4()
+
+    for _ in range(60):
+        entries, lead_lap = _random_live_tower(rng, session_id)
+        lapped = [
+            uuid.UUID(e["driver_id"])
+            for e in entries
+            if e["gap_to_leader_seconds"] is None and e["position"] != 1
+        ]
+        if not lapped:
+            continue
+        await _set_gaps(fakeredis, session_id, entries)
+        other = rng.choice(lead_lap)
+
+        for pair in ((lapped[0], other), (other, lapped[0])):
+            assert (
+                await strategy_service._live_gap_deficit(
+                    fakeredis, SEASON, ROUND_NUMBER, session_id, *pair
+                )
+                is None
+            )
+
+
+# --- always-on pipeline counters (V5): which gap source the undercut maths used ---
+
+
+async def _pipeline_stats(
+    client: fakeredis_lib.FakeAsyncRedis, season_round: str
+) -> dict[str, int]:
+    raw = await client.hgetall(f"f1:{season_round}:pipeline_stats")
+    return {k: int(v) for k, v in raw.items()}
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_counter_records_a_live_gap_source_when_the_live_deficit_was_used(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    await _undercut_for_gaps(
+        mock_db_session, fakeredis, session_id, driver_id, target_id, 41.0, 40.0
+    )
+
+    assert await _pipeline_stats(fakeredis, f"{SEASON}:{ROUND_NUMBER}") == {"gap_source_live": 1}
+    assert await fakeredis.ttl(f"f1:{SEASON}:{ROUND_NUMBER}:pipeline_stats") > 0
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("constant_tyre_model")
+async def test_counter_records_the_summed_time_fallback_when_there_is_no_live_gap(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=10, position=2)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=uuid.uuid4()),
+        *_current_state_side_effects(lap, total_laps=50, circuit_id=uuid.uuid4()),
+        _elapsed_result(1810.0),
+        _elapsed_result(1800.0),
+    ]
+
+    await strategy_service.get_undercut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, session_id, driver_id, target_id
+    )
+
+    assert await _pipeline_stats(fakeredis, f"{SEASON}:{ROUND_NUMBER}") == {"gap_source_summed": 1}
+
+
+@pytest.mark.unit
+async def test_counter_accumulates_across_calls(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    for _ in range(3):
+        await strategy_service._bump_pipeline_stat(
+            fakeredis, SEASON, ROUND_NUMBER, "gap_source_live"
+        )
+    await strategy_service._bump_pipeline_stat(fakeredis, SEASON, ROUND_NUMBER, "gap_source_summed")
+
+    assert await _pipeline_stats(fakeredis, f"{SEASON}:{ROUND_NUMBER}") == {
+        "gap_source_live": 3,
+        "gap_source_summed": 1,
+    }
+
+
+@pytest.mark.unit
+async def test_a_redis_failure_while_counting_never_breaks_the_calculation() -> None:
+    broken = AsyncMock()
+    broken.hincrby.side_effect = RedisError("down")
+
+    await strategy_service._bump_pipeline_stat(
+        broken, SEASON, ROUND_NUMBER, "gap_source_live"
+    )  # no raise
