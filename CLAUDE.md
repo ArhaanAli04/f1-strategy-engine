@@ -160,6 +160,18 @@ FCM_SERVER_KEY        [from Firebase Console]
 ENVIRONMENT           development | staging | production
 ```
 
+Optional — these have defaults, the app starts without them:
+
+```
+RECORD_RAW_FEED       true | false. Raw live-feed recorder (see Auto Race Detection below).
+                      Code default: false. docker-compose.yml's worker defaults it to true, so
+                      simply starting the containers records the next auto-detected race.
+                      Set false in .env and recreate the worker to turn it off.
+RAW_FEED_RECORD_DIR   Where recordings are written. Code default: recordings (relative to the
+                      working directory). The worker container uses /recordings, which is the
+                      host's ./recordings folder (gitignored).
+```
+
 ---
 
 ## Architecture Decisions (understand these before proposing alternatives)
@@ -382,6 +394,8 @@ f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, 
 f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
 f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. TTL is a safety net well above a curated window's ~20-min playout.)
 f1:strategy:last_ingested_session                            TTL: 86400s   (newest-race_date COMPLETED R session that has lap_data — GET /strategy/last-ingested-session, the Strategy Simulator's session source when no race is live. Race.status == "completed" filter added 2026-08-30 to exclude partially live-ingested sessions, see Deferred Wiring/Notes. Not written by ingestion, so a newer ingest surfaces after this expires or a manual cache_service delete. Constant key — resolved per-environment from that DB.)
+f1:{season}:{round}:ingest_stats                              TTL: 86400s   (V5, 2026-09-19 — not cached data: a JSON string of the live ingestor's session counters — timing_messages, laps_dispatched, rankings_by_f1_position / rankings_by_gaps, cars_flagged_out, connections_opened, subscribe_snapshots, position_first_message_seq (null = F1's Position field never streamed on the live feed), recording path, updated_at. Written by ingest_live_session.py's publish_stats at most every 15s and once when the session ends, so what the live feed actually did can be read after a race; the 24h TTL keeps it that long. See docs/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c.)
+f1:{season}:{round}:pipeline_stats                            TTL: 86400s   (V5, 2026-09-19 — not cached data: a Redis HASH of counters, HINCRBY with the TTL refreshed on every write — gap_source_live / gap_source_summed (strategy_service's undercut/overcut maths), neighbors_source_live / neighbors_source_db (prediction_worker), alert_order_source_live / alert_order_source_db, alerts_suppressed_tyre_age / alerts_suppressed_laps_remaining, alerts_dispatched (alert_service). Best-effort: a Redis error is logged and ignored, never raised. Counts include non-live sessions (replays, historical), so read them in the context of the session.)
 ```
 
 When adding a new cache key: add it to this list with TTL and justification.
@@ -459,6 +473,28 @@ min *before*-start window) is unchanged and still available as a separate,
 manually-run all-sessions alternative; the two now share their Ergast
 date/time parsing via `_ingest_common.py`'s `SESSION_TYPE_TO_ERGAST_COLUMNS`/
 `combine_ergast_date_time` rather than duplicating it.
+
+**Raw live-feed recording (V5, 2026-09-19):** when the worker launches the
+ingestor (the subprocess inherits the container's environment),
+`RECORD_RAW_FEED` — defaulted to `true` in `docker-compose.yml`, so starting
+the stack is enough — makes it also write every TimingData-family message it
+receives from F1's socket to `recordings/<season>_R<round>_R_<UTC start>.jsonl.gz`
+(the host's gitignored `./recordings`, mounted at `/recordings`): one file of a
+few MB per auto-detected race, plus the Subscribe snapshot and connect/
+disconnect events. `CarData.z`/`Position.z` are never recorded (F1TV-only, see
+Deferred Wiring). Purpose: settle whether F1's race-order `Position` field
+really streams on the live socket, and replay a live race exactly as delivered
+(`python -m backend.scripts.verify_live_feed_archive --recording <file>
+--season <s> --round <n>`). A write failure is logged and never breaks
+ingestion. The counters (`ingest_stats`, `pipeline_stats` in the Redis schema
+above) are always on, recording or not. To turn recording off: set
+`RECORD_RAW_FEED=false` in `.env` and recreate the worker
+(`docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+--force-recreate worker` — a plain `restart` does not re-read compose
+settings). Manual host runs (`make ingest-live`) use the code default (off)
+unless the variable is set. Recordings are not cleaned up automatically.
+Full detail: `docs/live-race-ingestion-and-strategy-gaps-monza-2026.md`
+section 7c.
 
 ---
 
@@ -1709,6 +1745,35 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Two `prediction_worker` bugs found by the V3 shadow race (✅ fixed
+2026-09-19):** `backend/scripts/shadow_race.py` (V3 — replays Monza's
+archived F1 feed through the real ingestor, Redis, Celery worker and Postgres
+under a throwaway season-2098 race, then runs 14 automatic checks; `python -m
+backend.scripts.shadow_race run|verify|cleanup`, never while a real race is
+live) found two production bugs that unit tests could not, both in
+`workers/prediction_worker.py`. (1) `_persist_and_publish` called
+`get_engine().dispose()` after its `try` block, so any exception skipped it and
+left a pooled asyncpg connection bound to a closed event loop for the next
+`asyncio.run` — one failed prediction could take down the ones after it (same
+shape as the `_run_simulation` and `telemetry_worker` fixes above). Now disposed
+in a nested `finally` (Redis client closed first; a failing close still
+disposes). (2) The ingestor sends `process_lap` (`telemetry_queue`) and
+`run_strategy_prediction` (`prediction_queue`) back to back and nothing orders
+them, so at a lap boundary (queue peak 21) a prediction could run before its
+lap was written and raise `NotFoundError` — 15 of 233 laps (6.4%) got no
+prediction or alert; bug 1 had been hiding it. `run_strategy_prediction` is now a
+bound task that retries on `NotFoundError` only, `_LAP_NOT_YET_PERSISTED_RETRIES=4`
+times, `_LAP_NOT_YET_PERSISTED_DELAY_SECONDS=3` apart; once spent, the error
+still fails the task. **Verified:** smoke run (start to lap 12 of 53) went from
+2 failed checks (218/233 predictions) to 14 of 14 (233/233, 0 errors; p95
+prediction lag 14 s → 31 s from the retried laps); 5 new unit tests; 648 unit
+passed. Not yet done: the full-race shadow run, and the identical dispose flaw
+in `alert_worker._dispatch` (left alone deliberately). Chaining
+`process_lap` → prediction would remove the race instead of retrying it, but
+touches the telemetry worker, the ingestor and the replay tools — an open owner
+decision. Full write-up: `docs/live-race-ingestion-and-strategy-gaps-monza-2026.md`
+section 7d.
 
 **Pit-timing threshold retuning + a monotonic-constraint retrain — both
 investigated, neither landed (2026-09-11, tire-deg-model-quality-and-rival-

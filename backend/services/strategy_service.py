@@ -69,6 +69,7 @@ import joblib
 import numpy as np
 import redis.asyncio as aioredis
 from botocore.exceptions import ClientError
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1035,6 +1036,7 @@ async def _resolve_field_neighbors_from_redis(
     season: int,
     round_number: int,
     driver_id: uuid.UUID,
+    live_session_id: uuid.UUID | None = None,
 ) -> dict[str, Any] | None:
     """Field position/gaps from the live-authoritative f1:{season}:{round}:gaps key.
 
@@ -1052,17 +1054,27 @@ async def _resolve_field_neighbors_from_redis(
         client: Redis client.
         season, round_number: Race weekend identifiers, for the key.
         driver_id: Driver to locate within the field.
+        live_session_id: If given, only accept a payload F1's live feed wrote
+            for THIS session ("source" == "live", matching "session_id") —
+            see the worker copy's docstring for why a live session must not
+            use the DB cumulative-sum gaps.
     Returns:
         Same shape as _resolve_field_neighbors' return value, or None if the
-        key is missing/unparsable/this driver isn't in it — callers must
-        treat None as "no live-gaps fallback available," not an error.
+        key is missing/unparsable/this driver isn't in it (or, with
+        live_session_id, isn't a live payload for that session) — callers
+        must treat None as "no live-gaps source available," not an error.
     """
     raw = await client.get(f"f1:{season}:{round_number}:gaps")
     if raw is None:
         return None
     try:
-        entries = json.loads(raw)["gaps"]
+        payload = json.loads(raw)
+        entries = payload["gaps"]
     except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if live_session_id is not None and (
+        payload.get("source") != "live" or payload.get("session_id") != str(live_session_id)
+    ):
         return None
 
     index = next(
@@ -1118,9 +1130,12 @@ async def _resolve_field_neighbors(
     CLAUDE.md's Deferred Wiring entry documented and Checkpoint 1 of this
     rebuild fixed on prediction_worker's own call site — this duplicates
     that same fix onto the second call site that needed it, rather than
-    silently reintroducing it here). Falls back to the live-authoritative
-    Redis gaps key (_resolve_field_neighbors_from_redis) when the bounded
-    query can't resolve driver_id's own position.
+    silently reintroducing it here). A genuinely live session is resolved
+    from F1's own live standings first (see prediction_worker.
+    _resolve_position_context's docstring for why the DB cumulative-sum gaps
+    are wrong for one); otherwise falls back to the same Redis gaps key
+    (_resolve_field_neighbors_from_redis) when the bounded query can't
+    resolve driver_id's own position.
 
     Args:
         client: Redis client, for the live-gaps fallback.
@@ -1137,6 +1152,12 @@ async def _resolve_field_neighbors(
         MAX_GAP_SECONDS/no-target/back-of-field when driver_id has no
         resolvable position at all.
     """
+    live_result = await _resolve_field_neighbors_from_redis(
+        client, season, round_number, driver_id, live_session_id=session_id
+    )
+    if live_result is not None:
+        return live_result
+
     subq = (
         select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
         .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
@@ -1648,7 +1669,96 @@ async def get_pit_window_with_explanation(
 # --- get_undercut_score / get_overcut_score ---
 
 
+# f1:{season}:{round}:pipeline_stats — a Redis hash of counters for what the live
+# strategy pipeline actually did (which gap source the undercut maths used, which
+# source the neighbours came from, alerts suppressed per gate), kept a day so it can
+# be read after a race. Best-effort: a Redis error is logged and ignored, never raised.
+_PIPELINE_STATS_TTL_SECONDS = 86400
+
+
+async def _bump_pipeline_stat(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    field: str,
+) -> None:
+    key = f"f1:{season}:{round_number}:pipeline_stats"
+    try:
+        await client.hincrby(key, field, 1)
+        await client.expire(key, _PIPELINE_STATS_TTL_SECONDS)
+    except RedisError:
+        logger.debug("Could not update pipeline stat %s", field, exc_info=True)
+
+
+async def _live_gap_deficit(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    session_id: uuid.UUID,
+    pitting_now_driver_id: uuid.UUID,
+    pitting_next_lap_driver_id: uuid.UUID,
+) -> float | None:
+    """How far pitting_now_driver_id trails pitting_next_lap_driver_id, from F1's live gaps.
+
+    Reads f1:{season}:{round}:gaps (ingest_live_session.py's _publish_live_gaps)
+    and returns the difference of the two drivers' gap to the leader — F1's own
+    number, not a reconstruction. This exists because the DB path
+    (_cumulative_race_time) sums recorded lap times, which for a live-ingested
+    session omits lap 1 for every driver (no time is recorded for it) and so
+    drops every gap that opened on the opening lap: on Monza 2026 it put the
+    requester "already ahead" of the car ahead in 33% of real predictions
+    against 4% on the road, and 61% of the saturated 100% undercut scores rode
+    on such a wrong-signed gap (docs/live-race-ingestion-and-strategy-gaps-
+    monza-2026.md Issue B).
+
+    The snapshot is the CURRENT tower, not the tower as of the lap being
+    evaluated; see prediction_worker._resolve_position_context's docstring.
+
+    Args:
+        client: Redis client.
+        season, round_number: Race weekend identifiers, for the key.
+        session_id: Session being evaluated — a payload for any other session
+            (the key is per season/round) is ignored.
+        pitting_now_driver_id, pitting_next_lap_driver_id: As in
+            _undercut_overcut_probability.
+    Returns:
+        Positive seconds when pitting_now_driver_id is behind (the same sign
+        convention as the DB deficit). None when there is no usable live
+        answer — no live payload for this session, either driver absent, or
+        either driver lapped (no seconds gap to the leader exists) — and the
+        caller keeps the DB deficit rather than guessing.
+    """
+    raw = await client.get(f"f1:{season}:{round_number}:gaps")
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+        entries = payload["gaps"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if payload.get("source") != "live" or payload.get("session_id") != str(session_id):
+        return None
+
+    by_driver = {e.get("driver_id"): e for e in entries if isinstance(e, dict)}
+
+    def _gap_to_leader(driver_id: uuid.UUID) -> float | None:
+        entry = by_driver.get(str(driver_id))
+        if entry is None:
+            return None
+        if entry.get("position") == 1:
+            return 0.0
+        gap = entry.get("gap_to_leader_seconds")
+        return float(gap) if isinstance(gap, int | float) else None
+
+    now_gap = _gap_to_leader(pitting_now_driver_id)
+    next_gap = _gap_to_leader(pitting_next_lap_driver_id)
+    if now_gap is None or next_gap is None:
+        return None
+    return now_gap - next_gap
+
+
 async def _undercut_overcut_probability(
+    client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
     season: int,
     round_number: int,
@@ -1665,7 +1775,13 @@ async def _undercut_overcut_probability(
     UNDERCUT_MONTE_CARLO_SIMS Gaussian-noise draws turn the deterministic tire_deg
     prediction into a probability that pitting_now_driver_id ends up ahead.
 
+    The starting gap between the two drivers comes from F1's live standings
+    when this is a live session (_live_gap_deficit) and from summed lap times
+    otherwise (a historical/replayed session, where session_elapsed_seconds
+    makes that sum correct).
+
     Args:
+        client: Redis client, for the live gaps.
         db: Async DB session.
         season, round_number: Race weekend identifiers (unused now that the
             track_temp/air_temp-driven weather lookup has been removed from
@@ -1684,14 +1800,26 @@ async def _undercut_overcut_probability(
     now_state = await _current_state(db, session_id, pitting_now_driver_id)
     next_state = await _current_state(db, session_id, pitting_next_lap_driver_id)
 
-    now_time = await _cumulative_race_time(
-        db, session_id, pitting_now_driver_id, now_state["lap_number"]
-    )
-    next_time = await _cumulative_race_time(
-        db, session_id, pitting_next_lap_driver_id, next_state["lap_number"]
-    )
     # Positive deficit => pitting_now_driver_id currently trails pitting_next_lap_driver_id.
-    deficit = now_time - next_time
+    live_deficit = await _live_gap_deficit(
+        client, season, round_number, session_id, pitting_now_driver_id, pitting_next_lap_driver_id
+    )
+    await _bump_pipeline_stat(
+        client,
+        season,
+        round_number,
+        "gap_source_live" if live_deficit is not None else "gap_source_summed",
+    )
+    if live_deficit is not None:
+        deficit = live_deficit
+    else:
+        now_time = await _cumulative_race_time(
+            db, session_id, pitting_now_driver_id, now_state["lap_number"]
+        )
+        next_time = await _cumulative_race_time(
+            db, session_id, pitting_next_lap_driver_id, next_state["lap_number"]
+        )
+        deficit = now_time - next_time
 
     now_pipeline = _pipeline_for_compound(models, now_state["compound"])
     next_pipeline = _pipeline_for_compound(models, next_state["compound"])
@@ -1822,7 +1950,7 @@ async def get_undercut_score(
         >= 0.5, else "STAY OUT").
     """
     result = await _undercut_overcut_probability(
-        db, season, round_number, session_id, driver_id, target_driver_id
+        client, db, season, round_number, session_id, driver_id, target_driver_id
     )
     recommended_action = (
         "PIT NOW" if result["probability_pit_now_gains_position"] >= 0.5 else "STAY OUT"
@@ -1869,7 +1997,7 @@ async def get_overcut_score(
         projected_gap_seconds (driver_id's perspective), n_laps_projected.
     """
     result = await _undercut_overcut_probability(
-        db, season, round_number, session_id, target_driver_id, driver_id
+        client, db, season, round_number, session_id, target_driver_id, driver_id
     )
     return {
         "target_driver_id": str(target_driver_id),

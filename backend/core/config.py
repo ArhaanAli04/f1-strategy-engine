@@ -98,6 +98,18 @@ class LiveTimingSettings(BaseSettings):
     # beat schedule itself — see CLAUDE.md's Auto Race Detection section.
     auto_race_detection_enabled: bool = True
 
+    # Off by default in code (docker-compose.yml turns it on for the containers). When
+    # true, the live ingestor also writes every TimingData-family
+    # message it receives from F1's socket (plus the Subscribe snapshot and
+    # connect/disconnect events) to one gzip'd JSONL file per session in
+    # raw_feed_record_dir, so a real live race can be replayed exactly as
+    # delivered — see docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    # section 7c (V5). The CarData.z/Position.z topics are never recorded (they
+    # need F1TV and carry nothing in no_auth mode). Read once at process start,
+    # like every setting here: changing it needs the worker recreated.
+    record_raw_feed: bool = False
+    raw_feed_record_dir: str = "recordings"
+
 
 class AppSettings(BaseSettings):
     model_config = _ENV

@@ -289,12 +289,15 @@ async def run(session_id: str) -> None:
         # this schema has no dedicated retirement/DNF field, and a driver
         # who simply has no further lap_data rows is exactly what a
         # retirement looks like from this data source. One tick after their
-        # last row, synthesize the explicit "RETIRED" GapToLeader marker a
-        # real F1 feed would send — without this, the harness never
-        # exercises _update_gap_state's retirement-eviction fix at all (it
-        # only fires on that specific marker), even though the underlying
-        # bug it fixes is real. Confirmed live: PER/STR/ALO/BOT's positions
-        # only diverged AFTER their real retirement lap once this was added.
+        # last row, synthesize the Retired/ShowPosition=false booleans F1's
+        # real feed sends (confirmed against Monza 2026's archived stream by
+        # verify_live_feed_archive.py — F1 never sends a "RETIRED" gap
+        # string, which an earlier version of this harness invented, and so
+        # wrongly "validated" an eviction the real feed never triggered) —
+        # without this, the harness never exercises the ingestor's
+        # retirement handling at all. Confirmed live: PER/STR/ALO/BOT's
+        # positions only diverged AFTER their real retirement lap once this
+        # was added.
         last_lap_by_car = {
             d.car_number: max(lap.lap_number for lap in d.laps)
             for d in by_driver.values()
@@ -346,7 +349,11 @@ async def run(session_id: str) -> None:
             timing_data_message = _build_timing_data_message(lap_by_car)
             for car, last_lap in last_lap_by_car.items():
                 if last_lap + 1 == lap_number:
-                    timing_data_message["Lines"][car] = {"GapToLeader": "RETIRED"}
+                    timing_data_message["Lines"][car] = {
+                        "Retired": True,
+                        "Stopped": True,
+                        "ShowPosition": False,
+                    }
             ingestor._handle_timing_data(timing_data_message)
     finally:
         process_lap.delay = process_lap_delay

@@ -53,11 +53,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import NotFoundError
 from backend.models.driver import Driver
+from backend.models.race import Race
+from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
 from backend.models.telemetry import LapData
 from backend.models.user import Alert, Subscription
@@ -67,6 +70,20 @@ from backend.schemas.user_schema import SubscriptionCreate, SubscriptionResponse
 logger = logging.getLogger(__name__)
 
 UNDERCUT_ALERT_THRESHOLD = 0.5
+
+# Situations where an undercut alert is not worth showing even when the score is
+# high (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). An
+# undercut alert means "pit now and come out ahead", so:
+# - a driver whose tyres are only a few laps old has just pitted — there is no
+#   further stop to take. Monza 2026: 45 of the 202 alert-eligible predictions
+#   were for a driver on tyres <= 3 laps old.
+# - with fewer than this many laps left, a further stop is rarely worth its pit
+#   loss. Monza 2026: 25 of the 202 alert-eligible predictions had < 15 laps
+#   left, and none of the predictions that late scored above 0.999.
+# Alerts are suppressed at or beyond these limits. The raw undercut_score is
+# still stored unchanged — these gate the ALERT, not the probability.
+UNDERCUT_ALERT_MIN_TYRE_AGE_LAPS = 4
+UNDERCUT_ALERT_MIN_LAPS_REMAINING = 15
 
 # Shorter than a real F1 lap (~80-100s) so a threat that persists across
 # several lap-round evaluation bursts for the SAME pair isn't re-dispatched
@@ -102,6 +119,131 @@ async def _latest_positions(db: AsyncSession, session_id: uuid.UUID) -> list[Lap
         .order_by(LapData.position)
     )
     return list((await db.execute(query)).scalars().all())
+
+
+# f1:{season}:{round}:pipeline_stats — a Redis hash of counters for what the live
+# strategy pipeline actually did (which gap source the undercut maths used, which
+# source the neighbours came from, alerts suppressed per gate), kept a day so it can
+# be read after a race. Best-effort: a Redis error is logged and ignored, never raised.
+_PIPELINE_STATS_TTL_SECONDS = 86400
+
+
+async def _bump_pipeline_stat(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    field: str,
+) -> None:
+    key = f"f1:{season}:{round_number}:pipeline_stats"
+    try:
+        await client.hincrby(key, field, 1)
+        await client.expire(key, _PIPELINE_STATS_TTL_SECONDS)
+    except RedisError:
+        logger.debug("Could not update pipeline stat %s", field, exc_info=True)
+
+
+async def _session_race_context(
+    db: AsyncSession, session_id: uuid.UUID
+) -> tuple[int, int, int | None] | None:
+    """(season, round_number, total_laps) for a session, or None if it doesn't exist.
+
+    total_laps is the REAL scheduled distance (Session.total_laps) and None when
+    that isn't known — never the MAX(lap_number)-so-far proxy, which mid-race
+    just restates how far the race has got and would make every lap look like
+    "no laps remaining".
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+    Returns:
+        The three values, or None.
+    """
+    query = (
+        select(Race.season, Race.round_number, SessionModel.total_laps)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    row = (await db.execute(query)).one_or_none()
+    if row is None:
+        return None
+    return int(row.season), int(row.round_number), row.total_laps
+
+
+async def _live_standing_order(
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    session_id: uuid.UUID,
+) -> list[uuid.UUID] | None:
+    """Drivers in current running order from F1's live standings, or None.
+
+    Reads f1:{season}:{round}:gaps as written by ingest_live_session.py
+    (source == "live") for THIS session. Retired and hidden cars are not in
+    it. This replaces building the order from each driver's latest stored
+    lap_data row, which keeps a retiree at its last recorded position for the
+    rest of the race and mixes rows from different laps: on Monza 2026 that
+    put a car that retired on lap 1 next to VER in the pairing for the whole
+    race, producing "VER on LEC" alerts (16 of 44 in a replay with corrected
+    scores).
+
+    Args:
+        redis_client: Async Redis client.
+        season, round_number: Race weekend identifiers, for the key.
+        session_id: Session being evaluated.
+    Returns:
+        Driver ids, leader first; None when there is no usable live payload
+        for this session (a replay, a historical session, a missing or
+        malformed key) — callers then keep the DB-derived order.
+    """
+    raw = await redis_client.get(f"f1:{season}:{round_number}:gaps")
+    if raw is None:
+        return None
+    try:
+        payload = json.loads(raw)
+        entries = payload["gaps"]
+        if payload.get("source") != "live" or payload.get("session_id") != str(session_id):
+            return None
+        ordered = sorted(entries, key=lambda entry: entry["position"])
+        return [uuid.UUID(entry["driver_id"]) for entry in ordered]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _alert_suppression_reason(
+    lap_number: int, tyre_age_laps: int, total_laps: int | None
+) -> str | None:
+    """Why an undercut alert should not be shown for this trailing driver, or None.
+
+    Args:
+        lap_number: The driver's latest completed lap.
+        tyre_age_laps: Age of the driver's current tyres at that lap.
+        total_laps: Real scheduled race distance, or None if unknown (the
+            remaining-laps limit is then not applied).
+    Returns:
+        "tyre_age" when the tyres are too fresh, "laps_remaining" when too few
+        laps remain, otherwise None.
+    """
+    if tyre_age_laps < UNDERCUT_ALERT_MIN_TYRE_AGE_LAPS:
+        return "tyre_age"
+    if total_laps is not None and total_laps - lap_number < UNDERCUT_ALERT_MIN_LAPS_REMAINING:
+        return "laps_remaining"
+    return None
+
+
+def _alert_suppressed_by_race_state(
+    lap_number: int, tyre_age_laps: int, total_laps: int | None
+) -> bool:
+    """Whether an undercut alert should not be shown for this trailing driver.
+
+    Args:
+        lap_number: The driver's latest completed lap.
+        tyre_age_laps: Age of the driver's current tyres at that lap.
+        total_laps: Real scheduled race distance, or None if unknown (the
+            remaining-laps limit is then not applied).
+    Returns:
+        True when the tyres are too fresh or too few laps remain.
+    """
+    return _alert_suppression_reason(lap_number, tyre_age_laps, total_laps) is not None
 
 
 async def _latest_undercut_scores(
@@ -191,7 +333,14 @@ async def evaluate_threats(
     trailing/ahead pair in current running order, dispatches an UNDERCUT_THREAT
     alert to subscribers of the trailing driver if their undercut_score exceeds
     UNDERCUT_ALERT_THRESHOLD — unless a dedup claim for that exact pairing is
-    already held (see _dedup_key / UNDERCUT_ALERT_DEDUP_TTL_SECONDS).
+    already held (see _dedup_key / UNDERCUT_ALERT_DEDUP_TTL_SECONDS), or the
+    trailing driver's tyres are too fresh / too few laps remain
+    (_alert_suppressed_by_race_state).
+
+    "Current running order" comes from F1's live standings for a live session
+    (_live_standing_order — retired cars are not in it) and from each driver's
+    latest stored lap_data row otherwise, which is unchanged for a replayed or
+    historical session.
 
     Args:
         db: Async DB session.
@@ -204,21 +353,50 @@ async def evaluate_threats(
     """
     positions = await _latest_positions(db, session_id)
     scores = await _latest_undercut_scores(db, session_id)
-    driver_codes = await _driver_codes(db, [position.driver_id for position in positions])
+
+    live_order: list[uuid.UUID] | None = None
+    total_laps: int | None = None
+    context = await _session_race_context(db, session_id)
+    if context is not None:
+        season, round_number, total_laps = context
+        live_order = await _live_standing_order(redis_client, season, round_number, session_id)
+        await _bump_pipeline_stat(
+            redis_client,
+            season,
+            round_number,
+            "alert_order_source_live" if live_order is not None else "alert_order_source_db",
+        )
+    running_order = (
+        live_order if live_order is not None else [position.driver_id for position in positions]
+    )
+    latest_state = {p.driver_id: (p.lap_number, p.tyre_age_laps) for p in positions}
+    driver_codes = await _driver_codes(db, running_order)
 
     alert_type = AlertType.UNDERCUT_THREAT
     dispatched: list[dict[str, Any]] = []
-    for trailing, ahead in zip(positions[1:], positions[:-1], strict=True):
-        score = scores.get(trailing.driver_id)
+    for trailing_id, ahead_id in zip(running_order[1:], running_order[:-1], strict=True):
+        score = scores.get(trailing_id)
         if score is None or score <= UNDERCUT_ALERT_THRESHOLD:
             continue
 
-        user_ids = await _subscribed_user_ids(db, trailing.driver_id, alert_type)
+        # Before the subscriber lookup and the dedup claim, so a suppressed
+        # alert neither costs a query nor uses up the pair's claim. A driver
+        # with no stored lap row gives nothing to judge by and is not suppressed.
+        state = latest_state.get(trailing_id)
+        reason = _alert_suppression_reason(*state, total_laps) if state is not None else None
+        if reason is not None:
+            if context is not None:
+                await _bump_pipeline_stat(
+                    redis_client, season, round_number, f"alerts_suppressed_{reason}"
+                )
+            continue
+
+        user_ids = await _subscribed_user_ids(db, trailing_id, alert_type)
         if not user_ids:
             continue
 
         claimed = await redis_client.set(
-            _dedup_key(session_id, trailing.driver_id, ahead.driver_id, alert_type),
+            _dedup_key(session_id, trailing_id, ahead_id, alert_type),
             "1",
             nx=True,
             ex=UNDERCUT_ALERT_DEDUP_TTL_SECONDS,
@@ -226,15 +404,17 @@ async def evaluate_threats(
         if not claimed:
             continue
 
-        trailing_code = driver_codes.get(trailing.driver_id, str(trailing.driver_id))
-        ahead_code = driver_codes.get(ahead.driver_id, str(ahead.driver_id))
+        trailing_code = driver_codes.get(trailing_id, str(trailing_id))
+        ahead_code = driver_codes.get(ahead_id, str(ahead_id))
         payload = {
             "session_id": str(session_id),
-            "driver_id": str(trailing.driver_id),
+            "driver_id": str(trailing_id),
             "message": f"Undercut threat: {trailing_code} on {ahead_code} ({score:.0%})",
         }
         alerts = await dispatch_alert(db, redis_client, user_ids, alert_type, payload)
         dispatched.extend(alerts)
+        if context is not None:
+            await _bump_pipeline_stat(redis_client, season, round_number, "alerts_dispatched")
 
     return dispatched
 

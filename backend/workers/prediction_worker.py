@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_aws_settings, get_ml_settings, get_redis_settings
 from backend.core.database import get_engine
-from backend.core.exceptions import ModelNotLoadedError
+from backend.core.exceptions import ModelNotLoadedError, NotFoundError
 from backend.core.metrics import (
     f1_ml_inference_duration_seconds,
     f1_strategy_predictions_total,
@@ -336,17 +336,40 @@ async def _resolve_weather(
     )
 
 
+# f1:{season}:{round}:pipeline_stats — a Redis hash of counters for what the live
+# strategy pipeline actually did (which gap source the undercut maths used, which
+# source the neighbours came from, alerts suppressed per gate), kept a day so it can
+# be read after a race. Best-effort: a Redis error is logged and ignored, never raised.
+_PIPELINE_STATS_TTL_SECONDS = 86400
+
+
+async def _bump_pipeline_stat(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    season: int,
+    round_number: int,
+    field: str,
+) -> None:
+    key = f"f1:{season}:{round_number}:pipeline_stats"
+    try:
+        await client.hincrby(key, field, 1)
+        await client.expire(key, _PIPELINE_STATS_TTL_SECONDS)
+    except aioredis.RedisError:
+        logger.debug("Could not update pipeline stat %s", field, exc_info=True)
+
+
 async def _resolve_position_context_from_redis(
     async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
     season: int,
     round_number: int,
     driver_id: uuid.UUID,
+    live_session_id: uuid.UUID | None = None,
 ) -> dict[str, Any] | None:
     """Field position/gaps from the live-authoritative f1:{season}:{round}:gaps key.
 
-    Fallback for a driver whose lap_data has no usable position within the
-    _resolve_position_context bound (see that function's own docstring for
-    when this is reached) — reads the same key ingest_live_session.py's
+    Used two ways. As a fallback for a driver whose lap_data has no usable
+    position within the _resolve_position_context bound (see that function's
+    own docstring), and — with live_session_id set — as the PRIMARY source
+    for a genuinely live session. Reads the same key ingest_live_session.py's
     _publish_live_gaps and replay_pipeline.py's own gaps-publish both write
     (CLAUDE.md's Redis Cache Key Schema): SessionGapsResponse-shaped JSON,
     entries already sorted by position with gap_to_ahead_seconds/
@@ -359,17 +382,30 @@ async def _resolve_position_context_from_redis(
         async_redis_client: Async Redis client.
         season, round_number: Race weekend identifiers, for the key.
         driver_id: Driver to locate within the field.
+        live_session_id: If given, only accept a payload that F1's live feed
+            wrote for THIS session ("source" == "live" and a matching
+            "session_id"). The key is per season/round, not per session, and
+            a replay or a cache-aside write to it carries no live gaps — for
+            a live session the DB cumulative-sum path this preempts is the
+            wrong one (lap 1 has no recorded time, see docs/live-race-
+            ingestion-and-strategy-gaps-monza-2026.md Issue B).
     Returns:
         Same shape as _resolve_position_context's return value, or None if
-        the key is missing/unparsable/this driver isn't in it — callers must
-        treat None as "no live-gaps fallback available," not an error.
+        the key is missing/unparsable/this driver isn't in it (or, with
+        live_session_id, isn't a live payload for that session) — callers
+        must treat None as "no live-gaps source available," not an error.
     """
     raw = await async_redis_client.get(f"f1:{season}:{round_number}:gaps")
     if raw is None:
         return None
     try:
-        entries = json.loads(raw)["gaps"]
+        payload = json.loads(raw)
+        entries = payload["gaps"]
     except (json.JSONDecodeError, KeyError, TypeError):
+        return None
+    if live_session_id is not None and (
+        payload.get("source") != "live" or payload.get("session_id") != str(live_session_id)
+    ):
         return None
 
     index = next(
@@ -428,7 +464,20 @@ async def _resolve_position_context(
     _build_race_state (position_subq/ref_lap, the Monte Carlo /simulate path)
     — this is that same pattern's second call site catching up.
 
-    Falls back to the live-authoritative f1:{season}:{round}:gaps Redis key
+    A genuinely live session is resolved from F1's own live standings
+    (_resolve_position_context_from_redis with live_session_id) BEFORE any of
+    the DB work below, because the DB path's gaps are cumulative lap-time sums
+    and are wrong for a live-ingested session: lap 1 has no recorded time for
+    anyone, so every gap that opened on the first lap is missing (Monza 2026:
+    the sum said the requester was already ahead of the car ahead in 33% of
+    real predictions vs 4% on the road; median gap error 2.6s — see
+    docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). The
+    live snapshot is the CURRENT tower, not the tower as of current_lap, so a
+    worker running well behind the race sees a slightly newer field than the
+    lap it is predicting; on Monza the worker was level with the race on 95%
+    of predictions.
+
+    Otherwise falls back to the same key
     (_resolve_position_context_from_redis) whenever the bounded lap_data
     query can't resolve driver_id's own position — the case for a live
     session during its brief connection window before enough GapToLeader
@@ -464,6 +513,18 @@ async def _resolve_position_context(
         live-gaps entry) — e.g. the very first lap ingested, before anyone
         has a position yet.
     """
+    live_result = await _resolve_position_context_from_redis(
+        async_redis_client, season, round_number, driver_id, live_session_id=session_id
+    )
+    await _bump_pipeline_stat(
+        async_redis_client,
+        season,
+        round_number,
+        "neighbors_source_live" if live_result is not None else "neighbors_source_db",
+    )
+    if live_result is not None:
+        return live_result
+
     subq = (
         select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
         .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
@@ -1089,27 +1150,58 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
                     exc_info=True,
                 )
     finally:
-        await async_redis_client.aclose()  # type: ignore[attr-defined]
-
-    # See telemetry_worker._persist_lap for why this dispose is required.
-    await get_engine().dispose()
+        try:
+            await async_redis_client.aclose()  # type: ignore[attr-defined]
+        finally:
+            # See telemetry_worker._persist_lap for why this dispose is required — and
+            # why it must sit in a finally. It used to follow the try block, so it was
+            # SKIPPED whenever anything above raised (NotFoundError for a lap that had
+            # not been persisted yet, a model error ...). That leaked a pooled asyncpg
+            # connection bound to this task's now-closed event loop into the NEXT task,
+            # which then failed with "attached to a different loop"; if that next task
+            # was process_lap, the lap was never saved, so the following prediction
+            # could not find it either — a failure loop that did not recover on its own
+            # (found by the V3 shadow race: 4 of 106 process_lap and 2 of 106
+            # predictions succeeded once one prediction failed).
+            await get_engine().dispose()
 
     _publish_prediction(
         session_id, {**prediction, "session_id": str(session_id), "driver_id": str(driver_id)}
     )
 
 
-@app.task(name="run_strategy_prediction")  # type: ignore[untyped-decorator]
-def run_strategy_prediction(context: dict[str, Any]) -> None:
+# process_lap (telemetry_queue) writes the lap this task reads, but the two are separate
+# messages on separate queues with no ordering guarantee, so a burst at a lap boundary can
+# run the prediction first (found by the V3 shadow race: 15 of 233 laps). The lap normally
+# lands within a few seconds, so a short bounded retry is enough.
+_LAP_NOT_YET_PERSISTED_RETRIES = 4
+_LAP_NOT_YET_PERSISTED_DELAY_SECONDS = 3
+
+
+@app.task(  # type: ignore[untyped-decorator]
+    bind=True,
+    name="run_strategy_prediction",
+    max_retries=_LAP_NOT_YET_PERSISTED_RETRIES,
+)
+def run_strategy_prediction(self: Any, context: dict[str, Any]) -> None:
     """Run the strategy ML models for one driver/lap context, persist and publish the result.
 
+    Retries a few times, a few seconds apart, when the lap this prediction is for has not
+    been written to lap_data yet; any other error propagates unchanged.
+
     Args:
+        self: The bound Celery task (used to schedule the retry).
         context: Driver + lap context dict (session_id, driver_id, lap_number,
             compound, tyre_age_laps).
     Returns:
         None.
     """
-    asyncio.run(_persist_and_publish(context))
+    try:
+        asyncio.run(_persist_and_publish(context))
+    except NotFoundError as exc:
+        # Re-raises exc itself once the retries are exhausted, so a lap that never
+        # arrives still surfaces as a failed task rather than being swallowed.
+        raise self.retry(exc=exc, countdown=_LAP_NOT_YET_PERSISTED_DELAY_SECONDS) from exc
 
 
 # --- run_race_simulation: wires race_simulator.py for the first time (Day 11) ---
