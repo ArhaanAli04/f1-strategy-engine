@@ -12,13 +12,17 @@
 > property tests (V4), next-race counters and raw-feed recorder (V5), and the
 > **shadow-race harness (V3)**, which passed a 14-check smoke run (start to lap 12
 > of 53) and, along the way, found and fixed two real production bugs in
-> `prediction_worker.py` that no earlier check could see (section 7d). **Not done:**
-> the full-race shadow run (V3), historical calibration of the score (V2, with V6),
-> the conditional lead-lap fallback work, and anything that needs a real live race.
-> A **throwaway shadow race (season 2098) is still in the local database** and must be
-> cleaned up (section 7d, "State left behind"). Section 8 has the anchor prompt for the
-> next session; sections 7b (what was done), 7c (what remains) and 7d (V3 in full) hold
-> the detail. Nothing has been committed by the session.
+> `prediction_worker.py` that no earlier check could see (section 7d). **Update
+> 2026-09-20: the full-race shadow run (all 53 laps, 1052 lap completions, 2x) also
+> passed 14 of 14 checks** (section 7d, "Full-race run"), and its throwaway race was
+> cleaned up. **`alert_worker._dispatch`'s dispose flaw was then fixed too
+> (2026-09-20); everything still open now lives in
+> `docs/live-pipeline-open-decisions-and-calibration-2026.md`, which has its own
+> anchor prompt.** **Not done:** the owner decision on chaining `process_lap` into
+> the prediction instead of the retry, historical calibration of the score (V2, with V6), the conditional lead-lap
+> fallback work, and anything that needs a real live race. Section 8 has the anchor
+> prompt for the next session; sections 7b (what was done), 7c (what remains) and 7d
+> (V3 in full) hold the detail. Nothing has been committed by the session.
 >
 > Original status: investigation only, NOT fixed. Discovered 2026-09-11 reviewing
 > the local Docker DB after a real live-ingested race — Italian GP 2026,
@@ -1763,7 +1767,7 @@ the CLAUDE.md update are left to the project owner.
 | **V1** | Replayed all 14 completed 2026 races, both ranking modes (`--rounds 1-14`) | 16,223 lap completions; ghosts/stale lapped gaps/handler errors 0; `Position` 99.8%, gap-only 82.0% |
 | Fallback fix | Diagnosed the gap-only weakness on the Dutch GP (74.5% of wrong pairs were lapped/lapped); lapped cars now ordered by laps completed then line-crossing order | Gap-only 82.0% → 92.2%; `Position` path unchanged |
 | **V5** | Always-on counters and logs; flag-gated raw-feed recorder (`recordings/`; on by default in the Docker stack); harness `--recording` mode; worker recreated for the new env and mount | Built and verified on replayed data; awaiting a live race (section 7c) |
-| **V3** | Shadow-race harness `shadow_race.py` (`run` / `verify` / `cleanup`): feeds Monza's archived messages through the real ingestor into the running Docker stack under a throwaway season-2098 race, then runs 14 automatic checks | Smoke (start to lap 12 of 53, 1x): 14 of 14 pass after two production fixes. It first found a `dispose()` bug that could wedge the pipeline and a lap-persist ordering race (6.4% of laps without a prediction), both fixed (section 7d). Full-race run not done yet |
+| **V3** | Shadow-race harness `shadow_race.py` (`run` / `verify` / `cleanup`): feeds Monza's archived messages through the real ingestor into the running Docker stack under a throwaway season-2098 race, then runs 14 automatic checks | Smoke (start to lap 12 of 53, 1x): 14 of 14 pass after two production fixes. It first found a `dispose()` bug that could wedge the pipeline and a lap-persist ordering race (6.4% of laps without a prediction), both fixed (section 7d). **Full race (2026-09-20, 2x, all 53 laps): 14 of 14 pass**, 1052 of 1052 laps persisted and predicted, no worker errors; throwaway race cleaned up afterwards (section 7d) |
 
 ### Decisions and the reasons
 - **B: gap and target from F1's live standings (Option 1), not a patched lap-time sum.** F1's gap is authoritative; a corrected sum would still be an approximation from ingest-time jitter. Live payloads are trusted only with `source == "live"` and a matching `session_id`; otherwise the old path runs, so replays and historical sessions are unchanged.
@@ -1814,8 +1818,8 @@ what the live socket actually delivers (V5), and how good the gap-only fallback
 can get (lead-lap work). Planned order: **V5 (now built), then V3 and V2 while the next
 race is awaited, then the lead-lap fallback only if V5 shows the fallback is
 what runs live.** V6 (case studies) folds into V2. V4 and V1 are done (7b).
-**Status at the end of the 2026-09-19 session:** V3 is built and smoke-tested (full
-results and the two bugs it found are in section 7d); its full-race run is still to do.
+**Status (updated 2026-09-20):** V3 is built, smoke-tested and has now passed its
+full-race run, 14 of 14 (results and the two bugs it found are in section 7d).
 V2 and the lead-lap work are untouched.
 
 ### V5 — next-race instrumentation and a raw-feed recorder (built 2026-09-19; awaiting a live race)
@@ -1915,7 +1919,7 @@ message-count difference per topic, and that the recording replays through the h
   variables (`RECORD_RAW_FEED`, `RAW_FEED_RECORD_DIR`) and a note under Auto Race Detection.
 **Effort.** Done. **Cannot show** anything before a race with the flag on.
 
-### V3 — shadow race on the local stack (built and smoke-tested 2026-09-19; full race pending — results in section 7d)
+### V3 — shadow race on the local stack (built 2026-09-19; smoke run and full race both passed 14 of 14 — results in section 7d)
 **Goal.** Verify the cross-process wiring that unit tests mock: ingestor → real
 Redis → Celery worker → `_resolve_position_context` / `_live_gap_deficit` →
 `strategy_predictions` → `evaluate_threats` → `alerts`.
@@ -2089,17 +2093,50 @@ under a lap. Run 1's numbers are kept in `recordings/shadow/smoke_run1.{json,log
   score means what it says (V2). It ran at 1x, so the speed-up's effect on worker lag is untested.
   It ran on a warm worker; a cold start (~88 s of imports) was not exercised.
 
-### State left behind (clean this up)
-- **A throwaway race is still in the local Postgres and Redis:** season 2098, round 1 ("SHADOW RACE ..."),
-  from smoke run 2; manifest `recordings/shadow/smoke.json`, log `recordings/shadow/smoke.log`, recording
-  `recordings/2098_R01_R_20260919T142436Z.jsonl.gz`, and the run-1 copies `smoke_run1.*`. All of `recordings/`
-  is gitignored. Run `python -m backend.scripts.shadow_race cleanup` (no manifest = every shadow race) **before
-  starting the full run** so the round number and Redis keys start clean, then delete the leftover files under
-  `recordings/`.
-- The worker container was restarted (`docker restart docker-worker-1`) and is running the fixed code;
-  confirmed by grepping the constant `_LAP_NOT_YET_PERSISTED_RETRIES` inside the container. Use
-  `MSYS_NO_PATHCONV=1` for `docker exec` paths from Git Bash.
-- Real Monza data was verified intact by the harness (row counts unchanged, no new real Redis keys).
+### Full-race run (2026-09-20) — 14 of 14 checks pass
+Run with `run --speed 2 --manifest recordings/shadow/full.json`, then `verify`. The feed took **44 minutes** at
+2x and dispatched **1052 lap completions** (the whole race, 53 laps), into a fresh season-2098 race. This covers
+what the smoke run could not: the pit-stop clusters, every retirement, the late-race `total_laps` gates, and the
+finish.
+
+| | Full race (2x) |
+|---|---|
+| Laps persisted through Celery | **1052 of 1052** |
+| Persisted `lap_data.position` matches F1's | **1052 of 1052 (100.0%)** |
+| Prediction for every dispatched lap | **1052 of 1052 (100.0%)** |
+| `sessions.total_laps` from F1's lap count | 53 (F1's own `TotalLaps` is 53) |
+| Ghost cars / stale lapped gaps / swallowed handler errors | none / none / 0 |
+| Gaps live/summed; neighbours live/db; alert pairing live/db | 1896/116; 1069/0; 1052/0 (100% live) |
+| Alerts (19): stopped car / fresh tyre / late race | 0 / 0 / 0 |
+| F1 `Position` drove the ranking | yes: first seen at message 2206; 51,588 rankings by F1 position vs 2,205 by gaps; 5 cars flagged out |
+| Recording matches what was fed, topic for topic | yes (TimingData 53,793; WeatherData 176; LapCount 54; TrackStatus 15; TimingAppData 926; DriverList 148; Subscribe 1) |
+| Real Monza rows and Redis keys untouched | yes |
+| `ERROR`/`CRITICAL` lines in the worker log | none |
+| Prediction lag median / p95 / max (reported, not judged) | 5.1 / 25.9 / 70.4 s |
+| Peak prediction-queue depth (reported, not judged) | 23 |
+
+- **The lap-persist retry (bug 2 above) fired 17 times and never ran out:** the worker log holds 17
+  `run_strategy_prediction ... retry: Retry in 3s: NotFoundError` lines, and every one of the 1052 predictions
+  still landed. So the ordering race is real at lap boundaries and the bounded retry absorbs it; it is a
+  mitigation, not a removal (see the chain-vs-retry decision in section 7c).
+- **The 70.4 s maximum lag** is a single worst case (p95 is 25.9 s, under a lap); it was not investigated further.
+- **The gap counter shows 116 uses of the summed lap-time path** against 1896 live (5.8%). That check
+  (`check_pipeline_stats`) is deliberately loose: it only requires the live gap count to be above zero and, for
+  alert pairing, a live share of at least `_MIN_LIVE_SHARE`. So 116 summed gaps pass without being explained; the
+  cause (for example the first laps before F1's standings exist, or a car with no live gap) was not investigated.
+- **Still not shown:** anything from F1's real socket (V5's job, on the next race); a cold worker start (~88 s of
+  imports) was not exercised; whether the score means what it says (V2). The run was at 2x, not 1x.
+
+### State after the run
+- The full-run throwaway race (season 2098, round 1) was removed with `shadow_race cleanup` (session
+  `c1b7fa2d-...`, 278 Redis keys). Confirmed afterwards: 0 season-2098 races, 0 `f1:2098:*` keys, and the real
+  Monza rows unchanged (1052 `lap_data`, 1052 `strategy_predictions`, 33 `alerts`).
+- Kept locally (gitignored): `recordings/shadow/full.json`, `full.log`, `full_verify.log` (the full run's
+  manifest, feed log and verify output), `recordings/2098_R01_R_20260920T162828Z.jsonl.gz` (its raw-feed
+  recording; `cleanup` does not delete recordings) and `recordings/shadow/smoke_run1.{json,log}` (the pre-fix
+  evidence). The smoke run's other files and its recording were deleted.
+- The worker container is running the fixed code (checked via the constant `_LAP_NOT_YET_PERSISTED_RETRIES`
+  inside the container). Use `MSYS_NO_PATHCONV=1` for `docker exec` paths from Git Bash.
 
 ### Checks at the end of the session
 `pytest backend/tests/unit -m unit`: **648 passed**. Integration (`test_live_prediction_pipeline`,
@@ -2107,18 +2144,11 @@ under a lap. Run 1's numbers are kept in `recordings/shadow/smoke_run1.{json,log
 before the V3 changes; re-run the whole integration folder before committing). `mypy backend/ --strict` and
 `ruff check` / `ruff format --check`: clean (158 files).
 
-### To do next for V3, in order
-1. `shadow_race cleanup`, then the **full race**: `run --speed 2 --manifest recordings/shadow/full.json`, then
-   `verify`. Expect roughly an hour (12 laps took 25 minutes at 1x). Watch for: `NotFoundError` and retry exhaustion,
-   every retired car (LEC lap 1, ALO/STR and others) leaving the standings and the alerts, the late-race laps gate, lag at 2x, the
-   queue peak at each pit-stop cluster, and total worker errors.
-2. Add the full-run results to this section, replacing the "full run pending" wording here, in section 7b and in the
-   top status note.
-3. Run `shadow_race cleanup` again and confirm season 2098 is gone (and the real Monza counts still match).
-4. Decide with the project owner: fix `alert_worker._dispatch`'s dispose (section 7c, open limits), and whether to chain
-   `process_lap` → prediction instead of retrying.
-5. ~~CLAUDE.md note~~ — done: a Notes entry for the two `prediction_worker` fixes and `shadow_race.py` was added
-   (2026-09-19). Update it with the full-run result once step 1 is done.
+### To do next for V3
+V3 itself is finished (smoke run and full race both 14 of 14). What remains is the owner decision on
+`alert_worker._dispatch`'s dispose and on chaining `process_lap` → prediction instead of retrying (section 7c,
+open limits). Re-run the shadow race after any change to the worker pipeline; it is the only check that exercises
+the cross-process wiring.
 
 ---
 
