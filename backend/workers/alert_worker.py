@@ -104,12 +104,15 @@ async def _dispatch(prediction: dict[str, Any]) -> None:
     alert_type = AlertType.PIT_WINDOW_OPEN
 
     session_factory = _get_session_factory()
-    async with session_factory() as db:
-        result = await db.execute(select(Subscription).options(selectinload(Subscription.user)))
-        subscriptions = result.scalars().all()
-
-    # See telemetry_worker._persist_lap for why this dispose is required.
-    await get_engine().dispose()
+    try:
+        async with session_factory() as db:
+            result = await db.execute(select(Subscription).options(selectinload(Subscription.user)))
+            subscriptions = result.scalars().all()
+    finally:
+        # See telemetry_worker._persist_lap for why this dispose is required. It sits in a
+        # finally because a failed query must not leave a pooled connection bound to the
+        # event loop asyncio.run is about to close (found by the V3 shadow race).
+        await get_engine().dispose()
 
     for subscription in subscriptions:
         if _matches(subscription, driver_id, alert_type.value):
