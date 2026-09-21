@@ -219,6 +219,9 @@ __marimo__/
 *.pkl
 /models/
 
+# Raw live-feed recordings (RECORD_RAW_FEED=true) — race data, a few MB each; never committed.
+/recordings/
+
 # FastF1 local cache
 fastf1_cache/
 

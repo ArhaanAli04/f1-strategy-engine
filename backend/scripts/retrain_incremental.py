@@ -188,11 +188,19 @@ def _promote_and_record(
     metrics: dict[str, Any],
     summary: dict[str, dict[str, object]],
     feature_names: list[str] | None = None,
+    training_schema_version: int | None = None,
 ) -> None:
     previous = download_metrics(client, bucket, "production", filename)
     previous_mae = float(previous["holdout_mae"]) if previous is not None else None
     outcome = serialize_evaluate_and_upload(
-        client, bucket, version_tag, filename, model_obj, metrics, feature_names=feature_names
+        client,
+        bucket,
+        version_tag,
+        filename,
+        model_obj,
+        metrics,
+        feature_names=feature_names,
+        training_schema_version=training_schema_version,
     )
     summary[filename] = {
         "holdout_mae": float(metrics["holdout_mae"]),
@@ -229,6 +237,23 @@ def retrain() -> dict[str, dict[str, object]]:
     laps = encode_categoricals(laps)
     train_laps, holdout_laps = split_train_holdout(laps, train_seasons=train_seasons)
     logger.info("Train laps: %d, holdout laps: %d", len(train_laps), len(holdout_laps))
+
+    # Recovers this run's real driver_id/circuit_name -> code map, same as
+    # train_models.train_all — see tire_deg_model.py's "Training-time
+    # categorical encoding" section. NOTE (not fixed here, pre-existing and
+    # out of scope): base_laps' driver_id is a DB UUID string (see
+    # export_training_data.py) but current_laps' driver_id is a FastF1
+    # 3-letter code (lap["Driver"], see _fetch_current_season_rounds above) —
+    # encode_categoricals treats these as unrelated categories, so a driver
+    # active in both the base corpus and the current season gets two
+    # different codes, and only the UUID-keyed one is ever reachable at
+    # inference (driver_id there is always a DB UUID). This map faithfully
+    # reflects whichever code pd.Categorical actually assigned; it doesn't
+    # paper over that identity split. Moot in practice today: this script's
+    # CI entrypoint currently fetches zero 2026 laps (see CLAUDE.md's
+    # escalated GitHub-Actions/FastF1 deferred item), so no production model
+    # has been promoted through this path yet.
+    encoding_maps = tire_deg_model.build_categorical_encoding_maps(laps)
 
     pit_laps = raw_laps.drop(columns=["is_valid"]).copy()
     pit_laps["laps_in_session"] = pit_laps.groupby("session_id")["lap_number"].transform("max")
@@ -272,15 +297,22 @@ def retrain() -> dict[str, dict[str, object]]:
                 "holdout_mae": holdout_mae,
                 "n_samples": result.n_samples,
                 "promotion_basis": promotion_basis,
+                **encoding_maps,
             },
             summary,
             feature_names=tire_deg_model.FEATURE_COLUMNS,
+            training_schema_version=tire_deg_model.TRAINING_SCHEMA_VERSION,
         )
         tire_deg_results[compound] = result
 
     # --- Safety car model ---
-    sc_train = safety_car_model.build_lap_flags(train_laps)
-    sc_holdout = safety_car_model.build_lap_flags(holdout_laps)
+    # See train_models.train_all's identical comment / safety_car_model.
+    # TRAINING_SCHEMA_VERSION's docstring: must NOT use is_valid-filtered laps —
+    # pit_train_laps/pit_holdout_laps (already unfiltered, built above) are the
+    # correct source here, mirroring train_all's structure per this file's own
+    # docstring convention.
+    sc_train = safety_car_model.build_lap_flags(pit_train_laps)
+    sc_holdout = safety_car_model.build_lap_flags(pit_holdout_laps)
     sc_model = safety_car_model.train_safety_car_model(sc_train)
     sc_holdout_mae = safety_car_model.evaluate_holdout(sc_model, sc_holdout)
     _promote_and_record(
@@ -291,6 +323,7 @@ def retrain() -> dict[str, dict[str, object]]:
         sc_model,
         {"holdout_mae": sc_holdout_mae, "n_circuits": len(sc_model.circuit_rates)},
         summary,
+        training_schema_version=safety_car_model.TRAINING_SCHEMA_VERSION,
     )
 
     # --- Pit predictor (depends on tire_deg_results + sc_model) ---
@@ -325,6 +358,7 @@ def retrain() -> dict[str, dict[str, object]]:
         },
         summary,
         feature_names=pit_predictor.FEATURE_COLUMNS,
+        training_schema_version=pit_predictor.TRAINING_SCHEMA_VERSION,
     )
 
     logger.info("Incremental retraining complete. version_tag=%s", version_tag)

@@ -5,7 +5,7 @@ import { ProgressBar } from "@/components/shared/ProgressBar"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
 import { ROUTES } from "@/utils/constants"
-import { formatLapTime, getCompoundColor, getCompoundLabel } from "@/utils/formatters"
+import { formatLapTime, formatRaceTime, getCompoundColor, getCompoundLabel } from "@/utils/formatters"
 
 // Every value in this file is hand-authored, clearly-labeled sample output —
 // /strategy/* is auth-gated (see CLAUDE.md), so a signed-out visitor cannot
@@ -246,7 +246,7 @@ export function SimulatorTile() {
               {strategy.change}
             </span>
             <span className="text-right font-mono tabular-nums text-muted-foreground">
-              {formatLapTime(strategy.finishTime)}
+              {formatRaceTime(strategy.finishTime)}
             </span>
           </div>
         ))}

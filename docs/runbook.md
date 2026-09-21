@@ -103,27 +103,35 @@ schedule — see that workflow's own docstring.
 
 ## One-time: backfill session_elapsed_seconds on Supabase
 
-Item 7 (CLAUDE.md Deferred Wiring item A, the NULL-lap cumulative-sum bug —
-✅ fixed 2026-09-02, see CLAUDE.md's own Notes entry) added
-`LapData.session_elapsed_seconds` (migration
-`20260902_add_session_elapsed_seconds_to_lap_data`) and backfilled it for
-every local R session, but **production Supabase has not been touched
-yet** — this is a manual, one-time post-merge step, not something to run
-ahead of the merge.
+**✅ Done 2026-09-02.** Item 7 (CLAUDE.md Deferred Wiring item A, the
+NULL-lap cumulative-sum bug — ✅ fixed 2026-09-02, see CLAUDE.md's own
+Notes entry) added `LapData.session_elapsed_seconds` (migration
+`20260902_add_session_elapsed_seconds_to_lap_data`), backfilled it for
+every local R session, then — after confirming `cd.yml`'s `migrate` job
+had applied the migration to Supabase (verified directly: the column
+existed, `double precision`/nullable, 0 of 3,196 R-session rows populated)
+— ran the backfill against production too.
 
-**Correct sequence, in order — do not run step 2 before step 1 has
-actually landed on Supabase:**
+**Result:** 3,196 rows updated across the 3 curated sessions (Canadian GP
+2026 R5: 1,211; British GP 2026 R9: 1,113; Belgian GP 2026 R10: 872) — an
+exact match to the local backfill's per-session counts. Re-verified
+directly against Supabase afterward: 3,196/3,196 rows populated, zero
+NULLs remaining. Spot-checked British GP R9's LEC/RUS/HAM gaps
+(RUS +0.399s, HAM +0.806s vs. LEC) — bit-for-bit identical to the local
+values already verified against FastF1's own official classification.
 
-1. **Merge this branch to `main`.** `cd.yml`'s `migrate` job runs `alembic
-   upgrade head` against Supabase (`SUPABASE_DIRECT_URL`) automatically on
-   merge — this adds the `session_elapsed_seconds` column, NULL for every
-   existing row (identical to what happened locally in
-   `backend/migrations/versions/20260902_add_session_elapsed_seconds_to_lap_data.py`
-   before the local backfill ran). Confirm the job succeeded (Actions tab
-   → `cd.yml` → the `migrate` job) before proceeding — do not run step 2
-   against a Supabase DB that hasn't actually picked up the column yet.
-2. **Then, manually run the backfill** against Supabase, same pattern as
-   the tyre-degradation backfill (`backend/scripts/backfill_tire_data.py`)
+**Procedure used, kept below for the next time a new round needs this**
+(e.g. after a future `ingest-historical.yml` run adds a 4th curated
+session) — the script is idempotent, safe to re-run, and only does work
+for rows that still need it:
+
+1. **Merge to `main`** (already done). `cd.yml`'s `migrate` job runs
+   `alembic upgrade head` against Supabase (`SUPABASE_DIRECT_URL`)
+   automatically on merge. Confirm the job succeeded (Actions tab →
+   `cd.yml` → the `migrate` job, or query `information_schema.columns`
+   directly) before running the backfill.
+2. **Run the backfill** against Supabase, same pattern as the
+   tyre-degradation backfill (`backend/scripts/backfill_tire_data.py`)
    documented in CLAUDE.md's own Notes:
    ```bash
    DATABASE_URL=$SUPABASE_DIRECT_URL \
@@ -132,15 +140,12 @@ actually landed on Supabase:**
    (`postgresql://` → `postgresql+asyncpg://` conversion applied the same
    way `cd.yml`'s migrate job does, if `SUPABASE_DIRECT_URL` doesn't
    already carry the `+asyncpg` driver suffix.) No `--season`/`--round`
-   flags needed — Supabase only has the 3 curated 2026 races
-   (`ingest_historical.py`), so this backfills all of them in one run,
-   R-only per the script's own scope decision (see CLAUDE.md's item A
-   Notes entry).
+   flags needed unless targeting just the new round — the script skips any
+   session with zero remaining NULL rows without even hitting FastF1.
 3. Verify the same way CLAUDE.md's tyre-degradation-backfill entry did:
    re-query Supabase directly afterward and confirm `session_elapsed_seconds`
    is populated (`SELECT COUNT(*), COUNT(session_elapsed_seconds) FROM
-   lap_data` for each of the 3 sessions, or reuse this same query pattern
-   from the local verification in CLAUDE.md's Notes entry).
+   lap_data` per session).
 
 ---
 

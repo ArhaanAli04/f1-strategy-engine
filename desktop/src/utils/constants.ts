@@ -46,6 +46,22 @@ export const COMPOUND_COLORS: Record<string, string> = {
   UNKNOWN: "#9CA3AF",
 }
 
+// Categorical identity color for the Strategy Simulator's Compare Scenarios
+// mode — one color per candidate scenario (max 4, matches the backend's
+// SimulateStrategyRequest.scenarios cap), used consistently between the
+// scenario-builder rows and the finishing-position distribution chart so a
+// scenario's color means the same thing everywhere it appears. This is
+// identity color (which scenario), not semantic (good/bad) — unlike
+// PlanExplanationCard's green/red gain/loss convention elsewhere on this
+// page. Values are the dataviz skill's validated dark-mode categorical
+// palette, slots 1-4 (blue/orange/aqua/yellow) — validated via
+// validate_palette.js against this app's dark --card surface (#18181b,
+// effectively identical to the palette's own #1a1a19 reference surface):
+// worst adjacent CVD ΔE 8.4 (clears the >=8 target), normal-vision ΔE 19.8,
+// all four >=3:1 contrast. A grouped bar chart uses the "adjacent" pairlist
+// (not all-pairs), so all 4 slots are valid together, not just the first 3.
+export const SCENARIO_SERIES_COLORS = ["#3987e5", "#d95926", "#199e70", "#c98500"]
+
 export const ROUTES = {
   LOGIN: "/login",
   REGISTER: "/register",

@@ -3,6 +3,7 @@ import { HistoricalDataBanner } from "@/components/shared/HistoricalDataBanner"
 import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
 import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
 import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
+import { PitWindowCard } from "@/components/strategy/PitWindowCard"
 import { StrategyOverviewGrid } from "@/components/strategy/StrategyOverviewGrid"
 import { UndercutThreatPanel } from "@/components/strategy/UndercutThreatPanel"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -70,6 +71,7 @@ export function LiveRacePage() {
       </main>
 
       <aside className="flex w-80 flex-shrink-0 flex-col gap-4 overflow-y-auto border-l p-4">
+        <PitWindowCard sessionId={sessionId} driverId={selectedDriverId} />
         <UndercutThreatPanel sessionId={sessionId} driverId={selectedDriverId} />
         <div>
           <div className="mb-2 text-sm font-semibold">Strategy Wall</div>

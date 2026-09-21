@@ -8,24 +8,52 @@ import { useLastIngestedSession } from "@/hooks/useLastIngestedSession"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
+import { PositionDistributionChart } from "@/components/strategy/PositionDistributionChart"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
-import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR } from "@/utils/constants"
+import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR, SCENARIO_SERIES_COLORS } from "@/utils/constants"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
-import { formatLapTime } from "@/utils/formatters"
-import type { DriverResponse, SimulatedRaceOutcome, SimulateStrategyRequest } from "@/types"
+import { formatRaceTime } from "@/utils/formatters"
+import type {
+  DriverResponse,
+  OvertakingDriver,
+  SimulatedRaceOutcome,
+  SimulateStrategyRequest,
+} from "@/types"
 
 type Step = 1 | 2 | 3 | 4
+
+// "single": the existing sequential multi-stop plan builder — one race, N
+// pit stops in it. "compare": Checkpoint 3/4's multi-scenario mode — up to
+// MAX_SCENARIOS independent single-pit-lap alternatives ("lap 30 vs 33 vs
+// 36", the original vision's own example), run against the identical field
+// state and compared side by side. Deliberately separate mental models, not
+// merged into one UI — a sequential plan and a set of alternatives answer
+// different questions (docs/core-feature-rebuild-whatif-simulator.md §4).
+type SimulationMode = "single" | "compare"
 
 interface PitStopRow {
   lap: number
   compound: string
 }
+
+// One candidate scenario in Compare mode — always a SINGLE pit lap (unlike
+// PitStopRow's sequential multi-stop plan), matching the vision's literal
+// "pit on lap 30 vs 33 vs 36" example. label is optional; left blank it
+// falls back to "Pit lap N" at submit time.
+interface ScenarioRow {
+  lap: number
+  compound: string
+  label: string
+}
+
+// Matches backend/schemas/simulate_schema.py's _MAX_SCENARIOS.
+const MAX_SCENARIOS = 4
 
 // Backend validates each compounds[] entry against exactly this set
 // (backend/schemas/simulate_schema.py).
@@ -82,6 +110,26 @@ function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${Math.abs(count) === 1 ? "" : "s"}`
 }
 
+// Summarizes an OvertakingDriver row's real Monte Carlo enrichment fields
+// (What-If Simulator rebuild part (b), see docs/core-feature-rebuild-whatif-
+// simulator.md §7) into one short line. Each piece is independently optional
+// (see OvertakingDriver's own docstring — both null together, never one set
+// without the other for the pit-lap pair) — renders whichever pieces are
+// available, joined by " · ", or "" (falsy, so the caller can skip rendering
+// entirely) when neither is available.
+function formatOvertakingEnrichment(entry: OvertakingDriver): string {
+  const parts: string[] = []
+  if (entry.finish_ahead_probability != null) {
+    parts.push(`${Math.round(entry.finish_ahead_probability * 100)}% chance you finish ahead`)
+  }
+  if (entry.rival_projected_pit_lap != null && entry.rival_pit_probability != null) {
+    parts.push(
+      `pits ~lap ${entry.rival_projected_pit_lap} (${Math.round(entry.rival_pit_probability * 100)}%)`,
+    )
+  }
+  return parts.join(" · ")
+}
+
 interface PlanExplanationCardProps {
   planLabel: string
   strategy: SimulatedRaceOutcome
@@ -97,6 +145,19 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
   const isLoss = position_gain_loss < 0
   const freshCompound = strategy.compounds.at(-1)
 
+  // fresh_tyre_gain_per_lap is now a real tire_deg-model projection (backend
+  // What-If Simulator rebuild part (a) — see docs/core-feature-rebuild-
+  // whatif-simulator.md §7), not the old hardcoded per-compound constant —
+  // it can legitimately come out NEGATIVE when the new compound is a worse
+  // choice for the remaining laps than staying out would have been (e.g. a
+  // dry-track INTERMEDIATE pit). isFasterOnFreshTyre picks which half of the
+  // sentence applies; >= 0 (not > 0) so an exact-zero projection still reads
+  // as a (trivial) "faster" statement rather than needing a third branch.
+  const isFasterOnFreshTyre = explanation.fresh_tyre_gain_per_lap >= 0
+  const degradationMessage = isFasterOnFreshTyre
+    ? `Fresh ${freshCompound} tyre pace: ~${explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap faster than staying out over ${pluralize(explanation.remaining_laps, "lap")}, recovering ~${explanation.total_recoverable_seconds.toFixed(1)}s of the ${explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost.`
+    : `Fresh ${freshCompound} tyre pace: ~${Math.abs(explanation.fresh_tyre_gain_per_lap).toFixed(1)}s/lap SLOWER than staying out over ${pluralize(explanation.remaining_laps, "lap")} — this pit adds ~${Math.abs(explanation.total_recoverable_seconds).toFixed(1)}s on top of the ${explanation.pit_cost_seconds.toFixed(1)}s pit-stop cost, instead of recovering it.`
+
   const heading = isGain
     ? `Why ${planLabel} gains ${pluralize(position_gain_loss, "position")}`
     : isLoss
@@ -105,8 +166,6 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
 
   const driverListLabel = isGain ? "Drivers you overtake after pit" : "Drivers who overtook you in pitstop"
   const arrowLabel = isGain ? "→ you overtake" : "→ now ahead of you"
-
-  const sufficient = explanation.total_recoverable_seconds >= explanation.pit_cost_seconds
 
   return (
     <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
@@ -133,24 +192,38 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
       ) : (
         <div className="space-y-1">
           <p className="text-xs font-medium text-muted-foreground">{driverListLabel}</p>
-          <div className="space-y-0.5">
+          <div className="space-y-1">
             {explanation.drivers_overtaken.map((entry) => {
               const driver = driversById.get(entry.driver_id)
               const teamColor = driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR
+              const enrichmentText = formatOvertakingEnrichment(entry)
               return (
-                <div
-                  key={entry.driver_id}
-                  className="flex items-center gap-2 py-0.5 font-mono text-xs tabular-nums"
-                >
-                  <span className="w-7 text-muted-foreground">P{entry.position}</span>
-                  <span
-                    className="h-3 w-1 flex-shrink-0 rounded-full"
-                    style={{ backgroundColor: teamColor }}
-                  />
-                  <span className="w-10 font-semibold text-foreground">{driver?.code ?? "???"}</span>
-                  <span className="text-muted-foreground">
-                    +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
-                  </span>
+                <div key={entry.driver_id} className="py-0.5">
+                  <div className="flex items-center gap-2 font-mono text-xs tabular-nums">
+                    <span className="w-7 text-muted-foreground">P{entry.position}</span>
+                    <span
+                      className="h-3 w-1 flex-shrink-0 rounded-full"
+                      style={{ backgroundColor: teamColor }}
+                    />
+                    <span className="w-10 font-semibold text-foreground">
+                      {driver?.code ?? "???"}
+                    </span>
+                    <span className="text-muted-foreground">
+                      +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
+                    </span>
+                  </div>
+                  {/* Real Monte Carlo outputs from the SAME simulate_race call
+                      behind position_gain_loss above — What-If Simulator
+                      rebuild part (b), see docs/core-feature-rebuild-whatif-
+                      simulator.md §7. Rendered only when at least one piece
+                      is available (both fields can independently be null —
+                      see OvertakingDriver's own docstring), never a
+                      fabricated placeholder. */}
+                  {enrichmentText && (
+                    <p className="pl-9 font-mono text-[10px] text-muted-foreground/80">
+                      {enrichmentText}
+                    </p>
+                  )}
                 </div>
               )
             })}
@@ -158,30 +231,28 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
         </div>
       )}
 
-      {isLoss && (
+      {/* fresh_tyre_gain_per_lap/total_recoverable_seconds are a real
+          tire_deg-model projection as of the What-If Simulator rebuild part
+          (a) fix (see docs/core-feature-rebuild-whatif-simulator.md §7) —
+          the OLD compound continuing to degrade vs. the NEW compound
+          starting fresh, both projected over the laps remaining after this
+          plan's last pit stop. This can genuinely come out negative (the
+          new compound projected SLOWER than staying out — see
+          isFasterOnFreshTyre above), which the old hardcoded constant could
+          never represent. Still deliberately does NOT assert a "sufficient"/
+          "not enough to recover" verdict about POSITION (removed
+          2026-09-06) — drivers_overtaken above is a frozen current-lap
+          snapshot, and this line's rival-pace assumption (see the trailing
+          sentence below) is unchanged by this fix: the real Monte Carlo
+          simulation behind position_gain_loss models every rival's own tyre
+          wear and pit decisions lap by lap, which this simplified pace
+          comparison does not. */}
+      {explanation.remaining_laps > 0 && freshCompound && (
         <p className="text-xs text-muted-foreground">
-          Only {pluralize(explanation.remaining_laps, "lap")} remaining after pit —{" "}
-          {sufficient ? "sufficient" : "not enough"} to recover on fresh tyres.
-        </p>
-      )}
-
-      {explanation.fresh_tyre_gain_per_lap > 0 && freshCompound && (
-        <p className="text-xs text-muted-foreground">
-          Fresh {freshCompound} tyre advantage: ~{explanation.fresh_tyre_gain_per_lap.toFixed(1)}s/lap —{" "}
-          {isGain
-            ? `recovers ~${explanation.total_recoverable_seconds.toFixed(1)}s over ${pluralize(
-                explanation.remaining_laps,
-                "lap",
-              )}, enough to pass ${pluralize(explanation.drivers_overtaken.length, "driver")}.`
-            : isLoss
-              ? `recovers only ~${explanation.total_recoverable_seconds.toFixed(1)}s in ${pluralize(
-                  explanation.remaining_laps,
-                  "lap",
-                )}.`
-              : `roughly offsets the pit-stop loss over ${pluralize(
-                  explanation.remaining_laps,
-                  "lap",
-                )} (~${explanation.total_recoverable_seconds.toFixed(1)}s recovered).`}
+          {degradationMessage} This is a simplified snapshot that assumes rivals hold their current pace
+          with no further pit stops of their own — the Monte Carlo position change above already accounts
+          for rivals' own tyre wear and pit stops, so treat that as the number to trust and this line as
+          partial context, not the full picture.
         </p>
       )}
     </div>
@@ -245,6 +316,11 @@ export function SimulatorPage() {
   const [currentTyreAge, setCurrentTyreAge] = useState(0)
   const [remainingLaps, setRemainingLaps] = useState(20)
   const [pitStops, setPitStops] = useState<PitStopRow[]>([{ lap: 15, compound: "HARD" }])
+  const [mode, setMode] = useState<SimulationMode>("single")
+  const [scenarios, setScenarios] = useState<ScenarioRow[]>([
+    { lap: 30, compound: "HARD", label: "" },
+    { lap: 33, compound: "HARD", label: "" },
+  ])
   const [taskId, setTaskId] = useState<string | null>(null)
 
   useEffect(() => {
@@ -293,16 +369,49 @@ export function SimulatorPage() {
     setPitStops((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
   }
 
+  function addScenario() {
+    setScenarios((rows) =>
+      rows.length >= MAX_SCENARIOS
+        ? rows
+        : [...rows, { lap: remainingLaps, compound: "HARD", label: "" }],
+    )
+  }
+
+  function removeScenario(index: number) {
+    setScenarios((rows) => rows.filter((_, i) => i !== index))
+  }
+
+  function updateScenario(index: number, patch: Partial<ScenarioRow>) {
+    setScenarios((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
   async function handleRunSimulation() {
-    const payload: SimulateStrategyRequest = {
+    const basePayload = {
       driver_id: driverId,
       current_lap: currentLap,
       current_compound: currentCompound,
       current_tyre_age: currentTyreAge,
       remaining_laps: remainingLaps,
-      pit_laps: pitStops.map((row) => row.lap),
-      compounds: pitStops.map((row) => row.compound),
     }
+    // scenarios and pit_laps/compounds are mutually exclusive on the backend
+    // (SimulateStrategyRequest._validate_pit_plan) — compare mode sends only
+    // scenarios, single-plan mode sends only pit_laps/compounds, matching
+    // the two mental models these modes represent (see SimulationMode).
+    const payload: SimulateStrategyRequest =
+      mode === "compare"
+        ? {
+            ...basePayload,
+            scenarios: scenarios.map((row) => ({
+              pit_laps: [row.lap],
+              compounds: [row.compound],
+              label: row.label.trim() || `Pit lap ${row.lap}`,
+            })),
+          }
+        : {
+            ...basePayload,
+            pit_laps: pitStops.map((row) => row.lap),
+            compounds: pitStops.map((row) => row.compound),
+          }
     // A bad current_lap (validate_current_lap, see CLAUDE.md's Deferred
     // Wiring) rejects synchronously here with a 404/422 — stay on step 2 and
     // surface it via simulateMutation.error below instead of advancing to
@@ -325,10 +434,18 @@ export function SimulatorPage() {
   }
 
   const step1Valid = sessionId.trim() !== "" && driverId !== "" && remainingLaps > 0
+  // Compare mode needs at least one scenario to submit (backend rejects an
+  // empty scenarios list — see ScenarioPlan/scenarios' min_length=1); single
+  // mode has no equivalent minimum (empty pit_laps is the valid "let the
+  // simulation decide" case).
+  const step2Valid = mode === "single" || scenarios.length > 0
 
   const strategies = simulationResult.data?.result?.strategies ?? []
+  const startingPosition = simulationResult.data?.result?.starting_position ?? 0
   const chartData = strategies.map((strategy, index) => ({
-    name: `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`,
+    // Compare mode's scenario label ("Pit lap 30") when present, same
+    // fallback naming as before for the single-plan path (no label there).
+    name: strategy.label ?? `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`,
     positionChange: strategy.position_gain_loss,
     finishTime: strategy.predicted_finish_time,
     confidenceInterval: strategy.confidence_interval,
@@ -452,51 +569,156 @@ export function SimulatorPage() {
             <CardTitle className="text-base">Design Strategy</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            <p className="text-xs text-muted-foreground">
-              Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo
-              simulation decide pit timing autonomously.
-            </p>
-            <div className="space-y-2">
-              {pitStops.map((row, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={1}
-                    value={row.lap}
-                    onChange={(e) => updatePitStop(index, { lap: Number(e.target.value) })}
-                    className="w-24"
-                    aria-label={`Pit stop ${index + 1} lap`}
-                  />
-                  <Select
-                    value={row.compound}
-                    onValueChange={(value) => updatePitStop(index, { compound: value })}
-                  >
-                    <SelectTrigger className="flex-1" aria-label={`Pit stop ${index + 1} compound`}>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {COMPOUNDS.map((compound) => (
-                        <SelectItem key={compound} value={compound}>
-                          {compound}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="icon"
-                    onClick={() => removePitStop(index)}
-                    aria-label={`Remove pit stop ${index + 1}`}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+            {/* Single Plan (sequential multi-stop) vs Compare Scenarios
+                (independent single-pit-lap alternatives) — see
+                SimulationMode's own docstring for why these stay separate
+                rather than merged into one builder. */}
+            <div className="flex gap-2" role="group" aria-label="Simulation mode">
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "single" ? "default" : "outline"}
+                onClick={() => setMode("single")}
+              >
+                Single Plan
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={mode === "compare" ? "default" : "outline"}
+                onClick={() => setMode("compare")}
+              >
+                Compare Scenarios
+              </Button>
             </div>
-            <Button type="button" variant="outline" size="sm" onClick={addPitStop}>
-              + Add Pit Stop
-            </Button>
+
+            {mode === "single" ? (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo
+                  simulation decide pit timing autonomously.
+                </p>
+                <div className="space-y-2">
+                  {pitStops.map((row, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <Input
+                        type="number"
+                        min={1}
+                        value={row.lap}
+                        onChange={(e) => updatePitStop(index, { lap: Number(e.target.value) })}
+                        className="w-24"
+                        aria-label={`Pit stop ${index + 1} lap`}
+                      />
+                      <Select
+                        value={row.compound}
+                        onValueChange={(value) => updatePitStop(index, { compound: value })}
+                      >
+                        <SelectTrigger
+                          className="flex-1"
+                          aria-label={`Pit stop ${index + 1} compound`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {COMPOUNDS.map((compound) => (
+                            <SelectItem key={compound} value={compound}>
+                              {compound}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => removePitStop(index)}
+                        aria-label={`Remove pit stop ${index + 1}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+                <Button type="button" variant="outline" size="sm" onClick={addPitStop}>
+                  + Add Pit Stop
+                </Button>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-muted-foreground">
+                  Compare up to {MAX_SCENARIOS} candidate pit laps side by side. Each scenario
+                  shares the same random race conditions (safety cars, lap-time variance), so
+                  any difference between them reflects the pit-lap decision alone, not chance.
+                </p>
+                <div className="space-y-2">
+                  {scenarios.map((row, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <span
+                        className="h-8 w-1 flex-shrink-0 rounded-full"
+                        style={{
+                          backgroundColor:
+                            SCENARIO_SERIES_COLORS[index % SCENARIO_SERIES_COLORS.length],
+                        }}
+                        aria-hidden="true"
+                      />
+                      <Input
+                        type="number"
+                        min={1}
+                        value={row.lap}
+                        onChange={(e) => updateScenario(index, { lap: Number(e.target.value) })}
+                        className="w-20"
+                        aria-label={`Scenario ${index + 1} pit lap`}
+                      />
+                      <Select
+                        value={row.compound}
+                        onValueChange={(value) => updateScenario(index, { compound: value })}
+                      >
+                        <SelectTrigger
+                          className="w-28"
+                          aria-label={`Scenario ${index + 1} compound`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {COMPOUNDS.map((compound) => (
+                            <SelectItem key={compound} value={compound}>
+                              {compound}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        type="text"
+                        placeholder={`Pit lap ${row.lap}`}
+                        value={row.label}
+                        onChange={(e) => updateScenario(index, { label: e.target.value })}
+                        className="flex-1"
+                        aria-label={`Scenario ${index + 1} label`}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => removeScenario(index)}
+                        aria-label={`Remove scenario ${index + 1}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addScenario}
+                  disabled={scenarios.length >= MAX_SCENARIOS}
+                >
+                  + Add Scenario ({scenarios.length}/{MAX_SCENARIOS})
+                </Button>
+              </>
+            )}
+
             {simulateMutation.isError && (
               <p role="alert" className="text-sm font-medium text-destructive">
                 {getApiErrorMessage(simulateMutation.error, "Failed to start simulation")}
@@ -506,7 +728,9 @@ export function SimulatorPage() {
               <Button variant="outline" onClick={() => setStep(1)}>
                 Back
               </Button>
-              <Button onClick={() => void handleRunSimulation()}>Run Simulation</Button>
+              <Button disabled={!step2Valid} onClick={() => void handleRunSimulation()}>
+                Run Simulation
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -572,7 +796,7 @@ export function SimulatorPage() {
                       const change = typeof value === "number" ? value : 0
                       const finishTime =
                         typeof item.payload?.finishTime === "number"
-                          ? formatLapTime(item.payload.finishTime)
+                          ? formatRaceTime(item.payload.finishTime)
                           : "—"
                       return [
                         `${change > 0 ? "+" : ""}${change} position(s), finish ${finishTime}`,
@@ -629,13 +853,27 @@ export function SimulatorPage() {
                       {entry.positionChange}
                     </span>
                     <span className="text-right font-mono tabular-nums text-muted-foreground">
-                      {formatLapTime(entry.finishTime)}
+                      {formatRaceTime(entry.finishTime)}
                     </span>
                     <span className="text-right font-mono tabular-nums text-muted-foreground">
-                      {formatLapTime(entry.confidenceInterval[0])}–{formatLapTime(entry.confidenceInterval[1])}
+                      {formatRaceTime(entry.confidenceInterval[0])}–{formatRaceTime(entry.confidenceInterval[1])}
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {strategies.length > 0 && (
+              <div className="space-y-2 border-t pt-4">
+                <h3 className="text-sm font-semibold">Finishing Position Distribution</h3>
+                <p className="text-xs text-muted-foreground">
+                  Full probability breakdown from the same 1000-simulation Monte Carlo run —
+                  the risk/reward profile behind each plan's headline position change above.
+                </p>
+                <PositionDistributionChart
+                  strategies={strategies}
+                  startingPosition={startingPosition}
+                />
               </div>
             )}
 
@@ -644,7 +882,7 @@ export function SimulatorPage() {
                 {strategies.map((strategy, index) => (
                   <PlanExplanationCard
                     key={index}
-                    planLabel={`Plan ${index + 1}`}
+                    planLabel={strategy.label ?? `Plan ${index + 1}`}
                     strategy={strategy}
                     driversById={driversById}
                   />

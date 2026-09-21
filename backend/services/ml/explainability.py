@@ -29,7 +29,7 @@ FEATURE_LABELS: dict[str, str] = {
     "lap_number": "Lap number",
     "compound_encoded": "Tyre compound",
     "tyre_age_laps": "Tyre age",
-    "fuel_adjusted_time": "Fuel-adjusted pace",
+    "fuel_load_penalty": "Fuel load",
     "circuit_id_encoded": "Circuit",
     "driver_id_encoded": "Driver",
     "current_tyre_age": "Tyre age",

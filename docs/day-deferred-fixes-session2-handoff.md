@@ -21,8 +21,8 @@
 | 1 | WET tyre model 8-vs-6 feature schema mismatch (crashes any WET-compound sim) | ✅ fixed | `tire_deg_model.py`, `race_simulator.py`, both `_load_models` copies |
 | 2 | `current_lap` had zero validation anywhere — a 68-lap what-if silently ran against a 44-lap race | ✅ fixed | `simulate_schema.py`, `strategy_service.py`, `apis/v1/strategy.py`, `prediction_worker.py` |
 | 3 | `_run_simulation` skipped `get_engine().dispose()` on any exception (found while testing #2) | ✅ fixed | `prediction_worker.py` |
-| 4 | `predicted_finish_time` isn't a real elapsed time, just relative deltas | 🔴 deferred | `race_simulator.py` |
-| 5 | `driver_id_encoded` has no real skill signal (hash only) | 🔴 deferred | `race_simulator.py`, `tire_deg_model.py`, `pit_predictor.py` |
+| 4 | `predicted_finish_time` isn't a real elapsed time, just relative deltas | ✅ fixed 2026-09-03 | `race_simulator.py`, `prediction_worker.py`, `web`/`desktop` formatters + `SimulatorPage.tsx` |
+| 5 | `driver_id_encoded` has no real skill signal (hash only) | ⚠️ investigated 2026-09-04, skill feature deferred (not a clean win) — but surfaced and fixed a bigger separate bug: crc32 never matched the real training-time code | `tire_deg_model.py`, `train_models.py`, `retrain_incremental.py`, `strategy_service.py`, `prediction_worker.py`, new `scripts/evaluate_driver_features.py` |
 | 6 | No cross-driver reactive/strategic adaptation in the Monte Carlo | 🔴 deferred, long-term | `race_simulator.py` |
 | 7 | NULL-lap cumulative-sum bug (4 call sites) | ✅ fixed 2026-09-02 | `telemetry_service.py`, `strategy_service.py`, `prediction_worker.py` (x2), new migration + `backfill_lap_session_time.py` |
 | 8 | `tire_deg_wet.pkl` needs a real 6-feature retrain | 🔴 deferred (pre-existing) | `scripts/train_models.py` |
@@ -258,6 +258,19 @@ represents** (see `race_simulator.py:417-542`):
   forecast to hit one specific real outcome — none of this was introduced by
   today's fixes.
 
+**⚠️ Correction (2026-09-03): the "real final cumulative time of 4604.0s"
+above is wrong — it predates item 7's fix and was itself computed via the
+exact `SUM(lap_time_seconds)`-drops-NULL-laps bug item 7 fixed.** VER's pit
+in/out laps around lap 18 are exactly the kind of NULL-time lap that method
+silently drops, undercounting his real total. The validated ground truth
+(via `LapData.session_elapsed_seconds`, accurate to ≤0.18s against FastF1's
+own classification — see CLAUDE.md's item-A Notes entry) is **5094.285s**,
+not 4604.0s — a ~490s difference. This does not change finding 2 above
+(`position_gain_loss` is still mechanically sound and still misses VER's
+real +1 gain for the same items-5/6 reasons); it only means the *magnitude*
+of finding 1's gap was itself unreliable. See item 4's own section below for
+the real comparison against the corrected 5094.285s figure.
+
 ---
 
 ## Part 3 — Deferred items, one section each
@@ -265,7 +278,7 @@ represents** (see `race_simulator.py:417-542`):
 Each section below is written to be picked up independently — you shouldn't
 need to re-read this whole document to work on just one.
 
-### 4. `predicted_finish_time` is not a real elapsed race time (units/naming gap)
+### 4. `predicted_finish_time` is not a real elapsed race time (units/naming gap) — ✅ fixed 2026-09-03
 
 **Core issue:** the API response field `predicted_finish_time` (and
 `confidence_interval`, both sourced from `DriverPositionDistribution
@@ -309,21 +322,115 @@ asking the person who owns the product decision:**
   unaffected by whichever option is chosen — don't let (b)'s implementation
   accidentally touch the ranking logic.
 
-### 5. `driver_id_encoded` has no real skill signal
+**Fixed via option (b) ("make it real"), picked after asking the product
+owner directly** (per this section's own "don't assume" guidance). See
+CLAUDE.md's own Notes entry ("`predicted_finish_time` made a real elapsed
+time") for the full writeup — summarized here for this doc's own
+completeness:
 
-See **CLAUDE.md's own Deferred Wiring entry** (added today, session 2) for
-the full writeup — reproduced in brief here so this document is
-self-contained: the tyre/pit models' only per-driver feature is
-`zlib.crc32(str(driver_id).encode()) % 1000`, a hash with zero relationship
-to driving ability. `driver_service._performance_vs_team_avg` already
-computes a real, session-relative skill proxy (mean valid lap time vs. season
-teammates, same session) — it would need aggregating across sessions into a
-stable per-driver number before it could become a training feature, then
-wiring into `tire_deg_model.FEATURE_COLUMNS`/`pit_predictor.FEATURE_COLUMNS`
-alongside (not replacing) `driver_id_encoded`, then a full retrain +
-promotion pass. **Moderate effort** — real accuracy win, some of the data
-work is already done. Full detail: CLAUDE.md Deferred Wiring, entry titled
-"driver_id_encoded ... has no relationship to actual driving ability."
+- New `DriverRaceState.baseline_lap_time_seconds` (each driver's own real
+  median lap time through `current_lap`, computed by `prediction_worker
+  ._build_race_state` via `percentile_cont(0.5)` — the same definition
+  `tire_deg_model.add_engineered_features` uses for `lap_time_delta`'s own
+  training baseline) is added to every simulated lap alongside the model's
+  delta, so `cumulative_race_time_seconds` becomes a genuine absolute time.
+  A driver with no median of their own falls back to the field's median
+  (not 0.0, which would falsely rank them P1). The SC lap-time constant now
+  scales off the field's median baseline (`SC_LAP_TIME_MULTIPLIER = 1.4`)
+  instead of a small fixed value, for the same real-absolute-time reason.
+- `web`/`desktop` gained `formatRaceTime` (h:mm:ss.sss) and now use it for
+  the Finish Time columns/tooltip, replacing `formatLapTime` (which has no
+  hours segment). Mobile renders neither field — no change needed there.
+- **Validated against real data, not just tests:** re-ran this doc's own
+  Test 2 (VER's real pit stop replayed) against the real worker — landed
+  within **21.5s (0.4%)** of VER's real finish time (see the ⚠️ Correction
+  above Part 3 for the corrected 5094.285s ground truth), versus the old
+  value being off by ~3400s (67x). Re-ran Test 1 (ANT) too: `position_gain_
+  loss` shifted by exactly -1 on both variants (-6→-7, -5→-6) — the
+  expected, flagged side effect of real pace now propagating over the
+  remaining laps instead of the starting gap staying frozen, not a
+  regression. Item 10 (no track-condition input) confirmed still
+  unaffected: INTER (1b) still shows a lower cost than MEDIUM (1a),
+  unchanged in direction.
+- Tests: 3 new in `test_race_simulator.py` (direct `_advance_lap` baseline
+  arithmetic, SC-lap-time derivation end-to-end via `simulate_race`), 2 new
+  in `test_prediction_worker.py` (field-median fallback, zero-when-field-
+  has-none), 4 new in `web/src/__tests__/formatters.test.ts`. Full `pytest
+  backend/tests/unit/ -m unit`: 236 passed. Full `pytest backend/tests/
+  integration/ -m integration` (real testcontainers): 45 passed. `ruff`/
+  `ruff format --check`/`mypy --strict` clean across `backend/`. `web`:
+  `vitest run` 32 passed, `tsc --noEmit` clean, `oxlint` clean. `desktop`/
+  `mobile`: `tsc --noEmit` clean.
+
+### 5. `driver_id_encoded` has no real skill signal — investigated 2026-09-04, evidence-corrected, deferred
+
+Picked up 2026-09-04. See CLAUDE.md's own ✅-fixed Notes entry ("Driver/circuit
+encoding persisted") and its corrected Deferred Wiring entry for the full
+writeup — summarized here:
+
+- **Before touching any code**, an offline evaluation harness
+  (`scripts/evaluate_driver_features.py`, new — kept as a reusable dev tool
+  for future feature questions, not deleted after use) measured two things
+  against real holdout data: (a) whether a genuine per-driver skill feature
+  (per-driver tyre-degradation slope / lap-time consistency, computed
+  prior-sessions-only so neither leaks the training target) actually helps,
+  and (b) what the training-vs-inference encoding mismatch this item's
+  original write-up flagged as a side note actually costs.
+- **(a) was NOT a clean win**: tire_deg holdout MAE improved on HARD/
+  INTERMEDIATE (-2% to -10.5%) but got WORSE on SOFT/MEDIUM (+2% to +6%) —
+  the two highest-volume compounds. `pit_predictor` showed a small,
+  consistent improvement (-1% to -2.8% MAE) across all variants. Given the
+  mixed/negative tire_deg result, the feature was deliberately NOT added —
+  correcting this document's and CLAUDE.md's prior "moderate effort, real
+  accuracy win" framing.
+- **(b) was much larger than expected**: scoring the same fitted model on
+  holdout with the real training-time `pd.Categorical` code vs. the
+  `crc32` stand-in inflates tire_deg MAE by **50-265%** depending on
+  compound (MEDIUM, the highest-volume compound, was the worst: +265%).
+  This was live in production, undetected by item 9's schema guard (which
+  only checks feature *count*, not whether encoded values are
+  in-distribution). **This was fixed**, as the session's actual
+  deliverable in place of the driver-skill feature — see CLAUDE.md's Notes
+  entry for the full mechanism (per-model sidecar maps, resolved
+  per-pipeline-call, graceful crc32 fallback).
+- **Validated against a real local retrain**, not just the offline
+  harness: 4 of 5 tire_deg models (MEDIUM/HARD/INTER/WET; SOFT's candidate
+  didn't beat its incumbent, stays on crc32 fallback until a future
+  retrain naturally promotes it) picked up real encoding maps; their
+  holdout MAEs matched the offline evaluation to 4 decimal places.
+  Confirmed live that VER's real trained code (19) differs from the old
+  crc32 stand-in (320) and is genuinely what's used. Re-ran this doc's own
+  Test 2 (VER's real Belgian GP pit stop) through the actual restarted
+  worker as an honest single-anecdote check: `predicted_finish_time`
+  landed 26.9s (0.53%) off the corrected 5094.285s ground truth —
+  marginally *worse* than item 4's pre-encoding-fix 21.5s (0.4%), and
+  `position_gain_loss` moved from -4 to -5 (real outcome: +1). Not a sign
+  the fix is wrong — a single 27-lap Monte Carlo forecast isn't a valid
+  isolation test (the retrain also naturally updated model weights against
+  a grown corpus, and items 5's-skill-signal-gap/6 remain the dominant
+  limiter on any one what-if's directional accuracy) — the CP1-equivalent
+  same-model-different-codes comparison above is the scientifically valid
+  measurement, and it reproduced almost exactly.
+- **Incidental validation of item 9**: MEDIUM/HARD/INTER's incumbent
+  `.pkl` files were found to be genuinely corrupted
+  (`xgboost: input stream corrupted`) during this retrain — item 9's
+  schema guard correctly treated the unrecoverable incumbent as
+  incompatible and force-promoted working candidates. First real-world
+  exercise of that guard; not something this session caused.
+- **One documented, deliberate limitation**: `RaceSimulationInput.
+  circuit_id_encoded` is a single value shared across every compound group
+  in `race_simulator.py`, so it's resolved against the requesting driver's
+  own compound — correct in the normal case (all compounds share one
+  training run), an approximation otherwise. A fully general fix needs a
+  `race_simulator.py` data-model change (per-compound circuit codes), out
+  of scope for this session.
+- Tests: 10 new unit tests (`test_tire_deg_model.py` — encoding-map
+  build/parse/resolve + parallel-cache aliasing; `test_strategy_service.py`
+  and `test_prediction_worker.py` — `_load_models()` sidecar-download and
+  alias wiring). Full `pytest backend/tests/unit/ -m unit`: 252 passed (was
+  236 before this session). Full `pytest backend/tests/integration/ -m
+  integration`: 45 passed. `ruff`/`ruff format --check`/`mypy --strict`
+  clean across `backend/`.
 
 ### 6. No strategic/reactive adaptation between drivers in the Monte Carlo
 
@@ -387,13 +494,20 @@ for the full write-up — summarized here for this doc's own completeness:
   unit`: 231 passed. Full `pytest backend/tests/integration/ -m
   integration` (real testcontainers): 45 passed. `ruff`/`ruff format
   --check`/`mypy --strict` clean across the entire `backend/` tree.
-- **Not done:** Supabase (production) backfill — this session only ran
-  against the local Docker Postgres. **Cannot be run until after this
-  branch merges to `main`** — the new `session_elapsed_seconds` column
-  itself doesn't exist on Supabase yet; `cd.yml`'s `migrate` job only adds
-  it on merge. Correct sequence and exact commands: `docs/runbook.md`'s new
-  "One-time: backfill session_elapsed_seconds on Supabase" section — merge
-  first, confirm the migration job succeeded, then run the backfill.
+- **✅ Done 2026-09-02, in a follow-up after merge:** Supabase (production)
+  backfill. Confirmed `cd.yml`'s `migrate` job had applied the migration
+  first (queried `information_schema.columns` directly against
+  `SUPABASE_DIRECT_URL` — column existed, 0/3,196 R-session rows
+  populated), then ran the backfill against production. Result: 3,196 rows
+  updated across the 3 curated sessions (Canadian GP R5: 1,211; British GP
+  R9: 1,113; Belgian GP R10: 872) — an exact match to the local counts.
+  Re-verified afterward: 3,196/3,196 populated. Spot-checked British GP
+  R9's LEC/RUS/HAM gaps directly on Supabase (RUS +0.399s, HAM +0.806s) —
+  bit-for-bit identical to the local values already verified against
+  FastF1's own official classification. Full procedure now documented as
+  a completed, repeatable-for-future-rounds runbook entry:
+  `docs/runbook.md`'s "One-time: backfill session_elapsed_seconds on
+  Supabase" section.
 
 ### 8. `tire_deg_wet.pkl` needs a real 6-feature retrain — pre-existing, still deferred
 
@@ -602,6 +716,42 @@ completeness:
 
 ---
 
+## Key files touched — 2026-09-03 follow-up (item 4)
+
+| Path | What changed |
+|---|---|
+| `backend/services/ml/race_simulator.py` | New `DriverRaceState.baseline_lap_time_seconds`, `_advance_lap` adds it per racing lap, `SC_LAP_TIME_MULTIPLIER`-derived SC lap time, module docstring updated (item 4) |
+| `backend/workers/prediction_worker.py` | `_build_race_state`'s existing batched `cumulative_time_query` gained a `percentile_cont(0.5)` column (no new DB round trip); field-median fallback chain; wired into both `DriverRaceState` construction sites (item 4) |
+| `web/src/utils/formatters.ts`, `desktop/src/utils/formatters.ts` | New `formatRaceTime` (h:mm:ss.sss), kept identical between web/desktop (item 4) |
+| `web/src/pages/SimulatorPage.tsx`, `desktop/src/pages/SimulatorPage.tsx` | `formatLapTime` → `formatRaceTime` at all finish-time call sites (item 4) |
+| `web/src/components/landing/FeatureTiles.tsx` | Landing mock's `SimulatorTile` finish-time render switched to `formatRaceTime` (item 4) |
+| `backend/tests/unit/test_race_simulator.py` | 3 new tests (item 4) |
+| `backend/tests/unit/test_prediction_worker.py` | 2 new tests (item 4) |
+| `web/src/__tests__/formatters.test.ts` | 4 new tests (item 4) |
+| `CLAUDE.md` | New ✅ Notes entry for item 4; condensed the item 7/9/11/12 Notes entries (bloat control — see this session's own request); Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | This file — item 4 → ✅ fixed in the TL;DR table and its own Part 3 section, plus a ⚠️ Correction note on the stale 4604.0s Test-2 ground-truth figure (Part 2) |
+
+---
+
+## Key files touched — 2026-09-04 follow-up (item 5)
+
+| Path | What changed |
+|---|---|
+| `backend/scripts/evaluate_driver_features.py` | New file — offline evaluation harness (no S3/DB writes): candidate skill features (prior-sessions-only expanding mean), the encoding-mismatch cost measurement, tire_deg/pit_predictor holdout comparisons across feature-set variants. Kept as a reusable dev tool (item 5) |
+| `backend/services/ml/tire_deg_model.py` | New `CategoricalEncodingMaps`, `build_categorical_encoding_maps`, `encoding_maps_from_metrics`, `resolve_driver_code`/`resolve_circuit_code`, `_crc32_fallback_code`; `apply_incompatible_model_fallbacks` generalized to alias parallel caches (item 5) |
+| `backend/scripts/train_models.py` | `train_all()` computes and embeds `driver_id_to_code`/`circuit_name_to_code` into each tire_deg model's own sidecar metrics (item 5) |
+| `backend/scripts/retrain_incremental.py` | Same wiring in `retrain()`; flagged (not fixed) a separate pre-existing bug this surfaces — current-season rows key `driver_id` by FastF1 3-letter code, not DB UUID, so a driver active in both halves gets two unrelated codes (item 5) |
+| `backend/services/strategy_service.py` | New `_local_metrics_path`/`_download_metrics_from_s3`/`_encoding_maps_for_compound`/`_load_encoding_maps`; `_load_models()` populates the new cache; `_current_state` widened to resolve `circuit_name`; all 10 `_stable_code` call sites (`get_optimal_pit_window`, `get_pit_window_with_explanation`, `_undercut_overcut_probability`, `get_competitor_predicted_strategy`/`_first_pit_laps_over_threshold_batch`) switched to the resolvers, each matched to its own pipeline call; dead `_stable_code` + `zlib` import removed (item 5) |
+| `backend/workers/prediction_worker.py` | Same sidecar-loading wiring; `_run_inference`/`_build_race_state`/`_run_simulation` all gained a `maps_cache` parameter; all 6 `_stable_code` call sites switched — `_build_race_state`'s per-driver `driver_id_encoded` resolved per that driver's own current compound, `RaceSimulationInput.circuit_id_encoded` resolved against the requesting driver's compound (documented limitation — see item 5's own section); dead `_stable_code` + `zlib` import removed (item 5) |
+| `backend/tests/unit/test_tire_deg_model.py` | 10 new tests — parallel-cache aliasing (2), build/parse/resolve encoding maps (8) (item 5) |
+| `backend/tests/unit/test_strategy_service.py` | 2 new wiring tests, existing WET-alias test + `_current_state_side_effects` helper updated for the widened circuit query (item 5) |
+| `backend/tests/unit/test_prediction_worker.py` | 2 new wiring tests, existing WET-alias test updated; 6 `_build_race_state(...)` call sites updated for the new `maps_cache` parameter (item 5) |
+| `backend/tests/integration/test_resilience.py` | Updated direct `_run_inference(...)` call for the new `maps_cache` parameter (item 5) |
+| `CLAUDE.md` | New ✅ Notes entry ("Driver/circuit encoding persisted"); Deferred Wiring entry for `driver_id_encoded` corrected with the offline-evaluation evidence (mixed/negative result, not a clean win — superseded the old "moderate effort, real accuracy win" framing); Phase Tracker updated |
+| `docs/day-deferred-fixes-session2-handoff.md` | This file — item 5 → ⚠️ investigated/corrected in the TL;DR table and its own Part 3 section |
+
+---
+
 # ANCHOR PROMPT — paste into a new session
 
 ```
@@ -609,53 +759,70 @@ Read CLAUDE.md and docs/day-deferred-fixes-session2-handoff.md in full before do
 anything else — it documents a completed fix session (WET tyre model alias,
 current_lap validation, a connection-dispose bug fix), a set of distinct
 deferred items found while validating those fixes against real Belgian GP
-2026 R10 data, and four of those items (7, 9, 11, 12) already closed in
-follow-up sessions since — see the paragraph below for full current status.
+2026 R10 data, and six of those items (4, 5, 7, 9, 11, 12) already closed
+or resolved in follow-up sessions since — see the paragraph below for full
+current status.
 
 Items 11 (telemetry_worker dispose-on-exception bug, both _persist_lap and
 _persist_tire_stint) and 12 (frontend never surfaced validate_current_lap's
 rejection or a task FAILURE's reason, all three clients) are ✅ done as of a
 2026-09-01 follow-up session; item 9 (promotion guard feature-schema check)
 and item 7 (NULL-lap cumulative-sum bug, CLAUDE.md's own Deferred Wiring
-item A) are both ✅ done as of 2026-09-02 follow-up sessions — see this
-file's own item 7/9/11/12 sections and CLAUDE.md's Notes entries for what
-landed on each. Item 7's fix also surfaced a new, distinct, pre-existing
-CLAUDE.md Deferred Wiring entry ("No F1 penalty/post-race-classification
-data is ingested anywhere") — read that if working anywhere near
-`_compute_session_gaps`/`lap_data.position`.
+item A) are both ✅ done as of 2026-09-02 follow-up sessions; item 4
+(predicted_finish_time made a real elapsed time) is ✅ done as of a
+2026-09-03 follow-up session; item 5 (driver_id_encoded skill signal) was
+investigated as of a 2026-09-04 follow-up session — the skill-feature ask
+itself was evaluated offline and found NOT a clean win (deliberately not
+added), but the investigation surfaced and fixed a much bigger separate bug
+(driver/circuit encoding never matched real training-time codes, inflating
+tire_deg holdout MAE 50-265%) — see this file's own item 4/5/7/9/11/12
+sections and CLAUDE.md's Notes entries for what landed on each. Item 7's
+fix also surfaced a new, distinct, pre-existing CLAUDE.md Deferred Wiring
+entry ("No F1 penalty/post-race-classification data is ingested anywhere")
+— read that if working anywhere near `_compute_session_gaps`/
+`lap_data.position`. Item 4's fix also caught a stale ground-truth figure
+in this doc's own Part 2 Test 2 (the old "4604.0s" was itself computed via
+the pre-item-7 SUM(lap_time_seconds) bug) — see the ⚠️ Correction note
+there before citing that section's numbers. Item 5's own section has the
+corrected Test 2 numbers from the real post-fix retrain.
 
-5 items remain in the file's Part 3, independent of each other — pick ONE
+3 items remain in the file's Part 3, independent of each other — pick ONE
 to work on this session, don't try to fix several at once:
 
-  4.  predicted_finish_time isn't a real elapsed time (units/naming gap)
-  5.  driver_id_encoded has no real driving-skill signal (a retrain for this
-      is now safer to promote thanks to item 9's schema check)
   6.  No strategic/reactive adaptation between drivers in the Monte Carlo
       (long-term, research-first — don't start here unless that's explicitly
       what's wanted)
-  8.  tire_deg_wet.pkl needs a real 6-feature retrain (unblocked by item 9 —
-      the old manual-sidecar-deletion workaround is obsolete, but the retrain
-      itself hasn't happened; train-models.yml currently fetches zero 2026
-      laps — see CLAUDE.md's escalated GitHub-Actions/FastF1 item — resolve
-      or consciously accept the base-corpus-only outcome before triggering
-      a real run)
+  8.  tire_deg_wet.pkl needs a real 6-feature retrain (item 9's guard is now
+      confirmed working against a real run, per item 5's follow-up — the old
+      manual-sidecar-deletion workaround is obsolete, but the retrain itself
+      still hasn't happened; train-models.yml (CI) currently fetches zero
+      2026 laps — see CLAUDE.md's escalated GitHub-Actions/FastF1 item —
+      resolve or consciously accept the base-corpus-only outcome before
+      triggering a real CI run; a local run, as item 5's follow-up did, is
+      unaffected by that CI-specific issue)
   10. Tyre models have no track-condition input (dry vs wet)
 
-Also outstanding, not part of the numbered list above: item 7's Supabase
-(production) backfill was never run — this session's backfill only touched
-the local Docker Postgres, and it CANNOT be run yet regardless — the
-`session_elapsed_seconds` column doesn't exist on Supabase until this
-branch merges to `main` and `cd.yml`'s `migrate` job applies it. Correct
-sequence (a manual post-merge step, not something for a future session to
-attempt before the merge): `docs/runbook.md`'s "One-time: backfill
-session_elapsed_seconds on Supabase" section — (1) merge, confirm the
-migration job succeeded, (2) then run `backfill_lap_session_time.py`
-against `SUPABASE_DIRECT_URL`.
+Item 7's Supabase (production) backfill is also done (2026-09-02, after
+this branch merged) — 3,196 rows across the 3 curated sessions, verified
+against both the local backfill and FastF1's own official classification.
+See `docs/runbook.md`'s "One-time: backfill session_elapsed_seconds on
+Supabase" section (now marked done, kept as the procedure for a future
+round). Nothing outstanding on item 7. Item 5's model-registry fix has no
+separate "production" copy to backfill — `aws_bucket_name` defaults to the
+single `f1-strategy-models` S3 bucket everywhere (local, CI, and any future
+Fly.io deploy; confirmed via `backend/core/config.py` — no per-environment
+bucket scoping exists in this codebase, unlike Supabase/Upstash), so this
+session's `make train` run already updated the one real production model
+registry directly — MEDIUM/HARD/INTER/WET's fix is live wherever anything
+reads `production/*.pkl` from S3, right now, not something that still
+needs propagating anywhere. SOFT's incumbent still lacks a real map (its
+candidate didn't beat it this run) — nothing to do about that beyond
+letting a future retrain naturally promote it.
 
 If the user hasn't already told you which item to pick, ask before starting
-— several of these (5, 6 especially) are moderate-to-large scope changes
-that deserve a plan-first checkpoint discussion, same convention as the
-session that produced this handoff doc (propose a checkpoint plan, wait for
+— several of these (6 especially) are moderate-to-large scope changes that
+deserve a plan-first checkpoint discussion, same convention as the session
+that produced this handoff doc (propose a checkpoint plan, wait for
 approval, implement checkpoint by checkpoint, report + wait between each).
 
 Do NOT run git commands unless explicitly asked.

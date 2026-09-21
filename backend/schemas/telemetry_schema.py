@@ -44,6 +44,29 @@ class LapDataCreate(BaseModel):
     sector1_seconds: float | None = None
     sector2_seconds: float | None = None
     sector3_seconds: float | None = None
+    # Optional: historical ingestion has always populated LapData.track_status
+    # directly from FastF1's own TrackStatus column (the concatenated status
+    # codes active during that lap — see ingest_historical.py). The live
+    # ingestor (ingest_live_session.py) previously never populated it at all,
+    # leaving every live-ingested row NULL and `is_valid` hardcoded True
+    # regardless of what actually happened on track — see docs/live-race-
+    # ingestion-and-strategy-gaps-monza-2026.md Issue D (a whole-field red
+    # flag at Monza 2026 was ingested as ~1955s "laps", all marked valid).
+    # Now derived live from the TrackStatus feed topic's per-lap accumulated
+    # codes; still optional here since replay/live callers with no
+    # resolvable status yet (before any TrackStatus message has arrived)
+    # must not be forced to send a fabricated value.
+    track_status: str | None = None
+    # Optional: historical ingestion has always populated LapData.position
+    # directly from FastF1's own Position column. The live ingestor
+    # (ingest_live_session.py) previously never set it at all, leaving every
+    # live-ingested row NULL — see CLAUDE.md's core-feature-rebuild Checkpoint
+    # 1 fix, which derives it live from the streaming GapToLeader field
+    # (F1's live feed sends Position itself only once, in the Subscribe
+    # snapshot). Still optional here since replay/live callers that have no
+    # resolvable position yet (e.g. before any GapToLeader message has
+    # arrived) must not be forced to send a fabricated value.
+    position: int | None = None
 
 
 class TireStintCreate(BaseModel):

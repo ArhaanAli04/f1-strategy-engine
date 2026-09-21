@@ -154,7 +154,33 @@ async def get_or_create_session(
     session_type: str,
     session_date: date,
     scheduled_start: datetime | None = None,
+    total_laps: int | None = None,
 ) -> SessionModel:
+    """Get or create a Session row, optionally setting/backfilling total_laps.
+
+    total_laps (see docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    Issue A) is only ever WRITTEN here, never overwritten: a brand-new row
+    gets it directly; an EXISTING row only has it backfilled when the
+    caller now has a real value AND the row's own value is still NULL —
+    covers a session first created by the live ingestor (which cannot
+    reliably resolve total_laps at session start, see
+    ingest_live_session.py's own total_laps handling) and later
+    re-processed by ingest_historical.py once the real race has finished.
+    An existing non-NULL value is never touched, even if the caller passes
+    a different one — this function does not adjudicate conflicting
+    sources, it only ever fills a gap.
+
+    Args:
+        db: Async DB session.
+        race_id: Parent Race id.
+        session_type: FP1/FP2/FP3/Q/R.
+        session_date: Calendar date of this session.
+        scheduled_start: Real start instant, if known.
+        total_laps: Real scheduled race distance, if known (always None for
+            a non-race-like session — see Session.total_laps's own comment).
+    Returns:
+        The existing or newly created Session row.
+    """
     result = await db.execute(
         select(SessionModel).where(
             SessionModel.race_id == race_id, SessionModel.session_type == session_type
@@ -168,8 +194,12 @@ async def get_or_create_session(
             session_type=session_type,
             session_date=session_date,
             scheduled_start=scheduled_start,
+            total_laps=total_laps,
         )
         db.add(session_row)
+        await db.flush()
+    elif total_laps is not None and session_row.total_laps is None:
+        session_row.total_laps = total_laps
         await db.flush()
     return session_row
 

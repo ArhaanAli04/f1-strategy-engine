@@ -19,8 +19,11 @@ import fakeredis as fakeredis_lib
 import joblib
 import numpy as np
 import pytest
+import redis.asyncio as redis_asyncio
+from celery import exceptions as celery_exceptions
 
-from backend.services.ml import tire_deg_model
+from backend.core.exceptions import NotFoundError
+from backend.services.ml import race_simulator, tire_deg_model
 from backend.workers import prediction_worker
 
 
@@ -69,10 +72,12 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         (driver_b_id, lap_b.position, None),
     ]
 
+    # 3rd column is each driver's own median lap_time_seconds through
+    # current_lap (percentile_cont(0.5)) — see baseline_lap_time_seconds.
     cumulative_time_result = MagicMock()
     cumulative_time_result.all.return_value = [
-        (driver_a_id, 4321.5),
-        (driver_b_id, 4310.0),
+        (driver_a_id, 4321.5, 91.2),
+        (driver_b_id, 4310.0, 90.5),
     ]
 
     captured_queries: list[Any] = []
@@ -106,11 +111,14 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         "SOFT",
         3,
         58,
+        {},
     )
 
-    # Exactly one query for cumulative time regardless of field size — the N+1 fix
-    # this test guards: 4 total db.execute() calls (context, latest_laps, position,
-    # cumulative_time), never one more per driver.
+    # Exactly one query for cumulative time (and baseline_lap_time_seconds,
+    # selected in the same query — see item 4's Checkpoint 2) regardless of
+    # field size — the N+1 fix this test guards: 4 total db.execute() calls
+    # (context, latest_laps, position, cumulative_time), never one more per
+    # driver, and no extra query added for the baseline either.
     assert len(captured_queries) == 4
 
     cumulative_time_query = captured_queries[3]
@@ -123,11 +131,152 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     assert f"lap_number <= {current_lap}" in compiled
     assert f"lap_number <= {lap_a.lap_number}" not in compiled
     assert f"lap_number <= {lap_b.lap_number}" not in compiled
+    assert "percentile_cont" in compiled
 
     driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
     driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
     assert driver_a_state.cumulative_race_time_seconds == 4321.5
     assert driver_b_state.cumulative_race_time_seconds == 4310.0
+    assert driver_a_state.baseline_lap_time_seconds == pytest.approx(91.2)
+    assert driver_b_state.baseline_lap_time_seconds == pytest.approx(90.5)
+
+
+# --- _resolve_inference_context: total_laps (docs/live-race-ingestion-and-
+# strategy-gaps-monza-2026.md Issue A) ---
+#
+# _resolve_weather/_resolve_position_context are monkeypatched to canned
+# values in both tests below — this isolates exactly the total_laps logic
+# CP3 changed, matching this file's own established pattern (see
+# test_get_pit_window_with_explanation's docstring in test_strategy_service.py
+# for the same "monkeypatch the unrelated dependencies" convention).
+
+
+@pytest.mark.unit
+async def test_resolve_inference_context_prefers_stored_total_laps(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Session.total_laps IS stored, it's used directly and the old
+    MAX(lap_number) fallback query is never issued — only 1 db.execute()
+    call, not 2."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, 2026, 10, "Test Circuit", 53)
+    mock_db_session.execute.return_value = context_result
+
+    monkeypatch.setattr(prediction_worker, "_resolve_weather", AsyncMock(return_value=(30.0, 20.0)))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_resolve_position_context",
+        AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
+    )
+
+    resolved = await prediction_worker._resolve_inference_context(
+        mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
+    )
+
+    assert resolved["total_laps"] == 53  # the real stored value, NOT MAX(lap_number)
+    assert resolved["stored_total_laps"] == 53
+    mock_db_session.execute.assert_called_once()
+
+
+@pytest.mark.unit
+async def test_resolve_inference_context_falls_back_to_max_lap_number(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No stored Session.total_laps — falls back to MAX(lap_number),
+    unchanged from before this fix (the exact behavior that produced
+    Issue A: a live session where this equals ~current_lap collapses every
+    "laps remaining"/fuel-load feature to near-zero for the whole race)."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, 2026, 10, "Test Circuit", None)
+    max_lap_result = MagicMock()
+    max_lap_result.scalar_one.return_value = 38
+    mock_db_session.execute.side_effect = [context_result, max_lap_result]
+
+    monkeypatch.setattr(prediction_worker, "_resolve_weather", AsyncMock(return_value=(30.0, 20.0)))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_resolve_position_context",
+        AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
+    )
+
+    resolved = await prediction_worker._resolve_inference_context(
+        mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
+    )
+
+    assert resolved["total_laps"] == 38
+    assert resolved["stored_total_laps"] is None
+    assert mock_db_session.execute.call_count == 2
+
+
+# --- _run_inference: optimal_pit_lap clamp (docs/live-race-ingestion-and-
+# strategy-gaps-monza-2026.md Issue A) ---
+#
+# models={} in both tests below deliberately provides no tire_deg_*.pkl,
+# forcing _run_inference's own documented fallback: predicted_life_remaining
+# defaults to tire_deg_model.MAX_LOOKAHEAD_LAPS (40.0) — the exact pegged
+# value the doc's real-world investigation found at Monza (predicted_life_
+# remaining stuck at 40.0 for the whole race), reproducing "Recommended:
+# Lap 78" at lap_number=38 (38 + 40 = 78) without needing to mock a real
+# tire_deg pipeline's predict() call.
+
+
+@pytest.mark.unit
+def test_run_inference_clamps_optimal_pit_lap_to_known_total_laps() -> None:
+    """The headline Issue A repro: predicted_life_remaining pegged at 40
+    previously let optimal_pit_lap run to lap 78 on what was actually a
+    53-lap race. Confirms the clamp engages when stored_total_laps is real."""
+    driver_id = uuid.uuid4()
+    context = {"compound": "MEDIUM", "lap_number": 38, "tyre_age_laps": 20}
+    resolved = {
+        "circuit_name": "Test Circuit",
+        "total_laps": 53,
+        "stored_total_laps": 53,
+        "gap_to_car_ahead": 5.0,
+        "gap_to_car_behind": 5.0,
+        "position": 5,
+    }
+
+    result = prediction_worker._run_inference({}, {}, context, resolved, driver_id)
+
+    assert result["tire_life_remaining"] == 40.0
+    assert result["optimal_pit_lap"] == 53  # clamped — NOT 38 + 40 = 78
+
+
+@pytest.mark.unit
+def test_run_inference_does_not_clamp_when_total_laps_unknown() -> None:
+    """stored_total_laps is None (session predates Session.total_laps, or a
+    live session before its first LapCount message has arrived) — left
+    unclamped, per this document's own research-question-3 decision:
+    clamping against the fallback MAX(lap_number) proxy (here: total_laps
+    coincides with lap_number, 38 — the exact mid-race shape the proxy
+    takes) would just replace one wrong number with a different, equally
+    meaningless one, not a correct one."""
+    driver_id = uuid.uuid4()
+    context = {"compound": "MEDIUM", "lap_number": 38, "tyre_age_laps": 20}
+    resolved = {
+        "circuit_name": "Test Circuit",
+        "total_laps": 38,  # the fallback proxy — NOT a real race length
+        "stored_total_laps": None,
+        "gap_to_car_ahead": 5.0,
+        "gap_to_car_behind": 5.0,
+        "position": 5,
+    }
+
+    result = prediction_worker._run_inference({}, {}, context, resolved, driver_id)
+
+    assert result["optimal_pit_lap"] == 78  # 38 + 40, NOT clamped down to 38
 
 
 @pytest.mark.unit
@@ -164,7 +313,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
     position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 0.0, 88.0)]
 
     mock_db_session.execute.side_effect = [
         context_result,
@@ -187,6 +336,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
         "MEDIUM",
         14,
         58,
+        {},
     )
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
@@ -235,7 +385,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
     position_result.all.return_value = [(driver_id, 10, None)]
 
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 0.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 0.0, 88.0)]
 
     captured_queries: list[Any] = []
 
@@ -267,6 +417,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
         "MEDIUM",
         14,
         58,
+        {},
     )
 
     position_query = captured_queries[2]
@@ -315,12 +466,88 @@ def test_load_models_aliases_schema_incompatible_wet_pipeline(
     # module's imported attribute trips mypy --strict's --no-implicit-reexport.
     monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, other))
     monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    # No sidecar for any filename here — this test is scoped to model aliasing
+    # only; the encoding-maps side of the same aliasing call is covered by
+    # test_load_models_aliases_encoding_maps_alongside_wet_pipeline below.
+    monkeypatch.setattr(prediction_worker, "_download_metrics_from_s3", lambda filename: None)
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
 
     models = prediction_worker._load_models()
 
     assert models["tire_deg_wet.pkl"] is inter
     assert models["tire_deg_inter.pkl"] is inter
     assert set(models) == set(prediction_worker._MODEL_FILES)
+
+
+@pytest.mark.unit
+def test_load_models_populates_encoding_maps_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_load_models() downloads each tire_deg model's own sidecar and parses its encoding maps."""
+    n_features = len(tire_deg_model.FEATURE_COLUMNS)
+    pipeline = _fit_pipeline_with_n_features(n_features=n_features, seed=310)
+    metrics_by_filename = {
+        "tire_deg_soft.pkl": {
+            "holdout_mae": 0.5,
+            "driver_id_to_code": {"d1": 3},
+            "circuit_name_to_code": {"Monza": 7},
+        },
+        "tire_deg_medium.pkl": None,  # legacy sidecar — predates this fix, no maps recorded
+    }
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipeline)
+    monkeypatch.setattr(
+        prediction_worker,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
+
+    prediction_worker._load_models()
+    maps = prediction_worker._load_encoding_maps()
+
+    assert maps["tire_deg_soft.pkl"] == tire_deg_model.CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 3}, circuit_name_to_code={"Monza": 7}
+    )
+    assert maps["tire_deg_medium.pkl"] is None
+    assert "pit_predictor.pkl" not in maps  # only tire_deg_* filenames get an entry
+
+
+@pytest.mark.unit
+def test_load_models_aliases_encoding_maps_alongside_wet_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WET's model-schema alias also aliases its encoding-maps cache entry to INTER's real map."""
+    stale_wet = _fit_pipeline_with_n_features(n_features=8, seed=311)
+    inter = _fit_pipeline_with_n_features(n_features=len(tire_deg_model.FEATURE_COLUMNS), seed=312)
+    pipelines_by_filename = {"tire_deg_wet.pkl": stale_wet, "tire_deg_inter.pkl": inter}
+    inter_maps = {
+        "holdout_mae": 0.4,
+        "driver_id_to_code": {"d1": 1},
+        "circuit_name_to_code": {"Monza": 2},
+    }
+    metrics_by_filename = {
+        "tire_deg_wet.pkl": {"holdout_mae": 5.0},  # stale sidecar, no maps of its own
+        "tire_deg_inter.pkl": inter_maps,
+    }
+
+    monkeypatch.setattr(prediction_worker, "_download_from_s3", lambda filename: filename)
+    monkeypatch.setattr(joblib, "load", lambda path: pipelines_by_filename.get(path, inter))
+    monkeypatch.setattr(
+        prediction_worker,
+        "_download_metrics_from_s3",
+        lambda filename: metrics_by_filename.get(filename),
+    )
+    monkeypatch.setattr(prediction_worker, "_model_cache", {})
+    monkeypatch.setattr(prediction_worker, "_encoding_maps_cache", {})
+
+    prediction_worker._load_models()
+    maps = prediction_worker._load_encoding_maps()
+
+    assert maps["tire_deg_wet.pkl"] == tire_deg_model.CategoricalEncodingMaps(
+        driver_id_to_code={"d1": 1}, circuit_name_to_code={"Monza": 2}
+    )
+    assert maps["tire_deg_wet.pkl"] is maps["tire_deg_inter.pkl"]
 
 
 @pytest.mark.unit
@@ -401,7 +628,7 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
 
     # Present but must be ignored in favour of the 900.5 above.
     cumulative_time_result = MagicMock()
-    cumulative_time_result.all.return_value = [(driver_id, 1.0)]
+    cumulative_time_result.all.return_value = [(driver_id, 1.0, 88.0)]
 
     mock_db_session.execute.side_effect = [
         context_result,
@@ -424,7 +651,1153 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
         "MEDIUM",
         20,
         52,
+        {},
     )
 
     driver_state = next(d for d in race_state.drivers if d.driver_id == str(driver_id))
     assert driver_state.cumulative_race_time_seconds == pytest.approx(900.5)
+
+
+# --- baseline_lap_time_seconds (item 4: predicted_finish_time should be a real
+# absolute elapsed time, not just an accumulated delta) ---
+
+
+@pytest.mark.unit
+async def test_build_race_state_missing_baseline_falls_back_to_field_median(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A driver with zero valid timed laps through current_lap (no median of
+    their own — the cumulative_time_query's 3rd column is None for them) must
+    get the field's own median baseline_lap_time_seconds, not 0.0 — 0.0 would
+    give them an artificial ~0s/lap pace and rank them P1 in the simulation
+    regardless of their real position.
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    driver_a_id = uuid.uuid4()
+    driver_b_id = uuid.uuid4()
+    driver_c_id = uuid.uuid4()
+    current_lap = 30
+    season, round_number = 2026, 10
+
+    context_result = MagicMock()
+    context_result.one.return_value = (
+        circuit_id,
+        season,
+        round_number,
+        "Circuit de Spa-Francorchamps",
+    )
+
+    lap_a = SimpleNamespace(
+        driver_id=driver_a_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=1
+    )
+    lap_b = SimpleNamespace(
+        driver_id=driver_b_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=2
+    )
+    lap_c = SimpleNamespace(
+        driver_id=driver_c_id, lap_number=30, compound="MEDIUM", tyre_age_laps=10, position=3
+    )
+    latest_laps_result = MagicMock()
+    latest_laps_result.scalars.return_value.all.return_value = [lap_a, lap_b, lap_c]
+
+    position_result = MagicMock()
+    position_result.all.return_value = [
+        (driver_a_id, 1, None),
+        (driver_b_id, 2, None),
+        (driver_c_id, 3, None),
+    ]
+
+    # driver_c has NO median (3rd column None) — unlike driver_a/driver_b's
+    # real values, e.g. every one of their laps through current_lap was an
+    # out-lap/in-lap/SC lap with a NULL lap_time_seconds.
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = [
+        (driver_a_id, 2700.0, 90.0),
+        (driver_b_id, 2760.0, 92.0),
+        (driver_c_id, 0.0, None),
+    ]
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
+
+    await fakeredis.set(
+        prediction_worker._weather_key(season, round_number),
+        json.dumps({"track_temp": 25.0, "air_temp": 18.0}),
+    )
+
+    race_state = await prediction_worker._build_race_state(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        driver_a_id,
+        current_lap,
+        "MEDIUM",
+        10,
+        44,
+        {},
+    )
+
+    driver_a_state = next(d for d in race_state.drivers if d.driver_id == str(driver_a_id))
+    driver_b_state = next(d for d in race_state.drivers if d.driver_id == str(driver_b_id))
+    driver_c_state = next(d for d in race_state.drivers if d.driver_id == str(driver_c_id))
+    assert driver_a_state.baseline_lap_time_seconds == pytest.approx(90.0)
+    assert driver_b_state.baseline_lap_time_seconds == pytest.approx(92.0)
+    # median([90.0, 92.0]) = 91.0 — the field median, not either individual
+    # driver's own value, and not 0.0.
+    assert driver_c_state.baseline_lap_time_seconds == pytest.approx(91.0)
+
+
+@pytest.mark.unit
+async def test_build_race_state_baseline_zero_when_field_has_none(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """When NO driver in the field has any median yet (e.g. a genuine pre-race
+    what-if with zero ingested lap_data), baseline_lap_time_seconds collapses
+    to 0.0 for the requester — ranking-neutral, identical to the pre-baseline
+    behaviour, rather than favouring any one driver.
+    """
+    session_id = uuid.uuid4()
+    circuit_id = uuid.uuid4()
+    requesting_driver_id = uuid.uuid4()
+    season, round_number = 2026, 12
+
+    context_result = MagicMock()
+    context_result.one.return_value = (circuit_id, season, round_number, "Circuit Zandvoort")
+
+    latest_laps_result = MagicMock()
+    latest_laps_result.scalars.return_value.all.return_value = []
+
+    position_result = MagicMock()
+    position_result.all.return_value = []
+
+    cumulative_time_result = MagicMock()
+    cumulative_time_result.all.return_value = []
+
+    mock_db_session.execute.side_effect = [
+        context_result,
+        latest_laps_result,
+        position_result,
+        cumulative_time_result,
+    ]
+
+    await fakeredis.set(
+        prediction_worker._weather_key(season, round_number),
+        json.dumps({"track_temp": 22.0, "air_temp": 17.0}),
+    )
+
+    race_state = await prediction_worker._build_race_state(
+        mock_db_session,
+        fakeredis,
+        session_id,
+        requesting_driver_id,
+        1,
+        "SOFT",
+        0,
+        50,
+        {},
+    )
+
+    driver_state = next(d for d in race_state.drivers if d.driver_id == str(requesting_driver_id))
+    assert driver_state.baseline_lap_time_seconds == 0.0
+
+
+# --- _resolve_position_context: core-feature-rebuild Checkpoint 1 ---
+# (current_lap bound + live-gaps Redis fallback — see
+# docs/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
+# Deferred Wiring entry on _resolve_position_context's missing bound.)
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_bounds_query_by_current_lap(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """The field-position subquery must filter lap_number <= current_lap —
+    otherwise a fully-ingested/replayed session reads every OTHER driver's
+    FINAL race classification regardless of the requesting driver's own
+    current lap (same bug shape _build_race_state's position_subq already
+    fixed for the Monte Carlo path — see this file's own tests above)."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    current_lap = 20
+
+    captured_queries: list[Any] = []
+
+    async def _execute_side_effect(query: Any, *args: Any, **kwargs: Any) -> Any:
+        captured_queries.append(query)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        return result
+
+    mock_db_session.execute.side_effect = _execute_side_effect
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, current_lap, 2026, 10
+    )
+
+    assert len(captured_queries) == 1
+    compiled = str(captured_queries[0].compile(compile_kwargs={"literal_binds": True}))
+    assert f"lap_number <= {current_lap}" in compiled
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_falls_back_to_redis_when_db_position_missing(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A live session's lap_data has no usable position (e.g. before enough
+    GapToLeader messages have streamed to rank anyone, or a pre-Checkpoint-1
+    NULL row) — must fall back to the live-authoritative
+    f1:{season}:{round}:gaps key instead of defaulting to "no neighbours"."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    ahead_id = uuid.uuid4()
+    behind_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps(
+            {
+                "gaps": [
+                    {
+                        "driver_id": str(ahead_id),
+                        "position": 1,
+                        "gap_to_ahead_seconds": 0.0,
+                        "gap_to_behind_seconds": 2.5,
+                    },
+                    {
+                        "driver_id": str(driver_id),
+                        "position": 2,
+                        "gap_to_ahead_seconds": 2.5,
+                        "gap_to_behind_seconds": 4.0,
+                    },
+                    {
+                        "driver_id": str(behind_id),
+                        "position": 3,
+                        "gap_to_ahead_seconds": 4.0,
+                        "gap_to_behind_seconds": 0.0,
+                    },
+                ]
+            }
+        ),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 2
+    assert result["gap_to_car_ahead"] == pytest.approx(2.5)
+    assert result["gap_to_car_behind"] == pytest.approx(4.0)
+    assert result["target_ahead_driver_id"] == ahead_id
+    assert result["target_behind_driver_id"] == behind_id
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_leader_has_no_ahead_target(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    behind_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps(
+            {
+                "gaps": [
+                    {
+                        "driver_id": str(driver_id),
+                        "position": 1,
+                        "gap_to_ahead_seconds": 0.0,
+                        "gap_to_behind_seconds": 3.1,
+                    },
+                    {
+                        "driver_id": str(behind_id),
+                        "position": 2,
+                        "gap_to_ahead_seconds": 3.1,
+                        "gap_to_behind_seconds": 0.0,
+                    },
+                ]
+            }
+        ),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+    assert result["target_behind_driver_id"] == behind_id
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_tolerates_malformed_payload(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set("f1:2026:10:gaps", "not valid json")
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_redis_fallback_driver_not_in_gaps_list(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    await fakeredis.set(
+        "f1:2026:10:gaps",
+        json.dumps({"gaps": [{"driver_id": str(other_id), "position": 1}]}),
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result["position"] == 1
+    assert result["target_ahead_driver_id"] is None
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_returns_hardcoded_default_when_nothing_resolves(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """Neither the bounded DB query nor the Redis fallback has anything for
+    this driver (e.g. the very first lap ever ingested) — must reproduce the
+    original pre-Checkpoint-1 "no neighbours" default, not raise."""
+    session_id = uuid.uuid4()
+    driver_id = uuid.uuid4()
+
+    empty_result = MagicMock()
+    empty_result.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty_result
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert result == {
+        "position": 1,
+        "gap_to_car_ahead": prediction_worker.pit_predictor.MAX_GAP_SECONDS,
+        "gap_to_car_behind": prediction_worker.pit_predictor.MAX_GAP_SECONDS,
+        "target_ahead_driver_id": None,
+        "target_behind_driver_id": None,
+    }
+
+
+# --- _shape_position_probabilities (What-If Simulator multi-scenario rebuild,
+# Checkpoint 2: see docs/core-feature-rebuild-whatif-simulator.md) ---
+
+
+@pytest.mark.unit
+def test_shape_position_probabilities_filters_zero_and_sorts_by_position() -> None:
+    """race_simulator.simulate_race returns a DENSE dict covering every
+    position in the field (e.g. 20 entries for a 20-car field) — most of
+    them 0.0 for any one driver. The shaped output must drop those and be
+    ordered by position ascending, not by dict insertion order or
+    probability descending."""
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="driver-1",
+        # Deliberately out of position order and with zero-probability
+        # positions mixed in, to prove both the filter and the sort are real.
+        position_probabilities={5: 0.0, 3: 0.71, 1: 0.0, 2: 0.18, 4: 0.11},
+        mean_position=2.4,
+        mean_finish_time_seconds=5400.0,
+        finish_time_p5_seconds=5350.0,
+        finish_time_p95_seconds=5460.0,
+    )
+
+    result = prediction_worker._shape_position_probabilities(distribution)
+
+    assert result == [
+        {"position": 2, "probability": 0.18},
+        {"position": 3, "probability": 0.71},
+        {"position": 4, "probability": 0.11},
+    ]
+
+
+@pytest.mark.unit
+def test_shape_position_probabilities_empty_when_all_zero() -> None:
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="driver-1",
+        position_probabilities={1: 0.0, 2: 0.0},
+        mean_position=1.5,
+        mean_finish_time_seconds=5400.0,
+        finish_time_p5_seconds=5350.0,
+        finish_time_p95_seconds=5460.0,
+    )
+
+    assert prediction_worker._shape_position_probabilities(distribution) == []
+
+
+# --- _build_plan_explanation / _project_pit_stop_degradation (What-If
+# Simulator rebuild part (a): replacing the hardcoded
+# _FRESH_TYRE_GAIN_PER_LAP_SECONDS constant with a real tire_deg-model
+# projection — see docs/core-feature-rebuild-whatif-simulator.md §7). ---
+
+
+def _fit_pipeline_with_slope(slope: float, seed: int) -> Any:
+    """A synthetic tire_deg pipeline where predicted delta grows ~linearly with
+    tyre_age_laps — same construction as test_tire_deg_model.py's identical
+    private helper, duplicated here since it isn't exported.
+    """
+    rng = np.random.default_rng(seed)
+    n_samples = 150
+    tyre_age_col = tire_deg_model.FEATURE_COLUMNS.index("tyre_age_laps")
+    features = rng.random((n_samples, len(tire_deg_model.FEATURE_COLUMNS)))
+    features[:, tyre_age_col] = rng.uniform(0, 45, n_samples)
+    target = slope * features[:, tyre_age_col] + rng.normal(0, 0.02, n_samples)
+    pipeline = tire_deg_model._build_pipeline()
+    pipeline.fit(features, target)
+    return pipeline
+
+
+def _requester_and_race_state(
+    compound: str, tyre_age_laps: int, current_lap: int, total_laps: int
+) -> tuple[Any, Any]:
+    requester = race_simulator.DriverRaceState(
+        driver_id="requester",
+        starting_position=5,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=1,
+        cumulative_race_time_seconds=1000.0,
+    )
+    race_state = race_simulator.RaceSimulationInput(
+        circuit_name="Monza",
+        circuit_id_encoded=0,
+        current_lap=current_lap,
+        total_laps=total_laps,
+        wet_track=False,
+        track_temp=30.0,
+        air_temp=20.0,
+        drivers=[requester],
+    )
+    return requester, race_state
+
+
+def _requester_and_rival_race_state(
+    compound: str, tyre_age_laps: int, current_lap: int, total_laps: int, gap_seconds: float
+) -> tuple[Any, Any, Any]:
+    """Two-driver race_state — requester + one rival at the given gap (rival's
+    cumulative_race_time_seconds minus the requester's) — for testing
+    drivers_overtaken's real-simulation enrichment (What-If Simulator rebuild
+    part (b)). _requester_and_race_state above has only one driver, so
+    drivers_overtaken is always empty there — not useful for these tests.
+    """
+    requester = race_simulator.DriverRaceState(
+        driver_id="requester",
+        starting_position=5,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=1,
+        cumulative_race_time_seconds=1000.0,
+    )
+    rival = race_simulator.DriverRaceState(
+        driver_id="rival",
+        starting_position=6,
+        compound=compound,
+        compound_encoded=prediction_worker._COMPOUND_ENCODING[compound],
+        tyre_age_laps=tyre_age_laps,
+        driver_id_encoded=2,
+        cumulative_race_time_seconds=1000.0 + gap_seconds,
+    )
+    race_state = race_simulator.RaceSimulationInput(
+        circuit_name="Monza",
+        circuit_id_encoded=0,
+        current_lap=current_lap,
+        total_laps=total_laps,
+        wet_track=False,
+        track_temp=30.0,
+        air_temp=20.0,
+        drivers=[requester, rival],
+    )
+    return requester, rival, race_state
+
+
+@pytest.mark.unit
+def test_build_plan_explanation_no_pit_laps_leaves_gain_at_zero() -> None:
+    """Unchanged from before this fix: no forced pit stop means nothing to
+    compare degradation across."""
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] == 0.0
+    assert explanation["total_recoverable_seconds"] == 0.0
+    assert explanation["remaining_laps"] == 33
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_uses_real_projection_not_hardcoded_constant() -> None:
+    """A steeply-degrading OLD compound vs. a near-flat NEW compound must produce a
+    real projected recovery that differs from _FRESH_TYRE_GAIN_PER_LAP_SECONDS's
+    hardcoded 0.3s/lap for HARD — the whole point of this fix.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=400)  # MEDIUM, degrading fast
+    new_pipeline = _fit_pipeline_with_slope(slope=0.02, seed=401)  # HARD, nearly flat
+    requester, race_state = _requester_and_race_state("MEDIUM", 15, 20, 53)
+    tire_deg_pipelines = {"MEDIUM": old_pipeline, "HARD": new_pipeline}
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    hardcoded_constant = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] != pytest.approx(hardcoded_constant)
+    # Old compound degrades far faster than the new one, so the real projected
+    # recovery must be noticeably larger than the old flat constant.
+    assert explanation["fresh_tyre_gain_per_lap"] > hardcoded_constant
+    assert explanation["remaining_laps"] == 53 - 30
+    assert explanation["total_recoverable_seconds"] == pytest.approx(
+        explanation["fresh_tyre_gain_per_lap"] * explanation["remaining_laps"]
+    )
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_can_be_negative_when_new_compound_worse() -> None:
+    """The real projection can show a NEGATIVE fresh_tyre_gain_per_lap when the
+    new compound degrades faster than the old one even from a fresh tyre — e.g.
+    a dry-track INTERMEDIATE pit (see CLAUDE.md's tyre-model track-condition
+    limitation). The old hardcoded constant could never be negative — this is
+    a real signal only the model-derived projection can produce.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=402)  # old: barely degrades
+    new_pipeline = _fit_pipeline_with_slope(slope=0.8, seed=403)  # new: degrades fast, even fresh
+    requester, race_state = _requester_and_race_state("HARD", 5, 20, 53)
+    tire_deg_pipelines = {"HARD": old_pipeline, "INTERMEDIATE": new_pipeline}
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[25],
+        compounds=["INTERMEDIATE"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] < 0.0
+    assert explanation["total_recoverable_seconds"] < 0.0
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_multi_stop_uses_previous_stop_as_old_compound() -> None:
+    """For a multi-stop plan's LAST forced pit, the 'old' compound/tyre-age must
+    be resolved from the PREVIOUS forced stop (compounds[-2]/pit_laps[-2]), not
+    the plan's STARTING compound (requester_state.compound) — the tyre was reset
+    to 0 at that earlier forced stop, not at race start. Verified by comparing
+    against a hand-built reference using project_stint_delta directly with the
+    EXPECTED (stint-2) pipeline/age — if the wiring instead used the starting
+    SOFT compound/pipeline, the two would diverge sharply (very different slopes).
+    """
+    starting_pipeline = _fit_pipeline_with_slope(slope=0.9, seed=406)  # SOFT — must NOT be used
+    stint2_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=404)  # MEDIUM — old for the last pit
+    stint3_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=405)  # HARD — new compound
+    requester, race_state = _requester_and_race_state("SOFT", 8, 10, 53)
+    tire_deg_pipelines = {
+        "SOFT": starting_pipeline,
+        "MEDIUM": stint2_pipeline,
+        "HARD": stint3_pipeline,
+    }
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[20, 35],
+        compounds=["MEDIUM", "HARD"],
+        total_laps=53,
+        remaining_laps=43,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 35
+    old_code = tire_deg_model.resolve_driver_code(None, requester.driver_id)
+    circuit_code = tire_deg_model.resolve_circuit_code(None, race_state.circuit_name)
+    # Tyre age at the second pit (lap 35) is laps since the FIRST forced pit
+    # (lap 20) — 15 — not since race start (lap 10).
+    expected_stay_out = tire_deg_model.project_stint_delta(
+        stint2_pipeline,
+        prediction_worker._COMPOUND_ENCODING["MEDIUM"],
+        old_code,
+        circuit_code,
+        start_lap=36,
+        n_laps=laps_after_pit,
+        start_tyre_age=15,
+        total_laps=53,
+    )
+    expected_fresh = tire_deg_model.project_stint_delta(
+        stint3_pipeline,
+        prediction_worker._COMPOUND_ENCODING["HARD"],
+        old_code,
+        circuit_code,
+        start_lap=36,
+        n_laps=laps_after_pit,
+        start_tyre_age=0,
+        total_laps=53,
+    )
+    assert expected_stay_out is not None
+    assert expected_fresh is not None
+    expected_total_recoverable = expected_stay_out - expected_fresh
+    expected_gain_per_lap = expected_total_recoverable / laps_after_pit
+
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected_gain_per_lap)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected_total_recoverable)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_falls_back_when_pipeline_missing() -> None:
+    """No tire_deg pipeline loaded for either compound must fall back to the
+    original hardcoded constant (non-regressive — decision #1 from the What-If
+    Simulator rebuild plan), not error or silently drop to 0.0.
+    """
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},  # nothing loaded at all
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 30
+    expected = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected * laps_after_pit)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_falls_back_on_schema_mismatched_pipeline() -> None:
+    """Same schema-drift guard as race_simulator._tire_deg_predictions and
+    tire_deg_model.project_stint_delta — a pipeline fitted on a different
+    feature count (e.g. the stale 8-feature WET model) must degrade to the
+    hardcoded fallback, not raise or silently predict on a misaligned vector.
+    """
+    mismatched = _fit_pipeline_with_n_features(n_features=8, seed=411)
+    good = _fit_pipeline_with_slope(slope=0.05, seed=412)
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[30],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={"MEDIUM": mismatched, "HARD": good},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    laps_after_pit = 53 - 30
+    expected = prediction_worker._FRESH_TYRE_GAIN_PER_LAP_SECONDS["HARD"]
+    assert explanation["fresh_tyre_gain_per_lap"] == pytest.approx(expected)
+    assert explanation["total_recoverable_seconds"] == pytest.approx(expected * laps_after_pit)
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_zero_when_pit_on_last_lap() -> None:
+    """Pitting on the very last simulated lap leaves zero laps to project after
+    it — must not raise a ZeroDivisionError."""
+    old_pipeline = _fit_pipeline_with_slope(slope=0.6, seed=407)
+    new_pipeline = _fit_pipeline_with_slope(slope=0.05, seed=408)
+    requester, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[53],
+        compounds=["HARD"],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={"MEDIUM": old_pipeline, "HARD": new_pipeline},
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert explanation["fresh_tyre_gain_per_lap"] == 0.0
+    assert explanation["total_recoverable_seconds"] == 0.0
+    assert explanation["remaining_laps"] == 0
+
+
+@pytest.mark.unit
+def test_project_pit_stop_degradation_clamps_negative_tyre_age_from_out_of_order_pit_laps() -> None:
+    """pit_laps has no enforced chronological ordering beyond each entry's own
+    (current_lap, horizon_end] bound (see SimulateStrategyRequest._validate_pit_plan)
+    — an out-of-order multi-stop plan must not feed project_stint_delta a
+    negative tyre age. This is a defensive guard against an already-possible
+    (if unlikely) input shape, not new behaviour this fix is meant to support.
+    """
+    old_pipeline = _fit_pipeline_with_slope(slope=0.3, seed=409)
+    new_pipeline = _fit_pipeline_with_slope(slope=0.1, seed=410)
+    requester, race_state = _requester_and_race_state("SOFT", 5, 10, 53)
+    tire_deg_pipelines = {"MEDIUM": old_pipeline, "HARD": new_pipeline}
+
+    # Out-of-order: pit_laps[-1]=25 is chronologically BEFORE pit_laps[-2]=40.
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[40, 25],
+        compounds=["MEDIUM", "HARD"],
+        total_laps=53,
+        remaining_laps=43,
+        tire_deg_pipelines=tire_deg_pipelines,
+        maps_cache={},
+        driver_distributions_by_id={},
+    )
+
+    assert np.isfinite(explanation["fresh_tyre_gain_per_lap"])
+    assert np.isfinite(explanation["total_recoverable_seconds"])
+
+
+# --- drivers_overtaken enrichment (What-If Simulator rebuild part (b): see
+# docs/core-feature-rebuild-whatif-simulator.md §7 and
+# race_simulator.DriverPositionDistribution.projected_pit_laps/
+# finish_ahead_probability's own docstrings) ---
+
+
+@pytest.mark.unit
+def test_drivers_overtaken_enriched_with_finish_ahead_and_rival_pit_projection() -> None:
+    """drivers_overtaken rows must carry real Monte Carlo outputs from THIS
+    scenario's simulate_race result — the requester's own finish_ahead_probability
+    for that specific rival, and that rival's OWN peak projected pit lap/
+    probability — not just the static current-lap gap snapshot the selection
+    criterion itself still uses unchanged (CP1's decision #3).
+    """
+    requester, rival, race_state = _requester_and_rival_race_state(
+        "MEDIUM", 10, 20, 53, gap_seconds=5.0
+    )
+
+    requester_distribution = race_simulator.DriverPositionDistribution(
+        driver_id=requester.driver_id,
+        position_probabilities={5: 1.0},
+        mean_position=5.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+        finish_ahead_probability={rival.driver_id: 0.73},
+    )
+    rival_distribution = race_simulator.DriverPositionDistribution(
+        driver_id=rival.driver_id,
+        position_probabilities={6: 1.0},
+        mean_position=6.0,
+        mean_finish_time_seconds=5005.0,
+        finish_time_p5_seconds=4995.0,
+        finish_time_p95_seconds=5015.0,
+        projected_pit_laps=[(30, 0.2), (34, 0.71), (35, 0.1)],
+    )
+    driver_distributions_by_id = {
+        requester.driver_id: requester_distribution,
+        rival.driver_id: rival_distribution,
+    }
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id=driver_distributions_by_id,
+    )
+
+    assert len(explanation["drivers_overtaken"]) == 1
+    entry = explanation["drivers_overtaken"][0]
+    assert entry["driver_id"] == rival.driver_id
+    assert entry["finish_ahead_probability"] == pytest.approx(0.73)
+    assert entry["rival_projected_pit_lap"] == 34
+    assert entry["rival_pit_probability"] == pytest.approx(0.71)
+
+
+@pytest.mark.unit
+def test_drivers_overtaken_enrichment_none_when_no_distribution_data() -> None:
+    """A rival present in drivers_overtaken but absent from
+    driver_distributions_by_id (should not happen in practice — every rival in
+    the list raced in the same simulate_race call — but defensive since it's a
+    separate dict lookup) must get None for all three enrichment fields, never
+    a misleading fabricated default like 0.0.
+    """
+    requester, rival, race_state = _requester_and_rival_race_state(
+        "MEDIUM", 10, 20, 53, gap_seconds=5.0
+    )
+
+    explanation = prediction_worker._build_plan_explanation(
+        race_state,
+        requester,
+        pit_laps=[],
+        compounds=[],
+        total_laps=53,
+        remaining_laps=33,
+        tire_deg_pipelines={},
+        maps_cache={},
+        driver_distributions_by_id={},  # nothing available at all
+    )
+
+    assert len(explanation["drivers_overtaken"]) == 1
+    entry = explanation["drivers_overtaken"][0]
+    assert entry["driver_id"] == rival.driver_id
+    assert entry["finish_ahead_probability"] is None
+    assert entry["rival_projected_pit_lap"] is None
+    assert entry["rival_pit_probability"] is None
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_none_for_none_distribution() -> None:
+    assert prediction_worker._peak_projected_pit_lap(None) == (None, None)
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_none_for_empty_projected_pit_laps() -> None:
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="d1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+    )
+    assert prediction_worker._peak_projected_pit_lap(distribution) == (None, None)
+
+
+@pytest.mark.unit
+def test_peak_projected_pit_lap_ties_resolve_to_earliest_lap() -> None:
+    """Python's max() keeps the FIRST-seen maximum, and projected_pit_laps is
+    already sorted by lap ascending (see race_simulator.simulate_race's own
+    construction) — so a tie must resolve to the earliest lap."""
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="d1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+        projected_pit_laps=[(20, 0.5), (25, 0.5)],
+    )
+    assert prediction_worker._peak_projected_pit_lap(distribution) == (20, 0.5)
+
+
+# --- _resolve_position_context: live standings are the primary source for a
+# live session (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+
+
+def _live_position_payload(
+    session_id: uuid.UUID, driver_id: uuid.UUID, ahead_id: uuid.UUID, source: str
+) -> str:
+    return json.dumps(
+        {
+            "session_id": str(session_id),
+            "source": source,
+            "gaps": [
+                {
+                    "driver_id": str(ahead_id),
+                    "position": 1,
+                    "gap_to_ahead_seconds": 0.0,
+                    "gap_to_behind_seconds": 1.8,
+                },
+                {
+                    "driver_id": str(driver_id),
+                    "position": 2,
+                    "gap_to_ahead_seconds": 1.8,
+                    "gap_to_behind_seconds": 0.0,
+                },
+            ],
+        }
+    )
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_uses_live_standings_first_and_skips_the_db(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """A live session's DB gaps are cumulative lap-time sums that omit lap 1 for
+    everyone — F1's own live standings must be used before any DB work."""
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, "live")
+    )
+
+    result = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_not_called()
+    assert result["position"] == 2
+    assert result["gap_to_car_ahead"] == pytest.approx(1.8)
+    assert result["target_ahead_driver_id"] == ahead_id
+    assert result["target_behind_driver_id"] is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["replay", "cache"])
+async def test_resolve_position_context_does_not_treat_a_non_live_payload_as_primary(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    source: str,
+) -> None:
+    """A replay (or a cache-aside write) to the same key must not preempt the
+    bounded DB query — that path, bounded by current_lap, is right for it."""
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, source)
+    )
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_called()
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_does_not_use_a_live_payload_for_another_session(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    """The gaps key is per season/round — a live FP session's standings must not
+    answer a query about a different session of the same weekend."""
+    session_id, other_session_id = uuid.uuid4(), uuid.uuid4()
+    driver_id, ahead_id = uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(other_session_id, driver_id, ahead_id, "live")
+    )
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    mock_db_session.execute.assert_called()
+
+
+# --- always-on pipeline counters (V5): where the neighbours came from ---
+
+
+@pytest.mark.unit
+async def test_counter_records_neighbours_taken_from_the_live_standings(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    session_id, driver_id, ahead_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await fakeredis.set(
+        "f1:2026:10:gaps", _live_position_payload(session_id, driver_id, ahead_id, "live")
+    )
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, session_id, driver_id, 15, 2026, 10
+    )
+
+    assert await fakeredis.hgetall("f1:2026:10:pipeline_stats") == {"neighbors_source_live": "1"}
+
+
+@pytest.mark.unit
+async def test_counter_records_neighbours_that_fell_through_to_the_db(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    empty = MagicMock()
+    empty.scalars.return_value.all.return_value = []
+    mock_db_session.execute.return_value = empty
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, uuid.uuid4(), uuid.uuid4(), 15, 2026, 10
+    )
+
+    assert await fakeredis.hgetall("f1:2026:10:pipeline_stats") == {"neighbors_source_db": "1"}
+
+
+# --- _persist_and_publish must dispose the engine even when inference raises
+# (found by the V3 shadow race: the dispose used to follow the try block, so a failed
+# prediction leaked a connection bound to a closed event loop into the next task) ---
+
+
+class _EmptyAsyncSession:
+    """Stands in for the `async with session_factory() as db:` block; the body raises first."""
+
+    async def __aenter__(self) -> "_EmptyAsyncSession":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+def _prediction_context() -> dict[str, Any]:
+    return {
+        "session_id": str(uuid.uuid4()),
+        "driver_id": str(uuid.uuid4()),
+        "compound": "MEDIUM",
+        "lap_number": 5,
+        "tyre_age_laps": 5,
+    }
+
+
+def _stub_prediction_worker_for_failure(
+    monkeypatch: pytest.MonkeyPatch, aclose: AsyncMock
+) -> tuple[MagicMock, MagicMock]:
+    """Everything _persist_and_publish touches before inference, stubbed; inference raises."""
+    monkeypatch.setattr(prediction_worker, "_load_models", lambda: {})
+    monkeypatch.setattr(prediction_worker, "_load_encoding_maps", lambda: {})
+    monkeypatch.setattr(prediction_worker, "_load_holdout_mae", lambda: {})
+    redis_stub = MagicMock()
+    redis_stub.aclose = aclose
+    monkeypatch.setattr(redis_asyncio, "from_url", lambda *a, **k: redis_stub)
+    monkeypatch.setattr(prediction_worker, "_get_session_factory", lambda: _EmptyAsyncSession)
+
+    async def _no_lap_yet(*args: object, **kwargs: object) -> dict[str, Any]:
+        raise NotFoundError("No lap data for driver in session")
+
+    monkeypatch.setattr(prediction_worker, "_resolve_inference_context", _no_lap_yet)
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(prediction_worker, "get_engine", lambda: engine)
+    publish = MagicMock()
+    monkeypatch.setattr(prediction_worker, "_publish_prediction", publish)
+    return engine, publish
+
+
+@pytest.mark.unit
+async def test_persist_and_publish_disposes_the_engine_even_when_inference_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, publish = _stub_prediction_worker_for_failure(monkeypatch, AsyncMock())
+
+    with pytest.raises(NotFoundError):
+        await prediction_worker._persist_and_publish(_prediction_context())
+
+    engine.dispose.assert_awaited_once()
+    publish.assert_not_called()  # a prediction that failed must not be announced
+
+
+@pytest.mark.unit
+async def test_persist_and_publish_still_disposes_when_closing_redis_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _stub_prediction_worker_for_failure(
+        monkeypatch, AsyncMock(side_effect=OSError("redis connection lost"))
+    )
+
+    with pytest.raises(OSError, match="redis connection lost"):
+        await prediction_worker._persist_and_publish(_prediction_context())
+
+    engine.dispose.assert_awaited_once()
+
+
+# --- run_strategy_prediction retries when its lap is not in lap_data yet (V3 finding) ---
+
+
+def _fail_persist_with(monkeypatch: pytest.MonkeyPatch, error: Exception | None) -> MagicMock:
+    persist = AsyncMock(side_effect=error)
+    monkeypatch.setattr(prediction_worker, "_persist_and_publish", persist)
+    retry = MagicMock(side_effect=celery_exceptions.Retry())
+    monkeypatch.setattr(prediction_worker.run_strategy_prediction, "retry", retry)
+    return retry
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_retries_when_the_lap_is_not_persisted_yet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = NotFoundError("No lap data for driver in session")
+    retry = _fail_persist_with(monkeypatch, error)
+
+    with pytest.raises(celery_exceptions.Retry):
+        prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_called_once_with(exc=error, countdown=3)
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_does_not_retry_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry = _fail_persist_with(monkeypatch, ValueError("bad feature vector"))
+
+    with pytest.raises(ValueError, match="bad feature vector"):
+        prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_not_called()
+
+
+@pytest.mark.unit
+def test_run_strategy_prediction_does_not_retry_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retry = _fail_persist_with(monkeypatch, None)
+
+    prediction_worker.run_strategy_prediction.run(_prediction_context())
+
+    retry.assert_not_called()

@@ -95,12 +95,20 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
                             "status": "SUCCESS",
                             "result": {
                                 "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "starting_position": 6,
                                 "strategies": [
                                     {
                                         "pit_laps": [22, 41],
                                         "compounds": ["MEDIUM", "HARD"],
+                                        "label": None,
                                         "predicted_finish_time": 5423.7,
                                         "position_gain_loss": 1,
+                                        "mean_position": 5.62,
+                                        "position_probabilities": [
+                                            {"position": 5, "probability": 0.18},
+                                            {"position": 6, "probability": 0.71},
+                                            {"position": 7, "probability": 0.11},
+                                        ],
                                         "confidence_interval": [5401.2, 5449.8],
                                         "explanation": {
                                             "pit_cost_seconds": 22.5,
@@ -111,6 +119,9 @@ _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
                                                         "2c6b1f8e-4a3d-4b2c-9e7f-1d8a5c3b6f42"
                                                     ),
                                                     "gap_seconds": 3.2,
+                                                    "finish_ahead_probability": 0.64,
+                                                    "rival_projected_pit_lap": 34,
+                                                    "rival_pit_probability": 0.71,
                                                 }
                                             ],
                                             "remaining_laps": 30,
@@ -186,13 +197,21 @@ async def get_last_ingested_session(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a Monte Carlo race strategy simulation",
     description=(
-        "Enqueues a 1000-run Monte Carlo simulation (Celery task) for one driver "
-        "at their current race state. Leave pit_laps empty to let the simulation "
-        "decide pit timing autonomously, or set pit_laps + compounds to force a "
-        "specific what-if pit plan. Returns immediately with a task_id — poll "
-        "GET /simulate/{task_id} for the result. current_lap must be at most one "
-        "lap past this session's real ingested progress (404 if the session "
-        "doesn't exist, 422 if current_lap is implausibly far ahead)."
+        "Enqueues one or more 1000-run Monte Carlo simulations (one Celery task) "
+        "for one driver at their current race state. Leave pit_laps empty to let "
+        "the simulation decide pit timing autonomously, or set pit_laps + "
+        "compounds to force a specific what-if pit plan. To compare several "
+        "candidate plans at once (e.g. 'pit lap 30 vs 33 vs 36'), set scenarios "
+        "instead (1-4 entries, mutually exclusive with pit_laps/compounds) — "
+        "each is simulated against the identical field state, sharing one "
+        "random seed across all of them so the comparison isolates each "
+        "scenario's own pit-lap decision rather than also comparing "
+        "independently-drawn safety-car/noise randomness; the response's "
+        "strategies list then carries one result per scenario, in request "
+        "order. Returns immediately with a task_id — poll GET /simulate/{task_id} "
+        "for the result. current_lap must be at most one lap past this session's "
+        "real ingested progress (404 if the session doesn't exist, 422 if "
+        "current_lap is implausibly far ahead or a pit plan is malformed)."
     ),
     openapi_extra={
         "requestBody": {
@@ -221,6 +240,33 @@ async def get_last_ingested_session(
                                 "remaining_laps": 40,
                                 "pit_laps": [22, 41],
                                 "compounds": ["MEDIUM", "HARD"],
+                            },
+                        },
+                        "compare_scenarios": {
+                            "summary": "Compare 3 candidate single-stop pit laps",
+                            "value": {
+                                "driver_id": "8e2f9c1a-3b7d-4e2a-9f1c-6a5d2b8e4f10",
+                                "current_lap": 28,
+                                "current_compound": "MEDIUM",
+                                "current_tyre_age": 18,
+                                "remaining_laps": 30,
+                                "scenarios": [
+                                    {
+                                        "pit_laps": [30],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 30",
+                                    },
+                                    {
+                                        "pit_laps": [33],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 33",
+                                    },
+                                    {
+                                        "pit_laps": [36],
+                                        "compounds": ["HARD"],
+                                        "label": "Pit lap 36",
+                                    },
+                                ],
                             },
                         },
                     }
@@ -266,9 +312,16 @@ async def simulate_strategy(
     response_model=list[PitWindowResponse],
     summary="Get predicted optimal pit windows for a driver",
     description=(
-        "Returns predicted pit lap(s) with a projected total time delta and, "
-        "when available, the top SHAP feature contributions behind the "
-        "prediction (tyre age, gap to rivals, safety car probability, etc.)."
+        "Returns up to 3 predicted pit lap candidates, ranked by projected total "
+        "time delta. Only the #1 (recommended) candidate carries a confidence "
+        "score and a combined explanation: tire_deg SHAP for the recommended "
+        "stint (tyre age, fuel-adjusted pace, circuit, driver), pit_predictor "
+        "SHAP for the driver's current rival-gap context (gap to car ahead/"
+        "behind, safety car probability, track position), plus undercut/overcut "
+        "probabilities against the real track-position neighbours — combined "
+        "into structured facts and a plain-English narrative. window_start/"
+        "window_end are a narrow band around the recommendation, shared across "
+        "all returned candidates, not a per-candidate range."
     ),
     openapi_extra={
         "responses": {
@@ -281,21 +334,54 @@ async def simulate_strategy(
                                 "window_start": 22,
                                 "window_end": 26,
                                 "projected_total_delta_seconds": -4.8,
-                                "shap_explanation": [
-                                    {
-                                        "feature_name": "predicted_life_remaining",
-                                        "value": 3.0,
-                                        "contribution": 0.31,
-                                        "direction": "+",
-                                    },
-                                    {
-                                        "feature_name": "safety_car_probability",
-                                        "value": 0.12,
-                                        "contribution": -0.05,
-                                        "direction": "-",
-                                    },
-                                ],
-                            }
+                                "recommended_compound": "MEDIUM",
+                                "confidence_score": 0.71,
+                                "explanation": {
+                                    "narrative": (
+                                        "Lap 24 on MEDIUM is the recommended pit (71% "
+                                        "confidence). Tyre age is currently 24 laps, "
+                                        "degradation accelerating. Gap to the car behind "
+                                        "is 8.2s — safe to pit without losing the position."
+                                    ),
+                                    "facts": [
+                                        {
+                                            "label": "Recommended pit lap",
+                                            "value": "Lap 24",
+                                            "source": "tire_deg",
+                                        },
+                                        {
+                                            "label": "Gap to car behind",
+                                            "value": "8.2s",
+                                            "source": "pit_predictor",
+                                        },
+                                    ],
+                                    "tire_deg_shap": [
+                                        {
+                                            "feature_name": "tyre_age_laps",
+                                            "value": 24.0,
+                                            "contribution": 0.31,
+                                            "direction": "+",
+                                        }
+                                    ],
+                                    "pit_predictor_shap": [
+                                        {
+                                            "feature_name": "gap_to_car_behind",
+                                            "value": 8.2,
+                                            "contribution": -0.22,
+                                            "direction": "-",
+                                        }
+                                    ],
+                                },
+                            },
+                            {
+                                "pit_lap": 25,
+                                "window_start": 22,
+                                "window_end": 26,
+                                "projected_total_delta_seconds": -4.1,
+                                "recommended_compound": "HARD",
+                                "confidence_score": None,
+                                "explanation": None,
+                            },
                         ]
                     }
                 }

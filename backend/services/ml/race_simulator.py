@@ -22,24 +22,44 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   caller-supplied inputs (RaceSimulationInput), the same contract
   tire_deg_model.predict_life_remaining_batch already uses. This module does not
   reproduce train_models.py's pd.Categorical encoding itself.
-- tire_deg_model's `fuel_adjusted_time` feature is defined at training time as
-  `lap_time_seconds - fuel_penalty` — i.e. it partially encodes the actual lap time,
-  which a forward simulation does not have (that's what we're simulating). We
-  approximate it with just the fuel-burn trend component (the penalty term with the
-  unknown lap_time_seconds term dropped), which preserves the feature's monotonic
-  trend across the race at the cost of not matching the training distribution's
-  absolute scale. Acceptable since compound/tyre_age dominate the model's splits.
+- tire_deg_model's `fuel_load_penalty` feature is built here by
+  tire_deg_model.fuel_load_penalty_seconds — the exact function training uses.
+  Before 2026-09-09 the feature was `fuel_adjusted_time`, which embedded the
+  actual lap time (the thing a forward simulation is trying to predict), so
+  this module substituted the fuel term alone and fed the model values ~7-15
+  standard deviations outside its training distribution. This module's own
+  docstring used to call that "acceptable since compound/tyre_age dominate the
+  model's splits" — measured feature importances showed the opposite
+  (fuel_adjusted_time 0.20-0.30 vs tyre_age_laps 0.07-0.10 on the dry
+  compounds), and the resulting predictions were worse than a constant. See
+  docs/tire-deg-model-quality-and-rival-pit-behavior.md.
 - cumulative_race_time_seconds accumulates real elapsed race time (input, carrying
-  today's actual gaps) plus simulated lap_time_delta going forward. Since
-  lap_time_delta is relative to each driver's own session median (not absolute pace),
-  this preserves real observed pace differences at simulation start and simulates how
-  tyre wear/variance/pit stops change the field from there — it does not attempt to
-  model absolute per-driver pace.
+  today's actual gaps) plus, for each simulated lap, that driver's own
+  baseline_lap_time_seconds (their real median lap time through current_lap —
+  see DriverRaceState), the tire_deg model's predicted lap_time_delta, a
+  fuel-trend term (below), and noise. lap_time_delta is now a deviation from
+  the driver's own FUEL-CORRECTED session median (tire_deg_model.
+  add_engineered_features), so it deliberately excludes the fuel effect —
+  baseline + delta alone would hold the car at its current weight for the rest
+  of the race. simulate_race therefore adds back the change in fuel load
+  between the lap being simulated and the (raw, uncorrected) baseline's own
+  reference point, so cumulative_race_time_seconds stays a real elapsed-time
+  estimate and predicted_finish_time keeps the accuracy validated on
+  2026-09-03. A caller that omits baseline_lap_time_seconds (defaults to 0.0)
+  gets the relative-delta-only behaviour for that driver, and no fuel term is
+  applied to it — there is no absolute lap time to correct.
 - After a pit stop, compound is assumed unchanged (no compound-choice model exists
   yet) and tyre age resets to 0.
 - A safety car lap "neutralises gaps" by collapsing every driver's cumulative time to
-  the simulation's current leader time plus a fixed SC lap time — the exact SC lap
-  time value is inconsequential to relative standings since it's applied uniformly.
+  the simulation's current leader time plus an SC lap time — the exact value is
+  inconsequential to relative standings since it's applied uniformly, but now that
+  cumulative_race_time_seconds is a real absolute time (see above), that SC lap time
+  itself must also be a plausible absolute lap time, not a small fixed constant far
+  below real race pace (which would make an SC lap shorten the simulated race).
+  simulate_race derives it from the field's own median baseline_lap_time_seconds
+  (SC_LAP_TIME_MULTIPLIER) when at least one driver has a real baseline, falling back
+  to the fixed SC_LAP_TIME_SECONDS constant only when none do (e.g. a caller that
+  never supplies baseline_lap_time_seconds — see DriverRaceState).
 - LAP_TIME_NOISE_STD_SECONDS is an assumed lap-to-lap variability constant (no
   computed historical variance exists in the codebase yet), in the same spirit as
   tire_deg_model.ASSUMED_START_FUEL_KG.
@@ -65,7 +85,16 @@ logger = logging.getLogger(__name__)
 N_SIMULATIONS = 1000
 PIT_STOP_SECONDS = 22.0
 LAP_TIME_NOISE_STD_SECONDS = 0.35
+# Fallback SC lap time when no driver in the field has a real
+# baseline_lap_time_seconds (see DriverRaceState / SC_LAP_TIME_MULTIPLIER
+# below) — kept as the pre-existing constant for that degraded case only.
 SC_LAP_TIME_SECONDS = 25.0
+# An SC lap is slower than green-flag pace (bunched field, delta neutralised)
+# but still a real, plausible absolute lap time — applied to the field's own
+# median baseline_lap_time_seconds when at least one driver has one. 1.4 is
+# an assumed multiplier (no computed historical SC-lap-time data exists in
+# this codebase), same spirit as LAP_TIME_NOISE_STD_SECONDS.
+SC_LAP_TIME_MULTIPLIER = 1.4
 MIN_LAPS_BETWEEN_PITS = 5
 
 
@@ -86,6 +115,24 @@ class DriverRaceState:
     tyre_age_laps: int
     driver_id_encoded: int
     cumulative_race_time_seconds: float = 0.0
+    # This driver's own real median lap time (seconds) through current_lap —
+    # see prediction_worker._build_race_state, which takes a per-driver median
+    # bounded to laps <= current_lap, since a forward simulation can't see the
+    # session's full median. Added to every simulated lap's predicted delta so
+    # cumulative_race_time_seconds accumulates a real absolute time (see this
+    # module's docstring) instead of only the small delta-from-median.
+    #
+    # Deliberately a RAW median, NOT the fuel-corrected one
+    # tire_deg_model.add_engineered_features builds its target against: this is
+    # an absolute lap time to anchor elapsed race time to, so it should carry
+    # the real fuel penalty of the laps it was measured over. simulate_race
+    # accounts for the difference explicitly (see baseline_fuel_penalty there)
+    # rather than by silently redefining this field.
+    #
+    # Default 0.0: a caller that omits this (e.g. an older/synthetic test
+    # fixture) gets the pre-existing relative-delta-only behaviour for that
+    # driver, unchanged.
+    baseline_lap_time_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -117,6 +164,31 @@ class DriverPositionDistribution:
     mean_finish_time_seconds: float
     finish_time_p5_seconds: float
     finish_time_p95_seconds: float
+    # Both added for the What-If Simulator rebuild part (b) — see
+    # docs/core-feature-rebuild-whatif-simulator.md §7 — so a caller can
+    # build a plan-explanation narrative from what the simulation itself
+    # actually did, instead of a static frozen-gap heuristic. Both default
+    # empty so every pre-existing DriverPositionDistribution(...) call site
+    # (real code and test fixtures) that doesn't pass them keeps working
+    # unchanged.
+    #
+    # projected_pit_laps: this driver's OWN per-lap pit probability across
+    # all simulations — (lap_number, probability) pairs, sparse (probability
+    # > 0.0 only) and sorted by lap ascending, same convention as
+    # position_probabilities/_shape_position_probabilities. A forced what-if
+    # pit lap (race_simulator.simulate_race's forced_pit_laps) shows
+    # probability 1.0 at that lap for the requesting driver — it isn't a
+    # special case, just what pit_flags already reflects every lap.
+    projected_pit_laps: list[tuple[int, float]] = field(default_factory=list)
+    # finish_ahead_probability: P(this driver finishes ahead of each OTHER
+    # driver), keyed by that other driver's driver_id — one entry per other
+    # driver in the field, from the same final cumulative_time array
+    # position_probabilities is built from. Two entries for the same pair of
+    # drivers are complementary by construction (P(i ahead of j) + P(j ahead
+    # of i) == 1.0, modulo the rare exact-tie sims described in
+    # simulate_race's own comment on this computation) — not independently
+    # estimated, so they always agree with mean_position's own ranking.
+    finish_ahead_probability: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -130,6 +202,8 @@ def _advance_lap(
     cumulative_time: npt.NDArray[np.float64],
     tyre_age: npt.NDArray[np.int64],
     predicted_delta: npt.NDArray[np.float64],
+    baseline_lap_time: npt.NDArray[np.float64],
+    fuel_trend_seconds: npt.NDArray[np.float64],
     noise_std: float,
     pit_flags: npt.NDArray[np.bool_],
     pit_stop_seconds: float,
@@ -148,6 +222,19 @@ def _advance_lap(
         cumulative_time: (n_sims, n_drivers) elapsed race time in seconds, mutated.
         tyre_age: (n_sims, n_drivers) laps on current tyre, mutated.
         predicted_delta: (n_sims, n_drivers) tire_deg-model-predicted lap time delta.
+        baseline_lap_time: (n_drivers,) each driver's own real median lap time
+            (DriverRaceState.baseline_lap_time_seconds) — added on top of
+            predicted_delta on a racing lap so cumulative_time accumulates a real
+            absolute lap time, not just the delta. Not applied on an SC lap: the
+            caller's sc_lap_time_seconds is already a real absolute lap time in
+            its own right (see this function's caller).
+        fuel_trend_seconds: (n_drivers,) this lap's fuel-load correction for
+            each driver — how much lighter (negative) or heavier (positive) the
+            car is on this lap than at the reference point baseline_lap_time was
+            measured over. Needed because predicted_delta is fuel-corrected and
+            therefore carries no fuel trend of its own (see module docstring).
+            Zero for a driver with no real baseline, and not applied on an SC
+            lap, for the same reason baseline_lap_time isn't.
         noise_std: Standard deviation of the per-lap Gaussian noise term.
         pit_flags: (n_sims, n_drivers) whether this driver pits this lap.
         pit_stop_seconds: Fixed pit stop time loss.
@@ -173,7 +260,9 @@ def _advance_lap(
         else:
             for d in range(n_drivers):
                 noise = np.random.normal(0.0, noise_std)
-                cumulative_time[s, d] += predicted_delta[s, d] + noise
+                cumulative_time[s, d] += (
+                    baseline_lap_time[d] + predicted_delta[s, d] + fuel_trend_seconds[d] + noise
+                )
                 tyre_age[s, d] += 1
                 if pit_flags[s, d]:
                     cumulative_time[s, d] += pit_stop_seconds
@@ -193,7 +282,7 @@ def _tire_deg_predictions(
     lap_number: int,
     tyre_age: npt.NDArray[np.int64],
     driver_id_encoded: npt.NDArray[np.int64],
-    fuel_adjusted_time: float,
+    fuel_load_penalty: float,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Batch tire_deg predictions (delta + life remaining) for every (sim, driver) pair.
 
@@ -213,7 +302,8 @@ def _tire_deg_predictions(
         lap_number: Lap being predicted for.
         tyre_age: (n_sims, n_drivers) current tyre age.
         driver_id_encoded: (n_drivers,) per-driver encoded id.
-        fuel_adjusted_time: This lap's fuel_adjusted_time proxy (see module docstring).
+        fuel_load_penalty: This lap's fuel_load_penalty feature value, from
+            tire_deg_model.fuel_load_penalty_seconds (see module docstring).
     Returns:
         (predicted_delta, predicted_life_remaining), each (n_sims, n_drivers). Drivers
         on a compound with no fitted pipeline, a pipeline whose fitted feature count
@@ -225,6 +315,27 @@ def _tire_deg_predictions(
         raises, get delta=0 and life_remaining capped at
         tire_deg_model.MAX_LOOKAHEAD_LAPS — degrading that compound group only, never
         crashing the whole Monte Carlo task.
+
+    Memoization (added for the What-If Simulator multi-scenario rebuild —
+    see docs/core-feature-rebuild-whatif-simulator.md): within one compound
+    group at one lap, lap_number/fuel_adjusted_time/circuit_id_encoded are
+    scalars shared by every row, and compound_encoded/driver_id_encoded vary
+    only per DRIVER (identical across all n_sims copies of that driver) —
+    the only column that genuinely varies per (sim, driver) pair is
+    tyre_age. So most of a group's (n_sims * n_group_drivers) rows are exact
+    duplicates. Measured on a real 22-driver mid-race profile (Belgian GP
+    2026 R10, lap 21, 1000 sims): 528,000 rows collapsed to 528 unique
+    (tyre_age, driver_id_encoded, compound_encoded) combinations — a 1000x
+    ratio that took a single simulate_race call from ~53s to ~14s with
+    bit-identical output (both predict() and predict_life_remaining_batch()
+    are deterministic, stateless functions of their input row, so predicting
+    once per unique row and scattering the result back via
+    np.unique(..., return_inverse=True) is exact, not an approximation —
+    confirmed in test_tire_deg_predictions_dedup_matches_naive_predictions).
+    The dedup ratio is data-dependent (lower once pit decisions/forced
+    what-ifs diverge sims' tyre ages from each other), but the worst case is
+    still bounded by the number of distinct tyre ages actually reachable at
+    a given lap, far below n_sims in every realistic race length.
     """
     n_sims, n_drivers = tyre_age.shape
     predicted_delta = np.zeros((n_sims, n_drivers))
@@ -242,20 +353,31 @@ def _tire_deg_predictions(
         tyre_age_flat = group_tyre_age.ravel().astype(np.int64)
         compound_encoded_flat = np.tile(compound_encoded_by_driver[idx], n_sims)
         driver_id_encoded_flat = np.tile(driver_id_encoded[idx], n_sims)
-        lap_number_arr = np.full(tyre_age_flat.shape[0], lap_number, dtype=np.int64)
-        fuel_adjusted_time_arr = np.full(tyre_age_flat.shape[0], fuel_adjusted_time)
-        circuit_id_encoded_arr = np.full(
-            tyre_age_flat.shape[0], race_state.circuit_id_encoded, dtype=np.int64
-        )
+
+        # Dedup key: tyre_age is the only column that varies per (sim,
+        # driver) row; compound_encoded/driver_id_encoded are included too
+        # (not assumed constant within the group) so this stays correct even
+        # if a future change makes either vary per-simulation — it would just
+        # shrink the dedup win, never produce a wrong result.
+        dedup_key = np.stack([tyre_age_flat, driver_id_encoded_flat, compound_encoded_flat], axis=1)
+        unique_rows, inverse = np.unique(dedup_key, axis=0, return_inverse=True)
+        unique_tyre_age = unique_rows[:, 0]
+        unique_driver_id_encoded = unique_rows[:, 1]
+        unique_compound_encoded = unique_rows[:, 2]
+        n_unique = unique_rows.shape[0]
+
+        lap_number_arr = np.full(n_unique, lap_number, dtype=np.int64)
+        fuel_load_penalty_arr = np.full(n_unique, fuel_load_penalty)
+        circuit_id_encoded_arr = np.full(n_unique, race_state.circuit_id_encoded, dtype=np.int64)
 
         features = np.column_stack(
             [
                 lap_number_arr.astype(np.float64),
-                compound_encoded_flat.astype(np.float64),
-                tyre_age_flat.astype(np.float64),
-                fuel_adjusted_time_arr,
+                unique_compound_encoded.astype(np.float64),
+                unique_tyre_age.astype(np.float64),
+                fuel_load_penalty_arr,
                 circuit_id_encoded_arr.astype(np.float64),
-                driver_id_encoded_flat.astype(np.float64),
+                unique_driver_id_encoded.astype(np.float64),
             ]
         )
 
@@ -279,18 +401,22 @@ def _tire_deg_predictions(
 
         try:
             with f1_ml_inference_duration_seconds.labels(model="tire_deg").time():
-                predicted_delta[:, idx] = pipeline.predict(features).reshape(flat_shape)
+                unique_delta = pipeline.predict(features)
 
-                life_flat = tire_deg_model.predict_life_remaining_batch(
+                unique_life = tire_deg_model.predict_life_remaining_batch(
                     pipeline,
                     lap_number_arr,
-                    compound_encoded_flat,
-                    tyre_age_flat,
-                    fuel_adjusted_time_arr,
+                    unique_compound_encoded,
+                    unique_tyre_age,
+                    fuel_load_penalty_arr,
                     circuit_id_encoded_arr,
-                    driver_id_encoded_flat,
+                    unique_driver_id_encoded,
                 )
-            predicted_life_remaining[:, idx] = life_flat.reshape(flat_shape)
+            # Scatter each unique row's prediction back to every (sim,
+            # driver) position that shared its (tyre_age, driver_id_encoded,
+            # compound_encoded) combination — exact, see docstring above.
+            predicted_delta[:, idx] = unique_delta[inverse].reshape(flat_shape)
+            predicted_life_remaining[:, idx] = unique_life[inverse].reshape(flat_shape)
         except Exception:  # noqa: BLE001 — degrade this compound group, never crash the task
             logger.warning(
                 "tire_deg inference failed for compound %s at lap %d — "
@@ -431,6 +557,40 @@ def simulate_race(
         (n_simulations, 1),
     )
     driver_id_encoded = np.array([d.driver_id_encoded for d in race_state.drivers], dtype=np.int64)
+    # Static for the whole simulation — a driver's own real median pace does
+    # not change mid-race (unlike compound/tyre age, which forced_pit_laps
+    # can mutate). See DriverRaceState.baseline_lap_time_seconds.
+    baseline_lap_time = np.array(
+        [d.baseline_lap_time_seconds for d in race_state.drivers], dtype=np.float64
+    )
+    # SC lap time must itself be a real absolute lap time now that
+    # cumulative_time accumulates one (see module docstring) — derived from
+    # the field's own median baseline when at least one driver has a real,
+    # nonzero baseline; falls back to the fixed constant only when none do
+    # (e.g. every DriverRaceState omitted baseline_lap_time_seconds).
+    nonzero_baselines = baseline_lap_time[baseline_lap_time > 0]
+    sc_lap_time_seconds = (
+        float(np.median(nonzero_baselines)) * SC_LAP_TIME_MULTIPLIER
+        if nonzero_baselines.size > 0
+        else SC_LAP_TIME_SECONDS
+    )
+    # baseline_lap_time is a RAW (uncorrected) median over laps 1..current_lap,
+    # so it already embeds the average fuel penalty over that window — best
+    # approximated at its midpoint. Each simulated lap's fuel term below is
+    # measured relative to this reference, so a driver's simulated pace picks
+    # up the fuel gain from here to the flag rather than double-counting the
+    # portion the baseline already contains. An assumed midpoint is in the same
+    # spirit as this module's other documented approximations
+    # (ASSUMED_START_FUEL_KG, SC_LAP_TIME_MULTIPLIER).
+    baseline_fuel_penalty = float(
+        tire_deg_model.fuel_load_penalty_seconds(
+            max(race_state.current_lap, 1) / 2.0, float(race_state.total_laps)
+        )
+    )
+    # Zero for any driver with no real baseline: there is no absolute lap time
+    # to fuel-correct, so that driver keeps the documented relative-delta-only
+    # behaviour exactly as before.
+    has_baseline = baseline_lap_time > 0
 
     driver_index_by_id = {d.driver_id: i for i, d in enumerate(race_state.drivers)}
     # Mutable per-lap state — unlike everything else derived from race_state
@@ -439,6 +599,12 @@ def simulate_race(
     compound_encoded_by_driver = np.array(
         [d.compound_encoded for d in race_state.drivers], dtype=np.int64
     )
+    # Per-lap, per-driver pit probability across all n_simulations — What-If
+    # Simulator rebuild part (b) (see docs/core-feature-rebuild-whatif-
+    # simulator.md §7 and DriverPositionDistribution.projected_pit_laps'
+    # own docstring). O(n_laps x n_drivers) floats, negligible next to the
+    # (n_sims x n_drivers) arrays already held for the whole loop.
+    pit_probability_by_lap: dict[int, npt.NDArray[np.float64]] = {}
 
     for lap_number in range(race_state.current_lap + 1, race_state.total_laps + 1):
         # Rebuilt every lap (not once) so a forced compound change is picked up
@@ -449,12 +615,15 @@ def simulate_race(
             for compound in set(current_compounds)
         }
 
+        fuel_load_penalty = float(
+            tire_deg_model.fuel_load_penalty_seconds(lap_number, float(race_state.total_laps))
+        )
         fuel_at_lap = tire_deg_model.ASSUMED_START_FUEL_KG * (
             1 - lap_number / race_state.total_laps
         )
-        fuel_adjusted_time = -tire_deg_model.FUEL_TIME_PENALTY_PER_KG * (
-            tire_deg_model.ASSUMED_START_FUEL_KG - fuel_at_lap
-        )
+        # How much lighter (negative) this lap is than the baseline's own
+        # reference point — see baseline_fuel_penalty above.
+        fuel_trend_seconds = np.where(has_baseline, fuel_load_penalty - baseline_fuel_penalty, 0.0)
 
         predicted_delta, predicted_life_remaining = _tire_deg_predictions(
             race_state,
@@ -464,7 +633,7 @@ def simulate_race(
             lap_number,
             tyre_age,
             driver_id_encoded,
-            fuel_adjusted_time,
+            fuel_load_penalty,
         )
 
         with f1_ml_inference_duration_seconds.labels(model="safety_car").time():
@@ -498,15 +667,24 @@ def simulate_race(
                 if idx is not None and lap_number in schedule:
                     pit_flags[:, idx] = True
 
+        # Captured AFTER the forced-pit override above, so a what-if's forced
+        # pit lap shows probability 1.0 for the requesting driver at that lap
+        # — pit_flags is already what actually fires the pit stop below, this
+        # is just recording the same array's per-driver mean across sims,
+        # not a separate computation that could disagree with it.
+        pit_probability_by_lap[lap_number] = pit_flags.mean(axis=0)
+
         _advance_lap(
             cumulative_time,
             tyre_age,
             predicted_delta,
+            baseline_lap_time,
+            fuel_trend_seconds,
             LAP_TIME_NOISE_STD_SECONDS,
             pit_flags,
             PIT_STOP_SECONDS,
             sc_active,
-            SC_LAP_TIME_SECONDS,
+            sc_lap_time_seconds,
         )
 
         if forced_pit_laps:
@@ -523,11 +701,35 @@ def simulate_race(
     order = np.argsort(cumulative_time, axis=1)
     finishing_positions = np.argsort(order, axis=1) + 1
 
+    # P(driver i finishes ahead of driver j) for every (i, j) pair, from the
+    # same final cumulative_time array position_probabilities is built from
+    # — What-If Simulator rebuild part (b) (see DriverPositionDistribution.
+    # finish_ahead_probability's own docstring). Lower cumulative_time is
+    # better (less elapsed race time), hence "<" not ">". An (n_sims,
+    # n_drivers, n_drivers) intermediate boolean array — for a real ~22-car
+    # field at n_simulations=1000, that's ~484K booleans, negligible next to
+    # this function's existing (n_sims, n_drivers) arrays. A sim where two
+    # drivers end on an EXACT tie (e.g. both bunched to the same SC time on
+    # the final lap) contributes to neither direction, so the pair's two
+    # probabilities can in principle sum to slightly under 1.0 rather than
+    # exactly 1.0 — an accurate reflection of a genuine tie, not a bug.
+    finish_ahead_matrix = (cumulative_time[:, :, None] < cumulative_time[:, None, :]).mean(axis=0)
+
     distributions = []
     for i, driver in enumerate(race_state.drivers):
         counts = np.bincount(finishing_positions[:, i], minlength=n_drivers + 1)[1 : n_drivers + 1]
         probabilities = counts / n_simulations
         driver_times = cumulative_time[:, i]
+        projected_pit_laps = [
+            (lap, float(probs[i]))
+            for lap, probs in sorted(pit_probability_by_lap.items())
+            if probs[i] > 0.0
+        ]
+        finish_ahead_probability = {
+            other.driver_id: float(finish_ahead_matrix[i, j])
+            for j, other in enumerate(race_state.drivers)
+            if j != i
+        }
         distributions.append(
             DriverPositionDistribution(
                 driver_id=driver.driver_id,
@@ -536,6 +738,8 @@ def simulate_race(
                 mean_finish_time_seconds=float(np.mean(driver_times)),
                 finish_time_p5_seconds=float(np.percentile(driver_times, 5)),
                 finish_time_p95_seconds=float(np.percentile(driver_times, 95)),
+                projected_pit_laps=projected_pit_laps,
+                finish_ahead_probability=finish_ahead_probability,
             )
         )
 

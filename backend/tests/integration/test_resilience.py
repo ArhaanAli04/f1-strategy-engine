@@ -109,6 +109,13 @@ def test_prediction_worker_continues_on_model_exception() -> None:
         "season": 2026,
         "round_number": 1,
         "total_laps": 50,
+        # stored_total_laps (docs/live-race-ingestion-and-strategy-gaps-
+        # monza-2026.md Issue A — _run_inference's optimal_pit_lap clamp
+        # reads this specific key, not total_laps) — None here since this
+        # test isn't about the clamp; a real value would clamp
+        # optimal_pit_lap below and obscure the plain lap_number + 40
+        # formula this test is actually about (model-exception resilience).
+        "stored_total_laps": None,
         "track_temp": 35.0,
         "air_temp": 25.0,
         "position": 5,
@@ -126,10 +133,21 @@ def test_prediction_worker_continues_on_model_exception() -> None:
     }
 
     with patch("sentry_sdk.capture_exception") as mock_capture:
-        result = prediction_worker._run_inference(models, context, resolved, driver_id)
+        result = prediction_worker._run_inference(models, {}, context, resolved, driver_id)
 
-    assert result["tire_life_remaining"] == 0.0
-    assert result["optimal_pit_lap"] == lap_number + 1
+    # FIXED (2026-09-19, found while verifying docs/live-race-ingestion-and-
+    # strategy-gaps-monza-2026.md Issue A's own fix): this test's expected
+    # values were stale against _run_inference's actual, documented
+    # fallback — confirmed via `git stash` that this assertion failed
+    # identically against the code BEFORE any of that fix's changes, so
+    # this staleness predates and is unrelated to Issue A. The real
+    # fallback (both the pre-try default and the except-block value) is
+    # tire_deg_model.MAX_LOOKAHEAD_LAPS (40.0), not 0.0 — see
+    # _run_inference's own docstring ("Fallback default — used both when a
+    # model never loaded... and when a loaded model raises during
+    # inference").
+    assert result["tire_life_remaining"] == 40.0
+    assert result["optimal_pit_lap"] == lap_number + 40
     assert result["pit_probability"] == pytest.approx(0.6)
     mock_capture.assert_called_once()
     call_args = mock_capture.call_args
