@@ -28,7 +28,7 @@ from redis.exceptions import RedisError
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
 from backend.schemas.strategy_schema import PitWindowResponse
 from backend.services import cache_service, strategy_service
-from backend.services.ml import explainability
+from backend.services.ml import explainability, tire_deg_model
 from backend.services.ml.tire_deg_model import (
     FEATURE_COLUMNS,
     CategoricalEncodingMaps,
@@ -713,6 +713,91 @@ async def test_get_competitor_predicted_strategy_falls_back_when_total_laps_unse
     )
 
     assert captured_total_laps == [20]  # max(20, 18) — the pre-fix proxy, unchanged
+
+
+@pytest.mark.unit
+def test_first_pit_laps_batch_passes_the_real_fuel_penalty_not_zeros(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tyre model must receive fuel_load_penalty_seconds, never zeros.
+
+    This call site passed np.zeros(...), telling every tyre model the tank was
+    empty on every lap — the same train/inference skew as the 2026-09-09
+    leakage defect (tire_deg_model's module docstring forbids building this
+    feature any other way), and the last call site still doing it while
+    prediction_worker's live path and race_simulator both used the helper.
+    Measured before the fix: it moved the predicted competitor pit lap for
+    27.7% of driver-snapshots across six real races, 13.7% by five laps or
+    more (no measurable accuracy change either way — this is a consistency
+    fix, not an accuracy one).
+
+    Zeros are a plausible-looking value inside the feature's real range, so
+    nothing downstream would ever raise on them; only asserting on the
+    argument itself can catch a regression. The pit model is held below
+    ALERT_THRESHOLD so the roll-forward runs its whole horizon, which also
+    lets this check that the penalty tracks the rolled-forward lap rather
+    than being any single fixed value.
+    """
+    total_laps = 50
+    current_lap = 10
+    captured_laps: list[np.ndarray] = []
+    captured_fuel: list[np.ndarray] = []
+
+    def _capturing_life_remaining(
+        pipeline: Any,
+        lap_number: np.ndarray,
+        compound_encoded: np.ndarray,
+        tyre_age_laps: np.ndarray,
+        fuel_load_penalty: np.ndarray,
+        circuit_id_encoded: np.ndarray,
+        driver_id_encoded: np.ndarray,
+    ) -> np.ndarray:
+        captured_laps.append(np.asarray(lap_number, dtype=np.float64))
+        captured_fuel.append(np.asarray(fuel_load_penalty, dtype=np.float64))
+        return np.full(len(lap_number), 30)
+
+    def _below_threshold(features: np.ndarray) -> np.ndarray:
+        rows = len(features)
+        return np.column_stack([np.full(rows, 0.9), np.full(rows, 0.1)])
+
+    monkeypatch.setattr(
+        tire_deg_model,
+        "predict_life_remaining_batch",
+        _capturing_life_remaining,
+    )
+    pit_model = MagicMock()
+    pit_model.predict_proba.side_effect = _below_threshold
+
+    strategy_service._first_pit_laps_over_threshold_batch(
+        pit_model,
+        {"tire_deg_medium.pkl": object()},
+        {},
+        [str(uuid.uuid4())],
+        ["MEDIUM"],
+        "Test Circuit",
+        np.array([current_lap]),
+        np.array([8]),
+        np.array([1]),
+        np.array([5.0]),
+        np.array([5.0]),
+        np.array([0.0]),
+        total_laps,
+    )
+
+    assert captured_fuel, "the tyre model was never consulted"
+    for laps, fuel in zip(captured_laps, captured_fuel, strict=True):
+        expected = np.asarray(
+            tire_deg_model.fuel_load_penalty_seconds(laps, float(total_laps)),
+            dtype=np.float64,
+        )
+        assert np.allclose(fuel, expected)
+        assert (fuel > 0.0).all()  # the regression guard: zeros must never come back
+
+    # Fuel burns off as the race runs, so a later rolled-forward lap must carry less.
+    flat_laps = np.concatenate(captured_laps)
+    flat_fuel = np.concatenate(captured_fuel)
+    order = np.argsort(flat_laps)
+    assert np.all(np.diff(flat_fuel[order]) < 0.0)
 
 
 @pytest.mark.unit

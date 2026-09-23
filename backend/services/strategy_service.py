@@ -2101,7 +2101,19 @@ def _first_pit_laps_over_threshold_batch(
                 current_laps[group_idx] + offset,
                 compound_encoded[group_idx],
                 tyre_ages[group_idx] + offset,
-                np.zeros(len(group_idx)),
+                # Zeros here told every tyre model the tank was empty on every lap,
+                # while training builds this feature from fuel_load_penalty_seconds —
+                # the exact train/inference skew behind the 2026-09-09 leakage defect
+                # (tire_deg_model's module docstring), and the one call site that had
+                # not been brought into line with it. Evaluated at the rolled-forward
+                # lap, since that is the hypothetical "current lap" this offset asks
+                # about, matching prediction_worker's live single-driver path.
+                np.asarray(
+                    tire_deg_model.fuel_load_penalty_seconds(
+                        lap_number[group_mask].astype(float), float(max(total_laps, 1))
+                    ),
+                    dtype=np.float64,
+                ),
                 np.full(len(group_idx), group_circuit_code),
                 group_driver_codes,
             )
