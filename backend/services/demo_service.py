@@ -57,7 +57,7 @@ _STATE_TTL_SECONDS = 2 * 60 * 60
 _WNOHANG: int = getattr(os, "WNOHANG", 1)
 
 # The three curated Demo Replay sessions — session_ids, circuits, and lap
-# windows are fixed (see docs/day43-handoff.md section 3). The UI offers
+# windows are fixed (see docs/internal/day43-handoff.md section 3). The UI offers
 # exactly these; start_replay rejects anything else.
 CURATED_SESSIONS: tuple[CuratedSessionResponse, ...] = (
     CuratedSessionResponse(

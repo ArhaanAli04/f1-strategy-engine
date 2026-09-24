@@ -1,5 +1,5 @@
 """Unit tests for scripts/train_models.py's schema-aware promotion guard (item 9,
-extended by CP2 — docs/tire-deg-model-quality-and-rival-pit-behavior.md).
+extended by CP2 — docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md).
 
 Uses an in-memory fake S3 client (no real boto3/S3 calls) and real fitted sklearn
 Pipelines / a real SafetyCarModel so fitted_feature_count's introspection is
@@ -429,7 +429,7 @@ def test_promoted_sidecar_preserves_original_metrics_and_adds_schema_fields() ->
 
 
 # --- CP2: training_schema_version / feature_names incompatibility axes ---
-# (docs/tire-deg-model-quality-and-rival-pit-behavior.md — the promotion-guard gap
+# (docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md — the promotion-guard gap
 # that would have refused every CP1-corrected tire_deg model and every already-
 # written-but-never-promoted pit_predictor label fix.)
 

@@ -109,7 +109,7 @@ def test_prediction_worker_continues_on_model_exception() -> None:
         "season": 2026,
         "round_number": 1,
         "total_laps": 50,
-        # stored_total_laps (docs/live-race-ingestion-and-strategy-gaps-
+        # stored_total_laps (docs/internal/live-race-ingestion-and-strategy-gaps-
         # monza-2026.md Issue A — _run_inference's optimal_pit_lap clamp
         # reads this specific key, not total_laps) — None here since this
         # test isn't about the clamp; a real value would clamp
@@ -135,7 +135,7 @@ def test_prediction_worker_continues_on_model_exception() -> None:
     with patch("sentry_sdk.capture_exception") as mock_capture:
         result = prediction_worker._run_inference(models, {}, context, resolved, driver_id)
 
-    # FIXED (2026-09-19, found while verifying docs/live-race-ingestion-and-
+    # FIXED (2026-09-19, found while verifying docs/internal/live-race-ingestion-and-
     # strategy-gaps-monza-2026.md Issue A's own fix): this test's expected
     # values were stale against _run_inference's actual, documented
     # fallback — confirmed via `git stash` that this assertion failed

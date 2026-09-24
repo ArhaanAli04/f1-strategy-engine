@@ -13,7 +13,7 @@ function pluralize(count: number, noun: string): string {
 }
 
 // Summarizes an OvertakingDriver row's real Monte Carlo enrichment fields
-// (What-If Simulator rebuild part (b), see docs/core-feature-rebuild-whatif-
+// (What-If Simulator rebuild part (b), see docs/internal/core-feature-rebuild-whatif-
 // simulator.md §7) into one short line — RN port of the identical web/
 // desktop helper. Each piece is independently optional (see OvertakingDriver's
 // own docstring — both null together, never one set without the other for
@@ -52,7 +52,7 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
   const freshCompound = strategy.compounds.at(-1)
 
   // fresh_tyre_gain_per_lap is now a real tire_deg-model projection (backend
-  // What-If Simulator rebuild part (a) — see docs/core-feature-rebuild-
+  // What-If Simulator rebuild part (a) — see docs/internal/core-feature-rebuild-
   // whatif-simulator.md §7), not the old hardcoded per-compound constant —
   // it can legitimately come out NEGATIVE when the new compound is a worse
   // choice for the remaining laps than staying out would have been (e.g. a
@@ -124,7 +124,7 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
                   </View>
                   {/* Real Monte Carlo outputs from the SAME simulate_race call
                       behind position_gain_loss above — What-If Simulator
-                      rebuild part (b), see docs/core-feature-rebuild-whatif-
+                      rebuild part (b), see docs/internal/core-feature-rebuild-whatif-
                       simulator.md §7. Rendered only when at least one piece
                       is available (both fields can independently be null —
                       see OvertakingDriver's own docstring), never a
@@ -141,7 +141,7 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
 
       {/* fresh_tyre_gain_per_lap/total_recoverable_seconds are a real
           tire_deg-model projection as of the What-If Simulator rebuild part
-          (a) fix (see docs/core-feature-rebuild-whatif-simulator.md §7) —
+          (a) fix (see docs/internal/core-feature-rebuild-whatif-simulator.md §7) —
           the OLD compound continuing to degrade vs. the NEW compound
           starting fresh, both projected over the laps remaining after this
           plan's last pit stop. This can genuinely come out negative (the

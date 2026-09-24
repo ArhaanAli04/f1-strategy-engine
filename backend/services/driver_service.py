@@ -390,7 +390,7 @@ async def _is_session_live(client: aioredis.Redis, db: AsyncSession, session_id:
     _publish_live_gaps docstring documents this happening for real at the
     2026 Dutch GP). get_driver_laps's own TTL selection additionally floors
     on Race.status via _resolve_race_status rather than trusting a `False`
-    return from this function alone — see docs/live-race-ingestion-and-
+    return from this function alone — see docs/internal/live-race-ingestion-and-
     strategy-gaps-monza-2026.md Issue E.
     """
     resolved = await _resolve_season_round(db, session_id)
@@ -479,7 +479,7 @@ async def get_driver_laps(
     get_current_race) — this is a cheap indexed DB query, not an external
     API round-trip, so a cache-stampede on a miss is not a real concern.
 
-    TTL selection (fixed for Issue E, docs/live-race-ingestion-and-strategy-
+    TTL selection (fixed for Issue E, docs/internal/live-race-ingestion-and-strategy-
     gaps-monza-2026.md): the long 86400s TTL is reachable ONLY when the
     result is non-empty, _is_session_live currently reads False, AND the
     session's parent Race.status is genuinely "completed". Originally this

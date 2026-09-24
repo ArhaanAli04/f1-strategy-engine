@@ -293,7 +293,7 @@ def test_predict_life_remaining_batch_caps_when_never_crossing() -> None:
 
 # --- pipeline_feature_count / apply_incompatible_model_fallbacks ---
 # Covers the WET/INTER schema-mismatch alias documented in
-# docs/simulator-issues-wet-model-and-position-context.md.
+# docs/internal/simulator-issues-wet-model-and-position-context.md.
 
 
 def _fit_pipeline_with_n_features(n_features: int, seed: int) -> Pipeline:
@@ -498,7 +498,7 @@ def test_resolve_circuit_code_falls_back_when_circuit_missing_from_map() -> None
 # The shared implementation behind both strategy_service._project_stint_delta
 # (undercut/overcut projection) and prediction_worker._build_plan_explanation
 # (What-If Simulator rebuild part (a) — see
-# docs/core-feature-rebuild-whatif-simulator.md §7). These tests exercise the
+# docs/internal/core-feature-rebuild-whatif-simulator.md §7). These tests exercise the
 # function directly rather than through either caller.
 
 

@@ -49,7 +49,7 @@ class LapDataCreate(BaseModel):
     # codes active during that lap — see ingest_historical.py). The live
     # ingestor (ingest_live_session.py) previously never populated it at all,
     # leaving every live-ingested row NULL and `is_valid` hardcoded True
-    # regardless of what actually happened on track — see docs/live-race-
+    # regardless of what actually happened on track — see docs/internal/live-race-
     # ingestion-and-strategy-gaps-monza-2026.md Issue D (a whole-field red
     # flag at Monza 2026 was ingested as ~1955s "laps", all marked valid).
     # Now derived live from the TrackStatus feed topic's per-lap accumulated

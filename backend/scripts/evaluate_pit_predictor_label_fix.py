@@ -103,7 +103,7 @@ TRAJECTORY_SEASON = 2026
 _MODEL_VERSION_TAG = "production"
 
 # The exact session/drivers/pit stops the original investigation's own
-# evidence table was measured against (docs/core-feature-rebuild-strategy-
+# evidence table was measured against (docs/internal/core-feature-rebuild-strategy-
 # recommendations.md §2b) — Belgian GP 2026 Round 10.
 VALIDATION_SESSION_ID = "da57b9fd-4976-4fce-91a1-c7d0aac9c619"
 VALIDATION_DRIVER_CODES = ("LEC", "COL", "GAS")

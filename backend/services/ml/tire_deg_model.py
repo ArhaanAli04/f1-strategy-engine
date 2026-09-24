@@ -6,7 +6,7 @@ context. See FEATURE_COLUMNS below for why track/air temperature are
 computed (weather infra) but not currently selected into the feature set.
 
 Fuel correction and target definition, both corrected 2026-09-09 — see
-docs/tire-deg-model-quality-and-rival-pit-behavior.md. Two defects, measured
+docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md. Two defects, measured
 against the real 2018-2024 corpus, made every deployed tire_deg model predict
 that a tyre gets FASTER as it ages:
 
@@ -79,7 +79,7 @@ TARGET_COLUMN = "lap_time_delta"
 # Bump whenever add_engineered_features' TARGET definition or any FEATURE_COLUMNS
 # entry's real-world MEANING changes in a way that makes holdout_mae non-comparable
 # across versions — train_models.serialize_evaluate_and_upload's promotion guard
-# (CP2, docs/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a
+# (CP2, docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a
 # candidate over an incumbent recorded at a different version, regardless of MAE,
 # the same way it already force-promotes over a feature-COUNT mismatch (item 9).
 # That count-only check cannot catch this class of change by itself: CP1's fix
@@ -133,7 +133,7 @@ def apply_incompatible_model_fallbacks(
     """Replace any registry model whose feature count doesn't match FEATURE_COLUMNS.
 
     Guards against exactly the failure class documented in
-    docs/simulator-issues-wet-model-and-position-context.md: the MAE-only
+    docs/internal/simulator-issues-wet-model-and-position-context.md: the MAE-only
     promotion guard in scripts/train_models.py can keep a schema-incompatible
     model in production (a candidate that can't beat a stale incumbent's MAE
     is never promoted, even when the incumbent's feature schema no longer
@@ -523,7 +523,7 @@ def add_engineered_features(laps: pd.DataFrame) -> pd.DataFrame:
 def _build_pipeline() -> Pipeline:
     """StandardScaler -> XGBRegressor.
 
-    2026-09-11 (docs/tire-deg-model-quality-and-rival-pit-behavior.md CP5):
+    2026-09-11 (docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md CP5):
     a monotone_constraints=(0, 0, 1, 0, 0, 0) variant (non-decreasing
     tyre_age_laps effect on the fuel-corrected lap_time_delta target) was
     tried here and measured against real historical stint data — it did NOT
@@ -676,7 +676,7 @@ def project_stint_delta(
     stint projection (_project_stint_delta there now delegates here — see
     that module) and prediction_worker's plan-explanation degradation
     comparison (What-If Simulator rebuild part (a), see
-    docs/core-feature-rebuild-whatif-simulator.md §7). Callers supply
+    docs/internal/core-feature-rebuild-whatif-simulator.md §7). Callers supply
     already-encoded categoricals resolved against THIS pipeline's own map
     (see resolve_driver_code/resolve_circuit_code below) — this function does
     no encoding itself, same contract as predict_life_remaining_batch above.

@@ -30,7 +30,7 @@ they're used rather than silently papered over:
   fully-observed set — pd.Categorical's inferred code order for it is far
   more predictable than for circuit/driver IDs, and was never part of this
   gap.
-- total_laps: fixed 2026-09-19 (docs/live-race-ingestion-and-strategy-gaps-
+- total_laps: fixed 2026-09-19 (docs/internal/live-race-ingestion-and-strategy-gaps-
   monza-2026.md Issue A) — Session.total_laps now stores the real scheduled
   race distance (from FastF1's own session.total_laps historically, from
   the live feed's LapCount topic mid-race; see ingest_historical.py/
@@ -188,7 +188,7 @@ def _download_from_s3(filename: str) -> Path:
 
     See prediction_worker.py's identical helper for the full rationale — the old
     skip-if-already-cached-on-disk behavior silently served stale models forever
-    across process restarts (confirmed 2026-09-11, docs/tire-deg-model-quality-
+    across process restarts (confirmed 2026-09-11, docs/internal/tire-deg-model-quality-
     and-rival-pit-behavior.md's CP3: both the host machine's and the running
     backend container's cache directories held weeks-old .pkl files, so
     "docker compose restart" never actually picked up a newly-promoted model).
@@ -285,7 +285,7 @@ def _load_models() -> dict[str, Any]:
             _holdout_mae_cache[filename] = tire_deg_model.holdout_mae_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
-    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # experiment — see docs/internal/simulator-issues-wet-model-and-position-
     # context.md) by aliasing it (and its encoding maps/holdout_mae) to a
     # compatible fallback for this process.
     tire_deg_model.apply_incompatible_model_fallbacks(
@@ -419,7 +419,7 @@ async def validate_current_lap(db: AsyncSession, session_id: uuid.UUID, current_
        currently completing the very next lap after the last one anyone in
        the field has finished; current_lap any further ahead is either
        stale client state or a fabricated race length the session never
-       had — see docs/simulator-issues-wet-model-and-position-context.md's
+       had — see docs/internal/simulator-issues-wet-model-and-position-context.md's
        Checkpoint-6 follow-up finding (a current_lap=68 what-if was
        silently accepted for a session whose real race was 44 laps).
 
@@ -636,7 +636,7 @@ def _project_stint_delta(
     Thin wrapper delegating to tire_deg_model.project_stint_delta — the single
     shared implementation, also used by prediction_worker._build_plan_explanation
     for the What-If Simulator's plan-explanation degradation comparison (see
-    docs/core-feature-rebuild-whatif-simulator.md §7). This module's only
+    docs/internal/core-feature-rebuild-whatif-simulator.md §7). This module's only
     caller (_undercut_overcut_probability) already guarantees `pipeline` is
     non-None before reaching here (its own ModelNotLoadedError check above).
     The shared helper additionally guards against a schema-mismatched pipeline
@@ -1237,7 +1237,7 @@ def tire_deg_recommendation_contributions(
     own pipeline. This is the correction Checkpoint 3 makes to what this
     explanation used to compute: previously it ran SHAP against the
     driver's CURRENT compound at the pit lap — a real, documented gap (see
-    docs/core-feature-rebuild-strategy-recommendations.md §2a) where "even
+    docs/internal/core-feature-rebuild-strategy-recommendations.md §2a) where "even
     what it does explain isn't about the recommended stint."
 
     Public (no leading underscore): Checkpoint 4's prediction_worker.
@@ -1708,7 +1708,7 @@ async def _live_gap_deficit(
     drops every gap that opened on the opening lap: on Monza 2026 it put the
     requester "already ahead" of the car ahead in 33% of real predictions
     against 4% on the road, and 61% of the saturated 100% undercut scores rode
-    on such a wrong-signed gap (docs/live-race-ingestion-and-strategy-gaps-
+    on such a wrong-signed gap (docs/internal/live-race-ingestion-and-strategy-gaps-
     monza-2026.md Issue B).
 
     The snapshot is the CURRENT tower, not the tower as of the lap being
@@ -2196,7 +2196,7 @@ async def get_competitor_predicted_strategy(
     _circuit_id, circuit_name, stored_total_laps = (await db.execute(circuit_query)).one()
 
     # Prefer the real scheduled distance — see this module's own "total_laps"
-    # note above and docs/live-race-ingestion-and-strategy-gaps-monza-
+    # note above and docs/internal/live-race-ingestion-and-strategy-gaps-monza-
     # 2026.md Issue A. This was a THIRD, previously-undiscovered instance of
     # the same bug: max(lap.lap_number for lap in latest_laps) is "how far
     # has the race gotten" across the whole field, not "how long is the
@@ -2326,7 +2326,7 @@ async def _fetch_last_ingested_session(
     """Newest-race_date COMPLETED R session that has ingested lap data.
 
     Race.status == "completed" (quick mitigation for the B1 finding in
-    docs/simulator-issues-wet-model-and-position-context.md, not a fix for
+    docs/internal/simulator-issues-wet-model-and-position-context.md, not a fix for
     the underlying CLAUDE.md Deferred Wiring item A): without this filter,
     the picker could resolve to a partially live-ingested session whose
     lap_data has NULL position and unevenly-missing laps (e.g. Dutch GP 2026

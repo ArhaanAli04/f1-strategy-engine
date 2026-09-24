@@ -9,7 +9,7 @@ _KNOWN_COMPOUNDS = frozenset({"HARD", "INTERMEDIATE", "MEDIUM", "SOFT", "WET"})
 # Cap on SimulateStrategyRequest.scenarios — each entry costs one full
 # race_simulator.simulate_race call server-side (Checkpoint 1's memoization
 # fix brought that to ~7-10s on a real ~22-driver field; see
-# docs/core-feature-rebuild-whatif-simulator.md). 4 scenarios keeps a compare
+# docs/internal/core-feature-rebuild-whatif-simulator.md). 4 scenarios keeps a compare
 # request comfortably inside useSimulationResult's 60s client poll timeout
 # even under worst-case per-call cost.
 _MAX_SCENARIOS = 4
@@ -50,7 +50,7 @@ class ScenarioPlan(BaseModel):
     candidate plans against the IDENTICAL field state in one Celery task
     (one _build_race_state call, N race_simulator.simulate_race calls)
     instead of N separate round trips. This is the server-orchestrated
-    design from docs/core-feature-rebuild-whatif-simulator.md — chosen over
+    design from docs/internal/core-feature-rebuild-whatif-simulator.md — chosen over
     client-orchestrated N requests because polling N tasks at
     useSimulationResult's 2s interval would blow past the 60/minute
     authenticated rate limit (core/rate_limit.py), and because
@@ -81,7 +81,7 @@ class SimulateStrategyRequest(BaseModel):
     # is "currently on lap 1". The actual upper bound (this can't exceed the
     # session's real progress by more than one lap) needs a DB lookup and is
     # enforced at request time by strategy_service.validate_current_lap, not
-    # here — see docs/simulator-issues-wet-model-and-position-context.md's
+    # here — see docs/internal/simulator-issues-wet-model-and-position-context.md's
     # Checkpoint-6 follow-up finding.
     current_lap: int = Field(ge=1)
     current_compound: str
@@ -163,7 +163,7 @@ class OvertakingDriver(BaseModel):
     real outputs of the SAME 1000-run Monte Carlo simulate_race call behind
     position_gain_loss/position_probabilities — added for the What-If
     Simulator rebuild part (b) (see
-    docs/core-feature-rebuild-whatif-simulator.md §7) so this row's numbers
+    docs/internal/core-feature-rebuild-whatif-simulator.md §7) so this row's numbers
     can no longer flatly contradict the real simulation result they sit next
     to in the response. All three are None only when the simulation genuinely
     has no data for this rival (should not happen in practice — every rival
@@ -243,7 +243,7 @@ class SimulatedRaceOutcome(BaseModel):
     # "67% chance of finishing P2, 18% chance P1, 15% chance P3" — computed
     # by race_simulator.simulate_race for every driver on every call already,
     # previously discarded before reaching this schema (see
-    # docs/core-feature-rebuild-whatif-simulator.md).
+    # docs/internal/core-feature-rebuild-whatif-simulator.md).
     position_probabilities: list[PositionProbability]
     confidence_interval: tuple[float, float]
     explanation: PlanExplanation

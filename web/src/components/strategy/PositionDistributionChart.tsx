@@ -29,7 +29,7 @@ function buildSeries(strategies: SimulatedRaceOutcome[]): StrategySeries[] {
   }))
 }
 
-// Restores the vision's original ask (see docs/core-feature-rebuild-whatif-
+// Restores the vision's original ask (see docs/internal/core-feature-rebuild-whatif-
 // simulator.md): "67% chance of finishing P2, 18% chance P1, 15% chance P3"
 // per scenario, visualized side by side. race_simulator.simulate_race
 // already computes this full distribution from 1000 real simulations for

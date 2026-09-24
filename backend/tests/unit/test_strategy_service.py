@@ -87,7 +87,7 @@ def _current_state_side_effects(
 ) -> list[MagicMock]:
     """The 2 db.execute() calls _current_state makes, in order: lap, circuit.
 
-    Fixed for docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
+    Fixed for docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
     A: _current_state now reads Session.total_laps directly off the circuit
     query (a real stored value, not a separate MAX(lap_number) query) and
     only falls back to that proxy when the stored value is NULL — this
@@ -108,7 +108,7 @@ async def test_current_state_prefers_stored_total_laps_over_max_lap_number(
 ) -> None:
     """When Session.total_laps IS stored, it's used directly and the old
     MAX(lap_number) fallback query is never issued — only 2 db.execute()
-    calls, not 3 (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    calls, not 3 (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
     Issue A)."""
     session_id = uuid.uuid4()
     driver_id = uuid.uuid4()
@@ -620,7 +620,7 @@ async def test_get_competitor_predicted_strategy_prefers_stored_total_laps(
     fakeredis: fakeredis_lib.FakeAsyncRedis,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The THIRD instance of Issue A's bug (docs/live-race-ingestion-and-
+    """The THIRD instance of Issue A's bug (docs/internal/live-race-ingestion-and-
     strategy-gaps-monza-2026.md), found while fixing the other two: this
     function's own total_laps = max(lap.lap_number for lap in latest_laps)
     is the same "how far has the race gotten" proxy, just computed in
@@ -1227,7 +1227,7 @@ async def test_resolve_season_round_raises_not_found_when_no_session(
 
 
 # --- validate_current_lap ---
-# See docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+# See docs/internal/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
 # follow-up finding: a current_lap of 68 was silently accepted for a session
 # whose real race was 44 laps. mock_db_session.execute.side_effect below
 # always supplies exactly 2 results in order — session-existence check, then
@@ -1544,7 +1544,7 @@ async def test_get_last_ingested_session_query_filters_completed_status(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
 ) -> None:
-    """B1 mitigation (docs/simulator-issues-wet-model-and-position-context.md):
+    """B1 mitigation (docs/internal/simulator-issues-wet-model-and-position-context.md):
     a scheduled/in-progress session (e.g. a partial live-ingestion dry run like
     Dutch GP 2026 Round 12) must never be picked, even with the newest
     race_date and ingested lap_data — only Race.status == "completed" is
@@ -1579,7 +1579,7 @@ async def test_get_last_ingested_session_query_filters_completed_status(
 
 
 # --- _load_models: WET/INTER schema-mismatch alias (Checkpoint 3) ---
-# See docs/simulator-issues-wet-model-and-position-context.md Part A. Unlike
+# See docs/internal/simulator-issues-wet-model-and-position-context.md Part A. Unlike
 # every other test in this file, this one exercises the REAL _load_models
 # body (not a monkeypatched replacement) — it's the only test that needs to,
 # since it's specifically testing what _load_models itself does with the
@@ -1765,7 +1765,7 @@ async def test_cumulative_race_time_defaults_to_zero_when_no_laps(
 
 
 # --- live gaps drive the undercut/overcut deficit and neighbour lookup
-# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+# (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
 
 
 def _elapsed_result(value: float) -> MagicMock:

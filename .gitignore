@@ -253,3 +253,8 @@ infra/k8s/create-secrets.sh
 # Expo local dev/build cache (mobile/) and Vercel CLI project link (web/)
 mobile/.expo/
 web/.vercel/
+
+# Internal development logs (session handoffs, investigations, checkpoint notes).
+# Kept locally for development context; referenced from code comments and
+# CLAUDE.md as docs/internal/<name>.md but deliberately not published.
+docs/internal/

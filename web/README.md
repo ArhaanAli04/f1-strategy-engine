@@ -1,32 +1,50 @@
-# React + TypeScript + Vite
+# F1 Strategy Engine — Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The main client: React + Vite + TypeScript, with TanStack Query for server
+data, Zustand for UI state, Recharts for charts and shadcn/ui components.
+Deployed to Vercel from `main` (`.github/workflows/cd-web.yml`).
 
-Currently, two official plugins are available:
+For what the app does, see [docs/features.md](../docs/features.md).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Running it
 
-## React Compiler
+The backend needs to be running first (`make dev` from the repo root, see the
+[main README](../README.md#quick-start-local-development)).
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm ci
+npm run dev        # http://localhost:5173
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+The app reads the backend's address from two variables with no built-in
+default, so create `web/.env.local` with:
+
+```
+VITE_API_URL=http://localhost:8000
+VITE_WS_URL=ws://localhost:8000
+```
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Start the dev server with hot reload |
+| `npm run build` | Type-check (`tsc -b`) and build for production |
+| `npm run test` | Run the Vitest suite once |
+| `npm run lint` | Lint with oxlint |
+| `npm run preview` | Serve the production build locally |
+
+## Layout
+
+| Folder | Contents |
+|---|---|
+| `src/pages/` | One component per route (dashboard, race, driver, simulator, alerts) |
+| `src/components/` | Feature components, grouped by area (`telemetry/`, `circuit/`, `strategy/`, `driver/`, …), plus `ui/` for shadcn primitives |
+| `src/hooks/` | TanStack Query hooks and the WebSocket hook |
+| `src/api/` | Typed API client, one file per backend area |
+| `src/types/` | TypeScript types mirroring the backend's response schemas |
+| `src/stores/` | Zustand stores (auth, selected session/driver, alerts) |
+
+Several of these folders are copied by hand into `desktop/` and `mobile/`.
+If you change a shared file here, check `desktop/src/README.md` and
+`mobile/src/README.md` for what needs syncing.

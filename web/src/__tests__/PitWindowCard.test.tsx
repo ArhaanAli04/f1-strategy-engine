@@ -94,7 +94,7 @@ describe("PitWindowCard", () => {
   })
 
   it("flags a fallback estimate with a ~ headline, 'Estimated' label, and an unconfirmed-estimate note", () => {
-    // docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A: this
+    // docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A: this
     // is the honest-uncertainty surface for a value that could still be an
     // unbounded, low-confidence pit_predictor estimate (a pre-fix persisted
     // row, or a live session before its first LapCount message) — the

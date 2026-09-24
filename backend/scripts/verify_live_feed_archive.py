@@ -2,7 +2,7 @@
 
 verify_live_feed_parity.py replays a race from OUR OWN database, re-synthesizing
 the F1 messages it thinks the live feed would have sent. That is exactly why it
-missed docs/live-race-ingestion-and-strategy-gaps-monza-2026.md's Issue C: it
+missed docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md's Issue C: it
 INVENTED a `GapToLeader: "RETIRED"` marker that F1's real feed never sends, so
 the ingestor's retirement eviction passed a test that only ever exercised the
 harness's own assumption.

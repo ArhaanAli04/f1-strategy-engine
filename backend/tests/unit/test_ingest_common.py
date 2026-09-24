@@ -1,7 +1,7 @@
 """Unit tests for scripts/_ingest_common.py.
 
 Currently scoped to get_or_create_session's total_laps create/backfill/
-no-overwrite behavior (docs/live-race-ingestion-and-strategy-gaps-monza-
+no-overwrite behavior (docs/internal/live-race-ingestion-and-strategy-gaps-monza-
 2026.md Issue A) — the rest of this module's helpers had no dedicated test
 file before this change either; this file exists to cover the new logic,
 not to retroactively backfill coverage for everything else in the module.

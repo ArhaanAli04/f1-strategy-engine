@@ -12,7 +12,7 @@ that gap.
 
 Also covers position_probabilities/mean_position (added for the What-If
 Simulator multi-scenario rebuild, Checkpoint 2 — see
-docs/core-feature-rebuild-whatif-simulator.md): position_probabilities is a
+docs/internal/core-feature-rebuild-whatif-simulator.md): position_probabilities is a
 list[PositionProbability] (each a plain {position, probability} object), not
 a dict, specifically to avoid depending on Pydantic coercing a JSON object's
 string keys back to int — this test confirms that shape round-trips too.
@@ -177,7 +177,7 @@ def test_confidence_interval_round_trips_through_celery_result_backend(
 
 
 # --- Multi-scenario compare (Checkpoint 3, see
-# docs/core-feature-rebuild-whatif-simulator.md): SimulateStrategyRequest.
+# docs/internal/core-feature-rebuild-whatif-simulator.md): SimulateStrategyRequest.
 # scenarios runs N race_simulator.simulate_race calls off ONE
 # _build_race_state, sharing one random seed across all N calls ("common
 # random numbers" — see prediction_worker._run_one_scenario's docstring). ---

@@ -2,14 +2,23 @@
 
 Date: 2026-08-19
 Environment: Local Docker (PostgreSQL + Redis + Backend + Celery Worker)
-Phase: 8, Day 35 — Performance profiling & query optimization
+Scope: performance profiling & query optimization
+
+> **Point-in-time report.** Numbers and code below are as of 2026-08-19. One
+> later change worth knowing about: the batched cumulative-time query in
+> section 2 summed `lap_time_seconds`, which silently skipped laps with no
+> recorded time (pit laps, safety car laps). Drivers have different numbers of
+> those, so the totals weren't comparable between drivers. The query now uses
+> a stored `session_elapsed_seconds` column (the session clock at the end of
+> each lap) and only falls back to the sum where that column isn't filled in.
+> The N+1 fix itself, one query for the whole field, is unchanged.
 
 ---
 
 ## 1. Index Audit
 
 **Methodology:** ran `EXPLAIN ANALYZE` directly against the local Docker Postgres
-(`docker exec docker-postgres-1 psql`) for every query pattern named in the Day 35
+(`docker exec docker-postgres-1 psql`) for every query pattern named in the profiling
 spec, using real ingested data — 166,453 `lap_data` rows, 158 `sessions` rows, and
 session `00b4f598-40ec-4792-8687-6eae51257977` (1,534 laps) for the per-session
 patterns. Per CLAUDE.md's rule, an index was only added if `EXPLAIN ANALYZE`
@@ -31,8 +40,8 @@ composite index exists there, but a race has at most 5 sessions (FP1/FP2/FP3/Q/R
 so the post-index-scan filter is trivial. Adding a composite index here would be
 speculative — CLAUDE.md's rule explicitly forbids that, so it was skipped.
 
-**Result: no migration needed for Day 35.** The Day 8 unique constraint on
-`lap_data` and the Day 16 composite index on `strategy_predictions` already serve
+**Result: no migration needed.** The existing unique constraint on
+`lap_data` and the existing composite index on `strategy_predictions` already serve
 every leading-column access pattern this session's queries need.
 
 ---
@@ -69,9 +78,9 @@ grouped by `driver_id` instead of scoped to one. Results are looked up from a
 `{driver_id: cumulative_seconds}` dict inside the loop instead of awaited per
 iteration.
 
-**Impact (measured, Checkpoint 2 load test, worker restarted with the fix live):**
+**Impact (measured, worker restarted with the fix live):**
 
-| Metric | Before (baseline) | After (Day 35) | Change |
+| Metric | Before (baseline) | After | Change |
 |---|---|---|---|
 | POST /strategy/simulate p50 | 3000ms | 300ms | **10x faster** |
 | POST /strategy/simulate p95 | 6300ms | 2500ms | **2.5x faster** |
@@ -114,7 +123,7 @@ was a load-test harness artifact, not a backend issue. Fixed by sleeping after
 
 ### Results vs. baseline (2026-07-30 15:07 IST — closest matching 100-user run)
 
-| Endpoint | Baseline p50 | Day 35 p50 | Baseline p95 | Day 35 p95 | Baseline failures | Day 35 failures |
+| Endpoint | Baseline p50 | After p50 | Baseline p95 | After p95 | Baseline failures | After failures |
 |---|---|---|---|---|---|---|
 | GET /races/current | 6200ms | 350ms | 13000ms | 2200ms | 0/41 (0%) | 0/41 (0%) |
 | GET /strategy/overview | 82ms | 61ms | 4000ms | 1300ms | 7/777 (0.90%) | 3/862 (0.35%) |
@@ -124,12 +133,12 @@ was a load-test harness artifact, not a backend issue. Fixed by sleeping after
 
 \* Baseline's aggregated row includes WS `lap_completed` traffic (2,985 near-instant
 messages), which pulls its aggregate p50 down to 0ms — not directly comparable to
-Day 35's aggregate, which has no WS traffic (see Deferred Items). The per-endpoint
+the new run's aggregate, which has no WS traffic (see Deferred Items). The per-endpoint
 HTTP rows above are the meaningful comparison.
 
 Every endpoint improved on both p50 and p95. No regressions were found.
 
-**Targets (per Day 35 spec):**
+**Targets (set before the run):**
 - `/strategy/overview` p95: 1300ms < 1500ms target — **met**
 - `/strategy/simulate` p95: 2500ms < 8000ms target — **met**
 - Overall failure rate: 0.29% < 1% target — **met**
