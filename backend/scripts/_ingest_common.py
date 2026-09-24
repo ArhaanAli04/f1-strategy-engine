@@ -158,7 +158,7 @@ async def get_or_create_session(
 ) -> SessionModel:
     """Get or create a Session row, optionally setting/backfilling total_laps.
 
-    total_laps (see docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    total_laps (see docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
     Issue A) is only ever WRITTEN here, never overwritten: a brand-new row
     gets it directly; an EXISTING row only has it backfilled when the
     caller now has a real value AND the row's own value is still NULL —

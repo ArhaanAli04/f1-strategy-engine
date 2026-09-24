@@ -32,7 +32,7 @@ this project enforces by hand, not something the framework imposes on you.
 
 ## 2. Celery over FastAPI BackgroundTasks
 
-**Decision:** Celery workers, with Redis Streams as the broker.
+**Decision:** Celery workers, with Redis as the broker and result backend.
 
 **Alternatives considered:** FastAPI's built-in `BackgroundTasks` (runs
 in-process, same event loop as the web server).
@@ -49,7 +49,7 @@ CPU-bound and race-day scaling targets them specifically — see
 broker to run and monitor, a separate `Dockerfile.worker` deployment, and
 task-serialization to reason about (see `CLAUDE.md`'s note on
 `confidence_interval` tuple round-tripping through the JSON result backend).
-The Day 18 500-user load test measured a single `--pool=solo` worker at
+A 500-user load test measured a single `--pool=solo` worker at
 65-88 seconds per `run_race_simulation` task — a number that only exists
 because Celery tasks are independently measurable and scalable in the first
 place; a `BackgroundTasks` approach would have simply stalled the API
@@ -71,9 +71,9 @@ project started from.
 **Reasoning — this is the honest version, not the planned one:** Two
 separate things are true at once here:
 
-1. **It wasn't needed at the scale actually reached.** The Day 35 index
+1. **It wasn't needed at the scale actually reached.** An index
    audit ran `EXPLAIN ANALYZE` directly against 166,453 real `lap_data` rows
-   using composite indexes already in place from Days 8-16 (no new index or
+   using composite indexes that were already in place (no new index or
    migration was required):
 
    | Query pattern | Measured execution time |
@@ -121,8 +121,8 @@ from delivery (N pod readers, each pushing to its own connected WebSocket
 clients) with the least moving parts. Streams was evaluated and explicitly
 **deferred, not rejected** — pub/sub is sufficient at the connection counts
 actually tested (`tests/load/ws_load_test.py` verified 200 concurrent
-connections, 50/50 messages delivered per connection, p99=63ms, after the
-Day 28 fan-out fix collapsed the design to one shared broadcaster per
+connections, 50/50 messages delivered per connection, p99=63ms, after a
+fan-out fix collapsed the design to one shared broadcaster per
 session instead of one pubsub loop per connection).
 
 **Tradeoffs:** Pub/sub has no message durability — a message published

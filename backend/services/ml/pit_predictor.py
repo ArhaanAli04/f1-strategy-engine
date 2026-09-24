@@ -12,7 +12,7 @@ original label_pit_laps marked only the stint's own start_lap (the OUT-lap,
 first lap on the fresh tyre) as positive. Since current_tyre_age is directly
 a feature and resets to a small number on exactly that lap, the model
 learned "tyre_age just reset -> a pit just happened" — a real, measured
-finding (docs/core-feature-rebuild-strategy-recommendations.md §2b):
+finding (docs/internal/core-feature-rebuild-strategy-recommendations.md §2b):
 pit_probability stayed near 0.0000 for every lap up to and including the
 lap before a real pit, spiked to ~0.9999 exactly ON the pit lap, then
 collapsed back to near-zero the next lap. That is a same-lap detector, not
@@ -67,7 +67,7 @@ CV_FOLDS = 5
 # 1 (implicit, never recorded under this name): the original out-lap-only label
 #   (this module's docstring's "PRE-fix bug") — positive_rate ~2.8% on the real
 #   2018-2025 corpus. The currently-deployed production model is confirmed
-#   (docs/tire-deg-model-quality-and-rival-pit-behavior.md §2c) to still be this
+#   (docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md §2c) to still be this
 #   version, despite the 2026-09-04 code fix below — it was never promoted,
 #   because the promotion guard had no way to flag the two labels as
 #   non-comparable and a same-lap detector's holdout_mae looks artificially

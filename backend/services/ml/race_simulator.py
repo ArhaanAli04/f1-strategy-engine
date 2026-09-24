@@ -32,7 +32,7 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   model's splits" — measured feature importances showed the opposite
   (fuel_adjusted_time 0.20-0.30 vs tyre_age_laps 0.07-0.10 on the dry
   compounds), and the resulting predictions were worse than a constant. See
-  docs/tire-deg-model-quality-and-rival-pit-behavior.md.
+  docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md.
 - cumulative_race_time_seconds accumulates real elapsed race time (input, carrying
   today's actual gaps) plus, for each simulated lap, that driver's own
   baseline_lap_time_seconds (their real median lap time through current_lap —
@@ -165,7 +165,7 @@ class DriverPositionDistribution:
     finish_time_p5_seconds: float
     finish_time_p95_seconds: float
     # Both added for the What-If Simulator rebuild part (b) — see
-    # docs/core-feature-rebuild-whatif-simulator.md §7 — so a caller can
+    # docs/internal/core-feature-rebuild-whatif-simulator.md §7 — so a caller can
     # build a plan-explanation narrative from what the simulation itself
     # actually did, instead of a static frozen-gap heuristic. Both default
     # empty so every pre-existing DriverPositionDistribution(...) call site
@@ -308,7 +308,7 @@ def _tire_deg_predictions(
         (predicted_delta, predicted_life_remaining), each (n_sims, n_drivers). Drivers
         on a compound with no fitted pipeline, a pipeline whose fitted feature count
         doesn't match the built feature vector (schema drift — see
-        docs/simulator-issues-wet-model-and-position-context.md; strategy_service.py/
+        docs/internal/simulator-issues-wet-model-and-position-context.md; strategy_service.py/
         prediction_worker.py's _load_models already alias the one known offender,
         tire_deg_wet.pkl, before this is ever reached, but this is a permanent
         backstop against future drift in any compound), or a pipeline whose predict()
@@ -317,7 +317,7 @@ def _tire_deg_predictions(
         crashing the whole Monte Carlo task.
 
     Memoization (added for the What-If Simulator multi-scenario rebuild —
-    see docs/core-feature-rebuild-whatif-simulator.md): within one compound
+    see docs/internal/core-feature-rebuild-whatif-simulator.md): within one compound
     group at one lap, lap_number/fuel_adjusted_time/circuit_id_encoded are
     scalars shared by every row, and compound_encoded/driver_id_encoded vary
     only per DRIVER (identical across all n_sims copies of that driver) —
@@ -600,7 +600,7 @@ def simulate_race(
         [d.compound_encoded for d in race_state.drivers], dtype=np.int64
     )
     # Per-lap, per-driver pit probability across all n_simulations — What-If
-    # Simulator rebuild part (b) (see docs/core-feature-rebuild-whatif-
+    # Simulator rebuild part (b) (see docs/internal/core-feature-rebuild-whatif-
     # simulator.md §7 and DriverPositionDistribution.projected_pit_laps'
     # own docstring). O(n_laps x n_drivers) floats, negligible next to the
     # (n_sims x n_drivers) arrays already held for the whole loop.

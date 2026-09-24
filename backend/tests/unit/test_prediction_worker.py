@@ -141,7 +141,7 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     assert driver_b_state.baseline_lap_time_seconds == pytest.approx(90.5)
 
 
-# --- _resolve_inference_context: total_laps (docs/live-race-ingestion-and-
+# --- _resolve_inference_context: total_laps (docs/internal/live-race-ingestion-and-
 # strategy-gaps-monza-2026.md Issue A) ---
 #
 # _resolve_weather/_resolve_position_context are monkeypatched to canned
@@ -220,7 +220,7 @@ async def test_resolve_inference_context_falls_back_to_max_lap_number(
     assert mock_db_session.execute.call_count == 2
 
 
-# --- _run_inference: optimal_pit_lap clamp (docs/live-race-ingestion-and-
+# --- _run_inference: optimal_pit_lap clamp (docs/internal/live-race-ingestion-and-
 # strategy-gaps-monza-2026.md Issue A) ---
 #
 # models={} in both tests below deliberately provides no tire_deg_*.pkl,
@@ -435,7 +435,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
 
 
 # --- _load_models: WET/INTER schema-mismatch alias (Checkpoint 3) ---
-# See docs/simulator-issues-wet-model-and-position-context.md Part A. Mirrors
+# See docs/internal/simulator-issues-wet-model-and-position-context.md Part A. Mirrors
 # test_strategy_service.py's identical wiring test — this module has its own
 # duplicated _load_models (see this file's module docstring on the
 # no-cross-service-import convention), so it needs its own coverage.
@@ -809,7 +809,7 @@ async def test_build_race_state_baseline_zero_when_field_has_none(
 
 # --- _resolve_position_context: core-feature-rebuild Checkpoint 1 ---
 # (current_lap bound + live-gaps Redis fallback — see
-# docs/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
+# docs/internal/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
 # Deferred Wiring entry on _resolve_position_context's missing bound.)
 
 
@@ -1024,7 +1024,7 @@ async def test_resolve_position_context_returns_hardcoded_default_when_nothing_r
 
 
 # --- _shape_position_probabilities (What-If Simulator multi-scenario rebuild,
-# Checkpoint 2: see docs/core-feature-rebuild-whatif-simulator.md) ---
+# Checkpoint 2: see docs/internal/core-feature-rebuild-whatif-simulator.md) ---
 
 
 @pytest.mark.unit
@@ -1071,7 +1071,7 @@ def test_shape_position_probabilities_empty_when_all_zero() -> None:
 # --- _build_plan_explanation / _project_pit_stop_degradation (What-If
 # Simulator rebuild part (a): replacing the hardcoded
 # _FRESH_TYRE_GAIN_PER_LAP_SECONDS constant with a real tire_deg-model
-# projection — see docs/core-feature-rebuild-whatif-simulator.md §7). ---
+# projection — see docs/internal/core-feature-rebuild-whatif-simulator.md §7). ---
 
 
 def _fit_pipeline_with_slope(slope: float, seed: int) -> Any:
@@ -1418,7 +1418,7 @@ def test_project_pit_stop_degradation_clamps_negative_tyre_age_from_out_of_order
 
 
 # --- drivers_overtaken enrichment (What-If Simulator rebuild part (b): see
-# docs/core-feature-rebuild-whatif-simulator.md §7 and
+# docs/internal/core-feature-rebuild-whatif-simulator.md §7 and
 # race_simulator.DriverPositionDistribution.projected_pit_laps/
 # finish_ahead_probability's own docstrings) ---
 
@@ -1546,7 +1546,7 @@ def test_peak_projected_pit_lap_ties_resolve_to_earliest_lap() -> None:
 
 
 # --- _resolve_position_context: live standings are the primary source for a
-# live session (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+# live session (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
 
 
 def _live_position_payload(

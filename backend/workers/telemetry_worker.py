@@ -168,7 +168,7 @@ async def _persist_session_total_laps(session_id: uuid.UUID, total_laps: int) ->
         session_id: Session whose total_laps to set.
         total_laps: Real scheduled race distance, from the live feed's
             LapCount.TotalLaps (see ingest_live_session.py's
-            _handle_lap_count and docs/live-race-ingestion-and-strategy-
+            _handle_lap_count and docs/internal/live-race-ingestion-and-strategy-
             gaps-monza-2026.md Issue A).
     Returns:
         None.

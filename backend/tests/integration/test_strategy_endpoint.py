@@ -86,7 +86,7 @@ def _seed_session_with_lap(
         lap_time_seconds=91.2,
     )
     # session_row above has no total_laps set (Session.total_laps, added for
-    # docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
+    # docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
     # see strategy_service.py's module docstring), so build_pit_recommendation
     # falls back to deriving it as MAX(lap_number) across the whole session,
     # same as before that fix. Without a lap somewhere in the session beyond
@@ -334,7 +334,7 @@ def test_simulate_returns_task_id(
 
 
 # --- POST /simulate: current_lap-vs-session-progress validation ---
-# See docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+# See docs/internal/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
 # follow-up finding: current_lap=68 was silently accepted (and simulated!)
 # for a session whose real race was 44 laps. strategy_service
 # .validate_current_lap closes this; these tests cover the route-level call
@@ -466,7 +466,7 @@ def test_run_race_simulation_rejects_excessive_current_lap_when_route_bypassed(
 
 
 # --- GET /simulate/{task_id}: FAILURE surfaces a user-facing error message ---
-# See docs/day-deferred-fixes-session2-handoff.md item 12: SimulateTaskStatusResponse
+# See docs/internal/day-deferred-fixes-session2-handoff.md item 12: SimulateTaskStatusResponse
 # previously carried no failure reason at all, so a task FAILURE told the
 # frontend nothing beyond the bare status string.
 

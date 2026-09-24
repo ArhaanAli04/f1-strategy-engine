@@ -8,7 +8,7 @@ IS the real race distance — no FastF1 fetch is needed here, unlike
 backfill_lap_session_time.py's per-lap backfill.
 
 Deliberately scoped to Race.status == "completed" ONLY (see
-docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A's
+docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A's
 research-question-2 decision): a partially-live-ingested session (e.g. one
 where the ingestor was stopped mid-race, or is still status="scheduled"
 because ingest_historical.py never re-processed it — see CLAUDE.md's

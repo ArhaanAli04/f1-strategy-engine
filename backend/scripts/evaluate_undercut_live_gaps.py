@@ -1,6 +1,6 @@
 """Offline re-scoring of a live-ingested race's undercut scores: old gaps vs live gaps.
 
-docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B: for a live
+docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B: for a live
 session the undercut score was computed from summed lap times, which are wrong
 (lap 1 has no recorded time, so every gap that opened on lap 1 is missing). CP3
 moved live sessions onto F1's own live standings. This script measures what

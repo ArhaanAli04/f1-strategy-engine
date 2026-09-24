@@ -11,7 +11,7 @@ import { SimulatorPage } from "@/pages/SimulatorPage"
 import { useSessionStore } from "@/stores/sessionStore"
 import type { DriverResponse, SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
 
-// Item 12 (docs/day-deferred-fixes-session2-handoff.md): the initial
+// Item 12 (docs/internal/day-deferred-fixes-session2-handoff.md): the initial
 // POST /simulate rejection (validate_current_lap's 404/422) and the async
 // task-FAILURE path both previously told the user nothing beyond a bare
 // "Simulation failed." — these tests cover the fix, not the rest of the
@@ -182,7 +182,7 @@ describe("SimulatorPage — error surfacing (item 12)", () => {
 })
 
 // What-If Simulator multi-scenario rebuild, Checkpoint 4 — see
-// docs/core-feature-rebuild-whatif-simulator.md. Single Plan mode's own
+// docs/internal/core-feature-rebuild-whatif-simulator.md. Single Plan mode's own
 // existing payload shape is already covered by the two tests above (both
 // stay on the default mode); these cover Compare mode specifically.
 describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {

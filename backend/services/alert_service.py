@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 UNDERCUT_ALERT_THRESHOLD = 0.5
 
 # Situations where an undercut alert is not worth showing even when the score is
-# high (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). An
+# high (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). An
 # undercut alert means "pit now and come out ahead", so:
 # - a driver whose tyres are only a few laps old has just pitted — there is no
 #   further stop to take. Monza 2026: 45 of the 202 alert-eligible predictions

@@ -9,7 +9,7 @@ real chain once, end to end, against the running Docker stack:
 
 under a THROWAWAY race (season 2098) so nothing real is touched, then checks the
 result. It proves the wiring across process boundaries; it cannot prove anything
-about F1's live socket. See docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+about F1's live socket. See docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
 section 7c (V3).
 
     python -m backend.scripts.shadow_race run --until-lap 12            # smoke run

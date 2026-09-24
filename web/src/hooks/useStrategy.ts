@@ -164,7 +164,7 @@ export interface PitRecommendationView {
   // engine's own output, never the raw fallback.
   //
   // Backend now clamps predicted_pit_lap to the real race length once it's
-  // known (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
+  // known (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
   // A — prediction_worker._run_inference's optimal_pit_lap clamp), but two
   // gaps remain this flag exists for: (1) a row persisted BEFORE that fix
   // (a real race, e.g. the doc's own "Recommended: Lap 78" on a 53-lap

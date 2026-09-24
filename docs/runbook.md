@@ -1,20 +1,21 @@
 # Operational Runbook
 
 Procedures for rolling back a bad deploy, migration, or model; scaling for
-race day; and rotating secrets. Written Day 21, ahead of the Day 22
-Kubernetes deployment. Deployment names below (`f1-strategy-engine-backend`/
+race day; and rotating secrets. Deployment names below (`f1-strategy-engine-backend`/
 `f1-strategy-engine-worker`) are confirmed against the actual Helm chart's
 generated resource names (`{{ include "f1-strategy-engine.fullname" . }}-backend`/
-`-worker`) — verified directly against a running cluster on Day 24, not just
+`-worker`) — verified directly against a running local cluster, not just
 inferred from the templates.
 
-**Production is Fly.io, not Kubernetes (decided Day 24, real deploy landed
-Day 40 — see [Fly.io deployment](#flyio-deployment) below).**
+**The planned production host is Fly.io, not Kubernetes. The Fly.io deploy
+is prepared (`fly.toml`, the procedures below) but not live yet**, so the
+Fly.io sections below are the intended procedure, not a record of a running
+deployment. See [Fly.io deployment](#flyio-deployment).
 `infra/helm-chart/` and the kubectl/Helm procedures in this runbook (App
 rollback, the old Race day scaling procedure, the Kubernetes-secret half of
 Secret rotation) were built and validated only against the local Docker
-Desktop cluster (`-n local`; see CLAUDE.md's Deployment Strategy and Day
-22/24 notes) — there is no `production` Kubernetes namespace or cluster and
+Desktop cluster (`-n local`; see CLAUDE.md's Deployment Strategy and
+Architecture Decisions) — there is no `production` Kubernetes namespace or cluster and
 there never will be one; `infra/helm-chart/`/`infra/k8s/` remain local-only
 reference material, not something running in production. Every `-n
 production` command below is local-cluster procedure, not a real target —
@@ -204,6 +205,14 @@ ORDER BY c.name;
 
 ## Fly.io deployment
 
+> **Strategy revised 2026-09-25.** Demo Replay means the worker must run all
+> the time, so the plan below changes before the first deploy: `beat` is
+> merged into the worker, both machines stay on, and the region may move off
+> `sin`. See [DEPLOYMENT.md's Fly.io section](../DEPLOYMENT.md#production-deployment--flyio-planned)
+> for the reasoning, the cost comparison and the full to-do list. The commands
+> below still describe the original three-process-group setup until those
+> changes land.
+
 Single Fly app (`f1-strategy`, `fly.toml` at repo root) with three process
 groups sharing one build — `web` (FastAPI, always-on), `worker` (Celery,
 scaled to 0 except race weekends), `beat` (Celery Beat, same). See
@@ -388,7 +397,7 @@ effect until you restart the processes that serve predictions.
    # Local Docker Compose
    docker compose restart worker backend
 
-   # Kubernetes (Day 22+)
+   # Kubernetes (local cluster)
    kubectl rollout restart deployment/f1-strategy-engine-worker -n production
    kubectl rollout restart deployment/f1-strategy-engine-backend -n production
    ```
@@ -418,12 +427,17 @@ candidate after reviewing it:
 
 ## Race day scaling procedure (Fly.io)
 
+> **Being retired.** This procedure belongs to the original hybrid plan
+> (worker and beat off between races). Under the revised plan the worker runs
+> all the time, so there is nothing to scale up or down on race day. See
+> [DEPLOYMENT.md's Fly.io section](../DEPLOYMENT.md#production-deployment--flyio-planned).
+
 `worker`/`beat` rest at 0 machines between races (see `fly.toml`'s module
-comment) — this is the cost-saving side of the Day 40 hybrid deployment
+comment) — this is the cost-saving side of the hybrid deployment
 decision, not an incident response. `web` never needs scaling for this;
 it's always-on and everything it serves alone (dashboard, driver stats,
 historical races, pit-window/undercut/overview predictions — these run
-inline in `web` on a cache miss, not via Celery, see the Day 40
+inline in `web` on a cache miss, not via Celery, per the
 worker-dependency audit) keeps working the whole time regardless.
 
 1. **30+ minutes before a session:** scale `worker`/`beat` up.
@@ -461,8 +475,8 @@ worker-dependency audit) keeps working the whole time regardless.
    ```
 
    Only ever run **one** `beat` machine — Fly has no declarative
-   single-instance guarantee for a process group (confirmed Day 40
-   research), so this is operator discipline, not something the platform
+   single-instance guarantee for a process group (confirmed while
+   researching the Fly.io setup), so this is operator discipline, not something the platform
    enforces. Never scale `beat` above 1.
 
 5. **Scale back down** after the session ends:
@@ -474,7 +488,7 @@ worker-dependency audit) keeps working the whole time regardless.
 
 If you forget step 5, the cost impact is small (Fly's per-second billing
 means idle-but-running `worker`/`beat` cost roughly $9.24/month combined at
-the sizing in `fly.toml` — see CLAUDE.md's Day 40 cost research) but not
+the sizing in `fly.toml` — see `fly.toml`'s header comment) but not
 zero, and `beat` left running outside a race weekend just polls Ergast to
 no effect (see CLAUDE.md's Auto Race Detection section) rather than causing
 harm.
@@ -499,7 +513,7 @@ individual with access leaves the project.
      these are distinct from `.env`'s own `DATABASE_URL`/`REDIS_URL`, which
      point at docker-compose's local Postgres/Redis for local dev and are
      never used for a Kubernetes Secret (see `infra/k8s/create-secrets.sh`'s
-     header comment, corrected Day 24 after this exact confusion broke a
+     header comment, corrected after this exact confusion broke a
      local K8s deploy).
    - `SLACK_WEBHOOK_DEPLOY`: regenerate the incoming webhook URL in the Slack
      app configuration for the F1 Strategy Engine workspace.
@@ -521,7 +535,7 @@ individual with access leaves the project.
    **Local Kubernetes Secret (local dev cluster only, not production)** —
    never commit the plaintext value to any YAML file. Sealed Secrets is
    still deferred (see CLAUDE.md's Deferred Wiring); the interim mechanism,
-   confirmed working Day 24, is `infra/k8s/create-secrets.sh`, which reads
+   confirmed working on the local cluster, is `infra/k8s/create-secrets.sh`, which reads
    `.env` (including `SUPABASE_DATABASE_URL`/`UPSTASH_REDIS_URL` — update
    `.env` with the new value first) and recreates the Secret:
 

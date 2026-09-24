@@ -105,9 +105,9 @@ Android device required.
 
 ---
 
-## 3. Standalone setup (after Fly.io deployment, Day 40+)
+## 3. Standalone setup (after the backend is deployed to Fly.io)
 
-Once the backend is deployed to Fly.io (planned Day 40+), the app can run
+Once the backend is deployed to Fly.io (planned, not live yet), the app can run
 without any laptop nearby — point it at the deployed backend instead of a
 local Docker Compose stack, and build a standalone binary that doesn't need
 Metro running at all.
@@ -166,7 +166,7 @@ controls.
 
 - **Development (Section 1) needs your laptop running nearby, on the same
   WiFi, for the whole session.** No detached/standalone mode until Section 3
-  (Fly.io deployment, Day 40+).
+  (after the Fly.io deployment).
 - **iOS on a physical device needs a paid Apple Developer account
   ($99/year)** at every stage — development, standalone preview, and
   production. There's no free path to real iOS hardware; the iOS Simulator
@@ -184,7 +184,7 @@ controls.
   only been verified via `tsc`/Metro export, never run on a device — see
   `src/README.md`'s Testing Options for the full explanation.
 - **No physical device or emulator has been used to verify this project
-  yet** (as of Day 32) — every mobile checkpoint through Day 32 was verified
+  yet** — every mobile change so far was verified
   via `npx tsc --noEmit` + `npx expo export --platform ios` (full Metro
   module-graph resolution) + code review only. This setup guide is
   necessarily unverified against a real running app; if a step here doesn't

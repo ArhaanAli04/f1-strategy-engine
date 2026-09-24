@@ -46,8 +46,8 @@ logs for this tag).
 
 ## Known limitations
 
-- **The backend is not deployed to the cloud yet.** Fly.io deployment is
-  planned for Day 40. Until then, the desktop app (and web/mobile apps)
+- **The backend is not deployed to the cloud yet.** A Fly.io deployment is
+  planned. Until then, the desktop app (and web/mobile apps)
   need a locally running backend (`make dev` from the repo root) to show
   real data — `desktop/.env.production`'s `VITE_API_URL` currently points
   at a placeholder (`https://placeholder.fly.dev`) and will be updated to

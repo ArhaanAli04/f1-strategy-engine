@@ -173,7 +173,7 @@ async def test_persist_tire_stint_disposes_engine_on_success(
     mock_engine.dispose.assert_awaited_once()
 
 
-# --- _persist_session_total_laps (Issue A, docs/live-race-ingestion-and-
+# --- _persist_session_total_laps (Issue A, docs/internal/live-race-ingestion-and-
 # strategy-gaps-monza-2026.md — the live LapCount write path) ---
 
 

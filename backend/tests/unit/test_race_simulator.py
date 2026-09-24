@@ -108,7 +108,7 @@ def sc_model() -> SafetyCarModel:
 
 
 # --- _tire_deg_predictions schema-drift backstop ---
-# Covers docs/simulator-issues-wet-model-and-position-context.md Part A's
+# Covers docs/internal/simulator-issues-wet-model-and-position-context.md Part A's
 # recommendation 2a: a model-shape mismatch or a raising predict() must
 # degrade only that compound group, never crash the whole simulation. These
 # call _tire_deg_predictions directly (no numba path involved) so they run
@@ -604,7 +604,7 @@ def test_sc_lap_time_derived_from_field_median_baseline(
 
 
 # --- projected_pit_laps / finish_ahead_probability (What-If Simulator
-# rebuild part (b): see docs/core-feature-rebuild-whatif-simulator.md §7) ---
+# rebuild part (b): see docs/internal/core-feature-rebuild-whatif-simulator.md §7) ---
 
 
 @pytest.mark.unit
