@@ -461,7 +461,10 @@ async def validate_current_lap(db: AsyncSession, session_id: uuid.UUID, current_
 
 
 async def _current_state(
-    db: AsyncSession, session_id: uuid.UUID, driver_id: uuid.UUID
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> dict[str, Any]:
     """Latest lap + circuit + real (or estimated) total-laps context for one driver.
 
@@ -469,6 +472,11 @@ async def _current_state(
         db: Async DB session.
         session_id: Session to read.
         driver_id: Driver to read.
+        as_of_lap: Only consider laps up to and including this one. None
+            reads the driver's latest stored lap. A per-lap prediction must
+            pass its own lap: for a race already fully in lap_data (a replay
+            of an ingested race) "latest" is the last lap of the race, not
+            the lap being predicted.
     Returns:
         Dict with lap_number, compound, tyre_age_laps, position, total_laps, circuit_id,
         circuit_name (the latter needed to resolve this driver/circuit's real
@@ -477,12 +485,12 @@ async def _current_state(
     Raises:
         NotFoundError: No lap_data row exists yet for this driver/session.
     """
-    lap_query = (
-        select(LapData)
-        .where(LapData.session_id == session_id, LapData.driver_id == driver_id)
-        .order_by(LapData.lap_number.desc())
-        .limit(1)
+    lap_query = select(LapData).where(
+        LapData.session_id == session_id, LapData.driver_id == driver_id
     )
+    if as_of_lap is not None:
+        lap_query = lap_query.where(LapData.lap_number <= as_of_lap)
+    lap_query = lap_query.order_by(LapData.lap_number.desc()).limit(1)
     lap = (await db.execute(lap_query)).scalar_one_or_none()
     if lap is None:
         raise NotFoundError(f"No lap data for driver {driver_id} in session {session_id}")
@@ -1765,6 +1773,7 @@ async def _undercut_overcut_probability(
     session_id: uuid.UUID,
     pitting_now_driver_id: uuid.UUID,
     pitting_next_lap_driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> dict[str, Any]:
     """Shared projection backing get_undercut_score/get_overcut_score.
 
@@ -1791,14 +1800,16 @@ async def _undercut_overcut_probability(
         session_id: Session to evaluate.
         pitting_now_driver_id: Driver assumed to pit this lap.
         pitting_next_lap_driver_id: Driver assumed to pit next lap.
+        as_of_lap: Evaluate both drivers as of this lap (see _current_state);
+            None uses each driver's latest stored lap.
     Returns:
         Dict with probability_pit_now_gains_position, projected_gap_seconds (mean
         over sims; positive = pitting_now_driver_id ends up ahead), n_laps_projected.
     """
     models = _load_models()
     maps_cache = _load_encoding_maps()
-    now_state = await _current_state(db, session_id, pitting_now_driver_id)
-    next_state = await _current_state(db, session_id, pitting_next_lap_driver_id)
+    now_state = await _current_state(db, session_id, pitting_now_driver_id, as_of_lap)
+    next_state = await _current_state(db, session_id, pitting_next_lap_driver_id, as_of_lap)
 
     # Positive deficit => pitting_now_driver_id currently trails pitting_next_lap_driver_id.
     live_deficit = await _live_gap_deficit(
@@ -1913,6 +1924,20 @@ async def _undercut_overcut_probability(
     }
 
 
+# The undercut/overcut keys include the lap when a per-lap prediction asks for
+# one, so every live lap adds a key per neighbour pair. Their ":last_good"
+# fallback copies must expire rather than pile up; a day comfortably outlasts
+# a race.
+UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS = 86400
+
+
+def _lap_key_suffix(as_of_lap: int | None) -> str:
+    # A lap-bounded score is a different answer from the latest-lap one and
+    # from every other lap's, so it needs its own key: without it, a lap-by-lap
+    # replay or precompute would reuse lap N's cached score for lap N+1.
+    return "" if as_of_lap is None else f":lap:{as_of_lap}"
+
+
 def _key_undercut(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -1921,11 +1946,15 @@ def _key_undercut(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
     target_driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> str:
-    return f"f1:{season}:{round_number}:strategy:{driver_id}:undercut:{target_driver_id}"
+    return (
+        f"f1:{season}:{round_number}:strategy:{driver_id}:undercut:{target_driver_id}"
+        f"{_lap_key_suffix(as_of_lap)}"
+    )
 
 
-@cacheable(ttl=30, key_fn=_key_undercut)
+@cacheable(ttl=30, key_fn=_key_undercut, last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS)
 async def get_undercut_score(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -1934,6 +1963,7 @@ async def get_undercut_score(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
     target_driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> dict[str, Any]:
     """Probability driver_id gains track position by pitting now vs. target pitting next lap.
 
@@ -1944,13 +1974,15 @@ async def get_undercut_score(
         session_id: Session to evaluate.
         driver_id: The driver considering an undercut.
         target_driver_id: The rival being undercut.
+        as_of_lap: Evaluate both drivers as of this lap (a per-lap
+            prediction's own lap); None uses their latest stored laps.
     Returns:
         See _undercut_overcut_probability, plus target_driver_id and
         recommended_action ("PIT NOW" if probability_pit_now_gains_position
         >= 0.5, else "STAY OUT").
     """
     result = await _undercut_overcut_probability(
-        client, db, season, round_number, session_id, driver_id, target_driver_id
+        client, db, season, round_number, session_id, driver_id, target_driver_id, as_of_lap
     )
     recommended_action = (
         "PIT NOW" if result["probability_pit_now_gains_position"] >= 0.5 else "STAY OUT"
@@ -1970,11 +2002,15 @@ def _key_overcut(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
     target_driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> str:
-    return f"f1:{season}:{round_number}:strategy:{driver_id}:overcut:{target_driver_id}"
+    return (
+        f"f1:{season}:{round_number}:strategy:{driver_id}:overcut:{target_driver_id}"
+        f"{_lap_key_suffix(as_of_lap)}"
+    )
 
 
-@cacheable(ttl=30, key_fn=_key_overcut)
+@cacheable(ttl=30, key_fn=_key_overcut, last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS)
 async def get_overcut_score(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -1983,6 +2019,7 @@ async def get_overcut_score(
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
     target_driver_id: uuid.UUID,
+    as_of_lap: int | None = None,
 ) -> dict[str, Any]:
     """Probability driver_id retains/gains track position by staying out while target pits now.
 
@@ -1997,7 +2034,7 @@ async def get_overcut_score(
         projected_gap_seconds (driver_id's perspective), n_laps_projected.
     """
     result = await _undercut_overcut_probability(
-        client, db, season, round_number, session_id, target_driver_id, driver_id
+        client, db, season, round_number, session_id, target_driver_id, driver_id, as_of_lap
     )
     return {
         "target_driver_id": str(target_driver_id),
@@ -2061,10 +2098,15 @@ def _first_pit_laps_over_threshold_batch(
         (predicted_pit_lap, pit_probability_at_that_lap) arrays, one entry
         per driver. For any driver who never crosses the threshold within
         their horizon, holds that driver's horizon-final lap and probability
-        — same fallback as the single-driver version.
+        — same fallback as the single-driver version. A driver with no laps
+        left (on or past the final lap) gets their current lap and 0.0: no
+        stop is coming.
     """
     n = len(current_laps)
-    horizon = np.minimum(COMPETITOR_STRATEGY_HORIZON_LAPS, np.maximum(total_laps - current_laps, 1))
+    # The search never looks past the finish. It used to be floored at one
+    # lap, so on the final lap every driver was "predicted" to pit on lap
+    # total_laps + 1 (Azerbaijan GP 2026: lap 52 of 51).
+    horizon = np.minimum(COMPETITOR_STRATEGY_HORIZON_LAPS, np.maximum(total_laps - current_laps, 0))
     last_lap = current_laps.copy()
     last_prob = np.zeros(n, dtype=np.float64)
     crossed = np.zeros(n, dtype=bool)

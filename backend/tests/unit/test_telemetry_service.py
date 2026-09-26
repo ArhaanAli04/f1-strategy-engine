@@ -566,3 +566,67 @@ async def test_get_driver_car_numbers_returns_empty_list_when_session_not_live(
     result = await telemetry_service.get_driver_car_numbers(fakeredis, 2026, 10)
 
     assert result == []
+
+
+def _live_row(
+    driver_id: uuid.UUID, lap_number: int, position: int | None, summed: float
+) -> dict[str, Any]:
+    """A live-ingested lap_data row: no session_elapsed_seconds, summed lap times only."""
+    return {
+        "driver_id": driver_id,
+        "lap_number": lap_number,
+        "position": position,
+        "session_elapsed_seconds": None,
+        "fallback_cumulative_seconds": summed,
+    }
+
+
+@pytest.mark.unit
+async def test_compute_session_gaps_orders_a_live_race_by_stored_position(
+    mock_db_session: AsyncMock,
+) -> None:
+    """Azerbaijan GP 2026: the summed lap times (no lap-1 time) put VER 4 s ahead
+    of RUS, but the stored lap-51 positions had the real result, RUS first."""
+    rus, ver, ant = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    mock_db_session.execute.return_value = _rows_result(
+        [
+            _live_row(ver, 51, 2, 5766.2),
+            _live_row(rus, 51, 1, 5770.2),
+            _live_row(ant, 51, 5, 5790.0),
+        ]
+    )
+
+    result = await telemetry_service._compute_session_gaps(mock_db_session, uuid.uuid4())
+
+    gaps = result["gaps"]
+    assert [g["driver_id"] for g in gaps] == [str(rus), str(ver), str(ant)]
+    assert [g["position"] for g in gaps] == [1, 2, 3]
+    # VER's summed time is lower than the winner's: that gap would be -4.0 s,
+    # which contradicts the order, so no gap is shown rather than a wrong one.
+    assert gaps[1]["gap_to_ahead_seconds"] is None
+    assert gaps[0]["gap_to_behind_seconds"] is None
+    # ANT's summed time is consistent with the order, so that gap is kept.
+    assert gaps[2]["gap_to_ahead_seconds"] == pytest.approx(5790.0 - 5766.2)
+
+
+@pytest.mark.unit
+async def test_compute_session_gaps_uses_time_when_a_row_has_no_position(
+    mock_db_session: AsyncMock,
+) -> None:
+    placed, unplaced_fast, unplaced_slow = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    mock_db_session.execute.return_value = _rows_result(
+        [
+            _live_row(unplaced_slow, 20, None, 1830.0),
+            _live_row(placed, 20, 3, 1850.0),
+            _live_row(unplaced_fast, 20, None, 1810.0),
+        ]
+    )
+
+    result = await telemetry_service._compute_session_gaps(mock_db_session, uuid.uuid4())
+
+    # Placed cars first, then the unplaced ones by time.
+    assert [g["driver_id"] for g in result["gaps"]] == [
+        str(placed),
+        str(unplaced_fast),
+        str(unplaced_slow),
+    ]

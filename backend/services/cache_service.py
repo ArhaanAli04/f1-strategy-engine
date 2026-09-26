@@ -198,7 +198,9 @@ def cache_lock(client: aioredis.Redis, key: str) -> Lock:  # type: ignore[type-a
     )
 
 
-def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
+def cacheable(
+    ttl: int | None, key_fn: Callable[..., str], last_good_ttl: int | None = None
+) -> Callable[[F], F]:
     """Cache-aside decorator for async service methods, with single-flight locking.
 
     Convention: the decorated function's first positional argument must be the Redis
@@ -222,6 +224,12 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
             Used for static data that only changes via manual cache invalidation.
         key_fn: Builds the cache key from the decorated function's arguments (called
             with the same *args, **kwargs the function itself receives).
+        last_good_ttl: Seconds the ":last_good" fallback copy of each key is
+            kept, or None (the default) to keep it indefinitely. Set it when
+            key_fn produces an unbounded number of keys (e.g. one per lap):
+            a no-expiry copy of each would otherwise accumulate forever — the
+            per-lap undercut/overcut keys left 1,860 of them from a single
+            race (Azerbaijan GP 2026).
     Returns:
         Decorator that wraps an async function with cache-get-or-compute-and-set.
     """
@@ -251,7 +259,7 @@ def cacheable(ttl: int | None, key_fn: Callable[..., str]) -> Callable[[F], F]:
                     return last_good
                 raise
             await cache_set(client, key, result, ttl)
-            await cache_set(client, last_good_key, result, None)
+            await cache_set(client, last_good_key, result, last_good_ttl)
             return result
 
         @functools.wraps(func)

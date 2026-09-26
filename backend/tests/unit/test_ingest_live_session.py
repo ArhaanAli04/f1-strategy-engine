@@ -369,6 +369,88 @@ def test_retired_car_is_left_out_of_the_published_standings() -> None:
     assert [(e["driver_id"], e["position"]) for e in payload["gaps"]] == [("d1", 1), ("d3", 2)]
 
 
+# --- final standings (gaps:final), written once the leader has finished ---
+
+
+def _finishing_ingestor(
+    laps_seen: dict[str, int], total_laps: int | None
+) -> tuple[ingest_live_session.F1SignalRIngestor, MagicMock]:
+    redis_mock = MagicMock()
+    ingestor = ingest_live_session.F1SignalRIngestor(
+        season=2026,
+        round_number=15,
+        session_id="s",
+        car_number_to_driver_id={"63": "RUS", "1": "VER", "12": "ANT"},
+        driver_code_to_id={},
+        redis_client=redis_mock,
+        no_auth=True,
+    )
+    ingestor._car_live_gap_state = {
+        "63": _gap_state(1, None),
+        "1": _gap_state(2, 1.5),
+        "12": _gap_state(3, 9.0),
+    }
+    ingestor._laps_seen = laps_seen
+    ingestor._total_laps_dispatched = total_laps
+    return ingestor, redis_mock
+
+
+def _written_keys(redis_mock: MagicMock) -> dict[str, tuple[int, dict[str, Any]]]:
+    return {
+        call.args[0]: (call.args[1], json.loads(call.args[2]))
+        for call in redis_mock.setex.call_args_list
+    }
+
+
+@pytest.mark.unit
+def test_final_standings_are_not_written_before_the_leader_finishes() -> None:
+    ingestor, redis_mock = _finishing_ingestor({"63": 50, "1": 50, "12": 50}, total_laps=51)
+
+    ingestor._publish_live_gaps()
+
+    assert list(_written_keys(redis_mock)) == ["f1:2026:15:gaps"]
+
+
+@pytest.mark.unit
+def test_final_standings_are_not_written_while_the_race_distance_is_unknown() -> None:
+    ingestor, redis_mock = _finishing_ingestor({"63": 51, "1": 51, "12": 50}, total_laps=None)
+
+    ingestor._publish_live_gaps()
+
+    assert list(_written_keys(redis_mock)) == ["f1:2026:15:gaps"]
+
+
+@pytest.mark.unit
+def test_final_standings_are_written_once_the_leader_has_completed_the_distance() -> None:
+    ingestor, redis_mock = _finishing_ingestor({"63": 51, "1": 50, "12": 50}, total_laps=51)
+
+    ingestor._publish_live_gaps()
+
+    written = _written_keys(redis_mock)
+    ttl, final = written["f1:2026:15:gaps:final"]
+    assert ttl == 30 * 24 * 60 * 60
+    assert final["source"] == "final"
+    assert [e["driver_id"] for e in final["gaps"]] == ["RUS", "VER", "ANT"]
+    assert written["f1:2026:15:gaps"][1]["source"] == "live"  # live key unchanged
+
+
+@pytest.mark.unit
+def test_final_standings_follow_the_rest_of_the_field_across_the_line() -> None:
+    ingestor, redis_mock = _finishing_ingestor({"63": 51, "1": 50, "12": 50}, total_laps=51)
+    ingestor._publish_live_gaps()
+
+    ingestor._laps_seen.update({"1": 51, "12": 51})
+    ingestor._publish_live_gaps()
+
+    final_writes = [
+        json.loads(call.args[2])
+        for call in redis_mock.setex.call_args_list
+        if call.args[0] == "f1:2026:15:gaps:final"
+    ]
+    assert len(final_writes) == 2
+    assert [e["lap_number"] for e in final_writes[-1]["gaps"]] == [51, 51, 51]
+
+
 # --- lapped cars: F1 sends "1 L" / "1L" / "52L" ---
 
 
@@ -619,6 +701,50 @@ def test_is_plausible_lap_magnitude_backstop_rejects_a_red_flag_scale_lap() -> N
 
 # --- _handle_lap_count (Issue A, docs/internal/live-race-ingestion-and-strategy-
 # gaps-monza-2026.md) ---
+
+
+def _record_total_laps_dispatches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    dispatched: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        ingest_live_session.update_session_total_laps,
+        "delay",
+        lambda session_id, total_laps: dispatched.append((session_id, total_laps)),
+    )
+    return dispatched
+
+
+@pytest.mark.unit
+def test_subscribe_snapshot_lap_count_stores_the_race_distance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live, TotalLaps arrives ONLY in the Subscribe snapshot. This is the exact
+    LapCount shape recorded at the start of the Azerbaijan GP 2026."""
+    ingestor = _make_ingestor()
+    dispatched = _record_total_laps_dispatches(monkeypatch)
+
+    ingestor._on_subscribe_result(
+        SimpleNamespace(result={"LapCount": {"CurrentLap": 1, "TotalLaps": 51, "_kf": True}})
+    )
+
+    assert dispatched == [("session-1", 51)]
+
+
+@pytest.mark.unit
+def test_later_lap_count_messages_without_total_laps_change_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the snapshot, the live feed's LapCount carries only CurrentLap."""
+    ingestor = _make_ingestor()
+    dispatched = _record_total_laps_dispatches(monkeypatch)
+    ingestor._on_subscribe_result(
+        SimpleNamespace(result={"LapCount": {"CurrentLap": 1, "TotalLaps": 51}})
+    )
+
+    for lap in (2, 3, 51):
+        ingestor._handle_lap_count({"CurrentLap": lap})
+
+    assert dispatched == [("session-1", 51)]
+    assert ingestor._total_laps_dispatched == 51
 
 
 @pytest.mark.unit

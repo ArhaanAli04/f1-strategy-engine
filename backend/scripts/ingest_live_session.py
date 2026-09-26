@@ -141,6 +141,16 @@ _MAX_PLAUSIBLE_LAP_SECONDS = 300.0
 # flowing, and still serves as the fallback once this key naturally expires.
 _GAPS_KEY_TTL_SECONDS = 30
 
+# f1:{season}:{round}:gaps:final — the finishing order on the road, written
+# once the leader has completed the race distance and kept current while the
+# rest of the field finishes. The live key above lapses 30 s after the last
+# timing message; without this, telemetry_service.get_session_gaps fell back to
+# its DB reconstruction, which for a live-ingested race has no lap-1 times and
+# showed the wrong order (Azerbaijan GP 2026: VER "winning" by 4 s over the real
+# winner RUS). It also tells race_service a race has concluded, which is why it
+# must never be written mid-race.
+_FINAL_GAPS_KEY_TTL_SECONDS = 30 * 24 * 60 * 60
+
 # f1:{season}:{round}:ingest_stats — a JSON snapshot of this session's counters
 # (see F1SignalRIngestor.stats_snapshot), refreshed at most this often and kept
 # a day, so what the live feed actually did can be read after the race.
@@ -1117,6 +1127,25 @@ class F1SignalRIngestor:
             _GAPS_KEY_TTL_SECONDS,
             json.dumps(payload),
         )
+        if self._leader_has_finished(entries):
+            # "source": "final", not "live": this key is not a live race to
+            # live_race_detection (it only matches keys ending in ":gaps").
+            final_payload = {**payload, "source": "final"}
+            self._redis.setex(
+                f"f1:{self._season}:{self._round_number}:gaps:final",
+                _FINAL_GAPS_KEY_TTL_SECONDS,
+                json.dumps(final_payload),
+            )
+
+    def _leader_has_finished(self, entries: list[dict[str, Any]]) -> bool:
+        """Whether the car in first place has completed the race distance.
+
+        Needs the real distance from LapCount (_total_laps_dispatched); until
+        that is known — or in a race stopped short of it, e.g. a red flag not
+        restarted — this stays False and no final standings are written.
+        """
+        total_laps = self._total_laps_dispatched
+        return total_laps is not None and entries[0]["lap_number"] >= total_laps
 
     def stats_snapshot(self) -> dict[str, Any]:
         """Counters for this session: what the live feed actually did.
@@ -1199,6 +1228,14 @@ class F1SignalRIngestor:
         IntervalToPositionAhead streamed correctly on "feed" pushes the whole
         time, but Position never appeared in any of them, so _publish_live_gaps
         silently never had a position to key off and never wrote anything.
+        LapCount is read here too: live, F1 sends TotalLaps only in this
+        snapshot ({"CurrentLap": 1, "TotalLaps": 51}); every later LapCount
+        feed message carries just CurrentLap — confirmed from the Azerbaijan
+        GP 2026 recording. Without it sessions.total_laps was never stored
+        for that race, so pit laps went unclamped (up to lap 91 of 51) and
+        the pit-window recommendation was missing on 967 of 976 predictions.
+        (F1's archive is different — its first LapCount message does carry
+        TotalLaps — which is why the V3 shadow race never showed this.)
         """
         try:
             result = getattr(message, "result", None)
@@ -1211,6 +1248,9 @@ class F1SignalRIngestor:
             driver_list = result.get("DriverList")
             if isinstance(driver_list, dict):
                 self._handle_driver_list(driver_list)
+            lap_count = result.get("LapCount")
+            if isinstance(lap_count, dict):
+                self._handle_lap_count(lap_count)
             timing_app_data = result.get("TimingAppData")
             if isinstance(timing_app_data, dict):
                 self._handle_timing_app_data(timing_app_data)

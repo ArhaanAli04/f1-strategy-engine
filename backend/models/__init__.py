@@ -1,6 +1,11 @@
 from backend.models.driver import Driver, DriverContract, Team
 from backend.models.race import Circuit, Race, Session
-from backend.models.replay import ReplayAlertEvent, ReplayGapSnapshot, ReplayLapTiming
+from backend.models.replay import (
+    ReplayAlertEvent,
+    ReplayCarNumber,
+    ReplayGapSnapshot,
+    ReplayLapTiming,
+)
 from backend.models.strategy import PitEvent, StrategyPrediction
 from backend.models.telemetry import DriverPosition, LapData, SectorTime, TireStint
 from backend.models.user import Alert, Subscription, User
@@ -19,6 +24,7 @@ __all__ = [
     "ReplayLapTiming",
     "ReplayGapSnapshot",
     "ReplayAlertEvent",
+    "ReplayCarNumber",
     "StrategyPrediction",
     "PitEvent",
     "User",

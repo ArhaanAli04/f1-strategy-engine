@@ -108,6 +108,43 @@ def test_race_within_grace_window_triggers_launch() -> None:
     assert "R" in argv
 
 
+def _launches_for_start(race_start: datetime) -> bool:
+    """Run one detection poll against a schedule with a single race; did it launch?"""
+    settings = MagicMock(auto_race_detection_enabled=True)
+    mock_ergast_instance = MagicMock()
+    mock_ergast_instance.get_race_schedule.return_value = _schedule_df(15, race_start)
+    fake_redis = fakeredis_lib.FakeRedis(decode_responses=True)
+
+    with (
+        patch.object(race_detection_worker, "get_live_timing_settings", return_value=settings),
+        patch("fastf1.ergast.Ergast", return_value=mock_ergast_instance),
+        patch("redis.Redis.from_url", return_value=fake_redis),
+        patch("backend.workers.race_detection_worker.subprocess.Popen") as mock_popen,
+    ):
+        race_detection_worker.check_for_live_session()
+
+    return bool(mock_popen.called)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("minutes_until_start", "launches"),
+    [
+        (11, False),  # too early
+        (9, True),  # inside the 10-minute lead: connect before the lights go out
+        (5, True),
+        (0, True),
+        (-29, True),  # still inside the 30-minute grace window after the start
+        (-31, False),
+    ],
+)
+def test_launch_window_opens_ten_minutes_before_the_start(
+    minutes_until_start: int, launches: bool
+) -> None:
+    race_start = datetime.now(UTC) + timedelta(minutes=minutes_until_start)
+    assert _launches_for_start(race_start) is launches
+
+
 @pytest.mark.unit
 def test_already_triggered_skips_second_launch() -> None:
     """Simulates two consecutive 5-minute polls landing on the same race."""

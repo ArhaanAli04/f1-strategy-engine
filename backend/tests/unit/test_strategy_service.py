@@ -150,6 +150,117 @@ async def test_current_state_falls_back_to_max_lap_number_when_total_laps_unset(
     assert mock_db_session.execute.call_count == 3
 
 
+def _compiled_lap_query(mock_db_session: AsyncMock) -> str:
+    """SQL of _current_state's first query (the lap lookup), with values inlined."""
+    statement = mock_db_session.execute.call_args_list[0].args[0]
+    return str(statement.compile(compile_kwargs={"literal_binds": True}))
+
+
+@pytest.mark.unit
+async def test_current_state_bounds_lap_lookup_to_as_of_lap(
+    mock_db_session: AsyncMock,
+) -> None:
+    """A per-lap prediction's state must come from that lap, not the race's last
+    lap: for an already-ingested race, the latest row is the end of the race."""
+    lap = _fake_lap(lap_number=46, compound="HARD", tyre_age_laps=3, position=5)
+    mock_db_session.execute.side_effect = _current_state_side_effects(
+        lap, total_laps=52, circuit_id=uuid.uuid4()
+    )
+
+    state = await strategy_service._current_state(
+        mock_db_session, uuid.uuid4(), uuid.uuid4(), as_of_lap=46
+    )
+
+    assert "lap_data.lap_number <= 46" in _compiled_lap_query(mock_db_session)
+    assert state["lap_number"] == 46
+
+
+@pytest.mark.unit
+async def test_current_state_without_as_of_lap_reads_latest_lap(
+    mock_db_session: AsyncMock,
+) -> None:
+    lap = _fake_lap(lap_number=52, compound="HARD", tyre_age_laps=9, position=5)
+    mock_db_session.execute.side_effect = _current_state_side_effects(
+        lap, total_laps=52, circuit_id=uuid.uuid4()
+    )
+
+    await strategy_service._current_state(mock_db_session, uuid.uuid4(), uuid.uuid4())
+
+    assert "<=" not in _compiled_lap_query(mock_db_session)
+
+
+@pytest.mark.unit
+def test_undercut_and_overcut_cache_keys_include_the_lap_only_when_given() -> None:
+    driver_id, target_id = uuid.uuid4(), uuid.uuid4()
+    # The key functions ignore the client and db; they only receive them
+    # because @cacheable calls key_fn with the decorated function's arguments.
+    unused_client, unused_db = MagicMock(), AsyncMock()
+    args = (unused_client, unused_db, SEASON, ROUND_NUMBER, uuid.uuid4(), driver_id, target_id)
+    base = f"f1:{SEASON}:{ROUND_NUMBER}:strategy:{driver_id}"
+
+    assert strategy_service._key_undercut(*args) == f"{base}:undercut:{target_id}"
+    assert strategy_service._key_overcut(*args) == f"{base}:overcut:{target_id}"
+    assert (
+        strategy_service._key_undercut(*args, as_of_lap=46) == f"{base}:undercut:{target_id}:lap:46"
+    )
+    assert (
+        strategy_service._key_overcut(*args, as_of_lap=46) == f"{base}:overcut:{target_id}:lap:46"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("as_of_lap", [None, 46])
+async def test_undercut_and_overcut_read_both_drivers_as_of_the_given_lap(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    as_of_lap: int | None,
+) -> None:
+    """Both drivers' states are read as of the same lap, for both scores, and
+    each lap gets its own cache entry."""
+    session_id, driver_id, target_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    state_calls: list[tuple[uuid.UUID, int | None]] = []
+
+    async def _state(
+        db: Any, session: uuid.UUID, driver: uuid.UUID, as_of: int | None = None
+    ) -> dict[str, Any]:
+        state_calls.append((driver, as_of))
+        return {
+            "lap_number": 46,
+            "compound": "MEDIUM",
+            "tyre_age_laps": 12,
+            "position": 4,
+            "total_laps": 52,
+            "circuit_id": uuid.uuid4(),
+            "circuit_name": "Test Circuit",
+        }
+
+    async def _elapsed(db: Any, session: uuid.UUID, driver: uuid.UUID, up_to_lap: int) -> float:
+        return 1000.0
+
+    monkeypatch.setattr(strategy_service, "_current_state", _state)
+    monkeypatch.setattr(strategy_service, "_cumulative_race_time", _elapsed)
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {"tire_deg_medium.pkl": _constant_delta_pipeline(0.1)},
+    )
+    args = (fakeredis, AsyncMock(), SEASON, ROUND_NUMBER, session_id, driver_id, target_id)
+
+    await strategy_service.get_undercut_score(*args, as_of_lap=as_of_lap)
+    await strategy_service.get_overcut_score(*args, as_of_lap=as_of_lap)
+
+    assert [as_of for _, as_of in state_calls] == [as_of_lap] * 4
+    assert {driver for driver, _ in state_calls} == {driver_id, target_id}
+    suffix = "" if as_of_lap is None else f":lap:{as_of_lap}"
+    base = f"f1:{SEASON}:{ROUND_NUMBER}:strategy:{driver_id}"
+    assert await fakeredis.exists(f"{base}:undercut:{target_id}{suffix}")
+    assert await fakeredis.exists(f"{base}:overcut:{target_id}{suffix}")
+    # One key per pair per lap: their fallback copies must expire, not pile up.
+    for kind in ("undercut", "overcut"):
+        ttl = await fakeredis.ttl(f"{base}:{kind}:{target_id}{suffix}:last_good")
+        assert 0 < ttl <= strategy_service.UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS
+
+
 def _fake_competitor_lap(
     driver_id: uuid.UUID, lap_number: int, compound: str, tyre_age_laps: int, position: int
 ) -> SimpleNamespace:
@@ -798,6 +909,76 @@ def test_first_pit_laps_batch_passes_the_real_fuel_penalty_not_zeros(
     flat_fuel = np.concatenate(captured_fuel)
     order = np.argsort(flat_laps)
     assert np.all(np.diff(flat_fuel[order]) < 0.0)
+
+
+def _search_pit_laps(
+    monkeypatch: pytest.MonkeyPatch, current_laps: list[int], total_laps: int, pit_prob: float
+) -> tuple[np.ndarray, np.ndarray, list[float]]:
+    """Run the competitor pit-lap search with a constant pit model.
+
+    Returns the predicted laps, their probabilities, and every lap the search
+    asked the models about.
+    """
+    searched: list[float] = []
+
+    def _life_remaining(pipeline: Any, lap_number: np.ndarray, *args: Any) -> np.ndarray:
+        searched.extend(np.asarray(lap_number, dtype=np.float64).tolist())
+        return np.full(len(lap_number), 30)
+
+    monkeypatch.setattr(tire_deg_model, "predict_life_remaining_batch", _life_remaining)
+    pit_model = MagicMock()
+    pit_model.predict_proba.side_effect = lambda features: np.column_stack(
+        [np.full(len(features), 1 - pit_prob), np.full(len(features), pit_prob)]
+    )
+    n = len(current_laps)
+    laps, probabilities = strategy_service._first_pit_laps_over_threshold_batch(
+        pit_model,
+        {"tire_deg_medium.pkl": object()},
+        {},
+        [str(uuid.uuid4()) for _ in range(n)],
+        ["MEDIUM"] * n,
+        "Test Circuit",
+        np.array(current_laps),
+        np.full(n, 8),
+        np.arange(1, n + 1),
+        np.full(n, 5.0),
+        np.full(n, 5.0),
+        np.zeros(n),
+        total_laps,
+    )
+    return laps, probabilities, searched
+
+
+@pytest.mark.unit
+def test_competitor_pit_search_on_the_final_lap_predicts_no_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Azerbaijan GP 2026: on lap 51 of 51 every driver was shown pitting on lap 52."""
+    laps, probabilities, searched = _search_pit_laps(monkeypatch, [51], 51, pit_prob=0.9)
+
+    assert laps.tolist() == [51]
+    assert probabilities.tolist() == [0.0]
+    assert searched == []  # nothing past the finish is ever evaluated
+
+
+@pytest.mark.unit
+def test_competitor_pit_search_never_looks_past_the_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    laps, _, searched = _search_pit_laps(monkeypatch, [48, 51], 51, pit_prob=0.1)
+
+    assert max(searched) == 51
+    assert laps.tolist() == [51, 51]  # lap 48 searches 49-51; lap 51 searches nothing
+
+
+@pytest.mark.unit
+def test_competitor_pit_search_mid_race_still_uses_the_full_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    laps, _, searched = _search_pit_laps(monkeypatch, [20], 51, pit_prob=0.1)
+
+    assert sorted(searched) == [float(lap) for lap in range(21, 36)]  # 15 laps ahead
+    assert laps.tolist() == [35]
 
 
 @pytest.mark.unit

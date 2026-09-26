@@ -107,3 +107,30 @@ async def test_cacheable_hit_skips_computation_and_miss_writes_cache(
     second_result = await _compute(fakeredis, "a")
     assert second_result == {"value": "a"}
     assert call_count == 1  # cache hit — no recomputation
+
+
+@pytest.mark.unit
+async def test_cacheable_keeps_the_last_good_copy_indefinitely_by_default(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    @cache_service.cacheable(ttl=30, key_fn=lambda client: "f1:test:default")
+    async def _compute(client: Any) -> dict[str, str]:
+        return {"value": "a"}
+
+    await _compute(fakeredis)
+
+    assert 0 < await fakeredis.ttl("f1:test:default") <= 30
+    assert await fakeredis.ttl("f1:test:default:last_good") == -1  # no expiry
+
+
+@pytest.mark.unit
+async def test_cacheable_expires_the_last_good_copy_when_asked(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    @cache_service.cacheable(ttl=30, key_fn=lambda client: "f1:test:bounded", last_good_ttl=600)
+    async def _compute(client: Any) -> dict[str, str]:
+        return {"value": "a"}
+
+    await _compute(fakeredis)
+
+    assert 0 < await fakeredis.ttl("f1:test:bounded:last_good") <= 600
