@@ -9,7 +9,10 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
-    "sqlalchemy[asyncio]>=2.0.30",
+    # <2.1: an unpinned CI install picked up 2.1.1 (2026-09-26) while the
+    # project is developed and tested on 2.0.x; its changed result typing
+    # failed mypy --strict. Upgrade to 2.1 deliberately, with the full suite.
+    "sqlalchemy[asyncio]>=2.0.30,<2.1",
     "alembic>=1.13.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
