@@ -13,7 +13,9 @@ from typing import Annotated, Any
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.database import get_db
 from backend.core.rate_limit import limiter, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import get_current_user
@@ -35,13 +37,18 @@ router = APIRouter(prefix="/demo", tags=["demo"])
     response_model=CuratedSessionsResponse,
     summary="List the curated Demo Replay sessions",
     description=(
-        "Returns the three fixed curated sessions with race name, circuit, "
-        "lap window, and an estimated duration."
+        "Returns the curated sessions (at most three) with this database's "
+        "session_id, race name, circuit, lap window, and an estimated duration. "
+        "A curated race not ingested in this database is left out."
     ),
 )
 @limiter.limit(rate_limit_value)
-async def list_demo_sessions(request: Request) -> CuratedSessionsResponse:
-    return demo_service.list_curated_sessions()
+async def list_demo_sessions(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+) -> CuratedSessionsResponse:
+    return await demo_service.list_curated_sessions(redis_client, db)
 
 
 @router.get(
@@ -94,10 +101,11 @@ async def get_replay_status(
 async def start_replay(
     request: Request,
     payload: ReplayStartRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
     redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
     current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> ReplayStartResponse:
-    return await demo_service.start_replay(redis_client, payload.session_id)
+    return await demo_service.start_replay(redis_client, db, payload.session_id)
 
 
 @router.post(
