@@ -14,22 +14,28 @@ Two distinct gates the caller/UI must not conflate:
   control), not a reason to hide the feature.
 
 start_replay enforces both (409 on a live race, 409 if a replay is already
-running) plus validates the requested session against CURATED_SESSIONS.
+running) plus validates the requested session against CURATED_RACES.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
+from sqlalchemy import select, tuple_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import ConflictError, NotFoundError, ValidationError
+from backend.models.race import Race
+from backend.models.race import Session as SessionModel
 from backend.schemas.demo_schema import (
     CuratedSessionResponse,
     CuratedSessionsResponse,
@@ -38,7 +44,10 @@ from backend.schemas.demo_schema import (
     ReplayStatusResponse,
     ReplayStopResponse,
 )
+from backend.services.cache_service import cacheable
 from backend.services.live_race_detection import detect_live_race
+
+logger = logging.getLogger(__name__)
 
 # Single global replay-state key. JSON payload:
 #   {replay_id, session_id, race_name, start_lap, end_lap, pid, started_at}
@@ -56,12 +65,30 @@ _STATE_TTL_SECONDS = 2 * 60 * 60
 # that uses it (_process_is_alive) is never reached anyway.
 _WNOHANG: int = getattr(os, "WNOHANG", 1)
 
-# The three curated Demo Replay sessions — session_ids, circuits, and lap
-# windows are fixed (see docs/internal/day43-handoff.md section 3). The UI offers
-# exactly these; start_replay rejects anything else.
-CURATED_SESSIONS: tuple[CuratedSessionResponse, ...] = (
-    CuratedSessionResponse(
-        session_id=uuid.UUID("7da820bf-5e8c-49bb-b19f-cdd88325af87"),
+
+@dataclass(frozen=True)
+class CuratedRace:
+    """One curated Demo Replay race: which Race session to play, and its lap window."""
+
+    season: int
+    round_number: int
+    race_name: str
+    circuit_name: str
+    description: str
+    start_lap: int
+    end_lap: int
+    estimated_duration_minutes: int
+
+
+# The three curated Demo Replay races — circuits and lap windows are fixed
+# (see docs/internal/day43-handoff.md section 3). The UI offers exactly these;
+# start_replay rejects anything else. Identified by (season, round), not by
+# session_id: each database assigns its own UUIDs when a race is ingested, so
+# the local and production ids differ (docs/internal/demo-deployment-plan-2026.md).
+CURATED_RACES: tuple[CuratedRace, ...] = (
+    CuratedRace(
+        season=2026,
+        round_number=9,
         race_name="British Grand Prix 2026",
         circuit_name="Silverstone Circuit",
         description=(
@@ -73,8 +100,9 @@ CURATED_SESSIONS: tuple[CuratedSessionResponse, ...] = (
         end_lap=52,
         estimated_duration_minutes=22,
     ),
-    CuratedSessionResponse(
-        session_id=uuid.UUID("da57b9fd-4976-4fce-91a1-c7d0aac9c619"),
+    CuratedRace(
+        season=2026,
+        round_number=10,
         race_name="Belgian Grand Prix 2026",
         circuit_name="Circuit de Spa-Francorchamps",
         description=(
@@ -85,8 +113,9 @@ CURATED_SESSIONS: tuple[CuratedSessionResponse, ...] = (
         end_lap=23,
         estimated_duration_minutes=19,
     ),
-    CuratedSessionResponse(
-        session_id=uuid.UUID("dd1a9280-1230-4f34-8b2d-f8b0256a3df4"),
+    CuratedRace(
+        season=2026,
+        round_number=5,
         race_name="Canadian Grand Prix 2026",
         circuit_name="Circuit Gilles Villeneuve",
         description=(
@@ -99,18 +128,104 @@ CURATED_SESSIONS: tuple[CuratedSessionResponse, ...] = (
     ),
 )
 
-_CURATED_BY_ID: dict[uuid.UUID, CuratedSessionResponse] = {
-    s.session_id: s for s in CURATED_SESSIONS
-}
+# The races are ingested once and never change, so a day is plenty; a race
+# ingested after a miss shows up within that window.
+CURATED_SESSION_IDS_TTL_SECONDS = 86400
 
 
-def list_curated_sessions() -> CuratedSessionsResponse:
-    """Return the three curated Demo Replay sessions with their fixed metadata.
+def _race_key(season: int, round_number: int) -> str:
+    return f"{season}:{round_number}"
 
+
+def _key_curated_session_ids(client: aioredis.Redis, db: AsyncSession) -> str:  # type: ignore[type-arg]
+    return "f1:demo:curated_sessions"
+
+
+@cacheable(ttl=CURATED_SESSION_IDS_TTL_SECONDS, key_fn=_key_curated_session_ids)
+async def _fetch_curated_session_ids(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> dict[str, str]:
+    """Race session_id for each curated race present in this database.
+
+    Args:
+        client: Redis client (used by @cacheable).
+        db: Async DB session.
     Returns:
-        CuratedSessionsResponse wrapping CURATED_SESSIONS.
+        "{season}:{round}" -> session_id (as a string, so the cached JSON
+        round-trips unchanged). A curated race missing from the database has
+        no entry.
     """
-    return CuratedSessionsResponse(sessions=list(CURATED_SESSIONS))
+    query = (
+        select(Race.season, Race.round_number, SessionModel.id)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(
+            SessionModel.session_type == "R",
+            tuple_(Race.season, Race.round_number).in_(
+                [(race.season, race.round_number) for race in CURATED_RACES]
+            ),
+        )
+    )
+    rows = (await db.execute(query)).all()
+    return {
+        _race_key(season, round_number): str(session_id)
+        for season, round_number, session_id in rows
+    }
+
+
+async def _resolve_curated_sessions(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> list[CuratedSessionResponse]:
+    """Pair each curated race with its session_id in this database, in CURATED_RACES order.
+
+    Args:
+        client: Redis client.
+        db: Async DB session.
+    Returns:
+        One CuratedSessionResponse per curated race found in the database. A
+        missing race is logged and left out rather than failing the request.
+    """
+    session_ids = await _fetch_curated_session_ids(client, db)
+    resolved: list[CuratedSessionResponse] = []
+    for race in CURATED_RACES:
+        session_id = session_ids.get(_race_key(race.season, race.round_number))
+        if session_id is None:
+            logger.warning(
+                "Curated demo race %s (season %d round %d) has no R session in this database",
+                race.race_name,
+                race.season,
+                race.round_number,
+            )
+            continue
+        resolved.append(
+            CuratedSessionResponse(
+                session_id=uuid.UUID(session_id),
+                race_name=race.race_name,
+                circuit_name=race.circuit_name,
+                description=race.description,
+                start_lap=race.start_lap,
+                end_lap=race.end_lap,
+                estimated_duration_minutes=race.estimated_duration_minutes,
+            )
+        )
+    return resolved
+
+
+async def list_curated_sessions(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+) -> CuratedSessionsResponse:
+    """Return the curated Demo Replay sessions present in this database.
+
+    Args:
+        client: Redis client.
+        db: Async DB session.
+    Returns:
+        CuratedSessionsResponse, in CURATED_RACES order, with this database's
+        own session_ids.
+    """
+    return CuratedSessionsResponse(sessions=await _resolve_curated_sessions(client, db))
 
 
 async def get_replay_availability(
@@ -261,13 +376,15 @@ def _launch_replay_subprocess(
 
 async def start_replay(
     client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
     session_id: uuid.UUID,
 ) -> ReplayStartResponse:
     """Validate, guard, and launch a Demo Replay for one curated session.
 
     Args:
         client: Async Redis client.
-        session_id: Must be one of CURATED_SESSIONS.
+        db: Async DB session, to resolve the curated sessions' ids.
+        session_id: Must be the session_id of one of CURATED_RACES in this database.
     Returns:
         ReplayStartResponse with a fresh replay_id and the curated window.
     Raises:
@@ -275,7 +392,8 @@ async def start_replay(
         ConflictError: a real live race is detected, or a demo replay is
             already running (409).
     """
-    curated = _CURATED_BY_ID.get(session_id)
+    curated_sessions = await _resolve_curated_sessions(client, db)
+    curated = next((s for s in curated_sessions if s.session_id == session_id), None)
     if curated is None:
         raise ValidationError("session_id is not one of the curated demo replay sessions")
 
