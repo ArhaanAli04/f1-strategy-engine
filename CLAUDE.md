@@ -372,9 +372,10 @@ wired as of Day 11 via the run_race_simulation Celery task
 ```
 f1:{season}:{round}:car:{driver_num}:latest                  TTL: 8s       (live telemetry per car)
 f1:{season}:{round}:gaps                                     TTL: 8s       (all driver gaps)
+f1:{season}:{round}:gaps:final                               TTL: 30 days  (2026-09-26 — the finishing order on the road, "source": "final". Written by ingest_live_session.py's _publish_live_gaps only once the leader has completed TotalLaps, then kept current as the rest of the field finishes. get_session_gaps serves it after the live gaps key lapses; race_service reads its existence as "race concluded", so it must never be written mid-race. Not matched by live_race_detection.)
 f1:{season}:{round}:strategy:{driver_id}:pit_window          TTL: 30s      (optimal pit window prediction)
-f1:{season}:{round}:strategy:{driver_id}:undercut:{target}   TTL: 30s      (undercut score vs target driver)
-f1:{season}:{round}:strategy:{driver_id}:overcut:{target}    TTL: 30s      (overcut score vs target driver)
+f1:{season}:{round}:strategy:{driver_id}:undercut:{target}   TTL: 30s      (undercut score vs target driver; + ":lap:{n}" when scored as of lap n — per-lap predictions pass their own lap so a replay of an ingested race is not scored from the race's end, 2026-09-26. Its ":last_good" copy expires after 86400s, unlike other @cacheable keys, because the per-lap keys are unbounded: without it one live race left 1,860 permanent keys)
+f1:{season}:{round}:strategy:{driver_id}:overcut:{target}    TTL: 30s      (overcut score vs target driver; + ":lap:{n}" as for undercut)
 f1:{season}:{round}:strategy:competitors                     TTL: 30s      (all drivers predicted pit windows)
 f1:{season}:{round}:telemetry:{driver_id}:history:{last_n}   TTL: 15s      (lap history sector data)
 f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driver_id → car_number mapping)
@@ -409,8 +410,10 @@ When adding a new cache key: add it to this list with TTL and justification.
 Beat task polls Ergast's race schedule every 5 minutes
 (`celery_app.py`'s `beat_schedule`) and auto-launches
 `ingest_live_session.py` as a detached subprocess when a Race (`R`) session's
-scheduled start is within a 30-minute grace window
-(`race_detection_worker._GRACE_WINDOW`) of "now".
+scheduled start is at most 10 minutes away (`race_detection_worker._LEAD_WINDOW`)
+or up to 30 minutes past (`_GRACE_WINDOW`). The lead was added 2026-09-26:
+with only the after-start window the launch landed 0-5 minutes after the start
+(Azerbaijan GP 2026: 11:03 for 11:00) and only just caught lap 1.
 
 **Why a subprocess, not an inline Celery task call:** the worker runs
 `--pool=solo` (single process, single thread) across all three queues.
@@ -463,7 +466,7 @@ service actually executes it. Not yet wired into a Fly.io production
 process (Day 40, out of scope today).
 
 **Edge cases:** Ergast unreachable → caught, logged, task returns cleanly
-(no beat-schedule disruption); no Race session in the grace window → no-op;
+(no beat-schedule disruption); no Race session in the launch window → no-op;
 already-triggered → no-op (see dedup above). Covered by
 `tests/unit/test_race_detection_worker.py`.
 

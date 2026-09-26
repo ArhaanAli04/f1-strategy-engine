@@ -2,7 +2,8 @@
 
 Polls Ergast's race schedule every 5 minutes (see celery_app.py's
 beat_schedule) looking for a Race (session_type "R") whose scheduled start
-has arrived. On a match, launches ingest_live_session.py as a **detached
+is at most 10 minutes away or up to 30 minutes past. On a match, launches
+ingest_live_session.py as a **detached
 subprocess** rather than calling run_live_ingestor() inline — the worker
 runs a single --pool=solo process handling telemetry_queue/prediction_queue/
 alert_queue, and the ingestor blocks for up to 3 hours while itself
@@ -40,6 +41,13 @@ logger = logging.getLogger(__name__)
 # helps cover a beat/worker outage near the green flag, never causes harm.
 _GRACE_WINDOW = timedelta(minutes=30)
 
+# How long BEFORE a Race's scheduled start we already launch. With only the
+# grace window above, the launch landed 0-5 minutes after the start (beat polls
+# every 5 minutes) — Azerbaijan GP 2026 launched at 11:03 for an 11:00 start and
+# only just caught lap 1. Two polls of lead time connect the ingestor before the
+# lights go out; F1's feed is already streaming pre-race.
+_LEAD_WINDOW = timedelta(minutes=10)
+
 # Dedup key TTL: covers run_live_ingestor's 3h default max_duration plus a
 # buffer, so a re-poll during the same race never launches a second
 # ingestor. Not a CLAUDE.md-documented cache/prediction key (no data is
@@ -52,13 +60,14 @@ def _trigger_key(season: int, round_number: int) -> str:
 
 
 def _find_race_ready_for_ingestion(season: int) -> tuple[int, datetime] | None:
-    """Find a Race session whose scheduled start is within the grace window.
+    """Find a Race session about to start or just started.
 
     Args:
         season: Season year to check against Ergast's race schedule.
     Returns:
-        (round_number, session_start_utc) for the first matching Race, or
-        None if nothing has started recently.
+        (round_number, session_start_utc) for the first Race whose scheduled
+        start is within _LEAD_WINDOW before or _GRACE_WINDOW after now, or
+        None if there is none.
     """
     from fastf1.ergast import Ergast
 
@@ -69,7 +78,7 @@ def _find_race_ready_for_ingestion(season: int) -> tuple[int, datetime] | None:
         if "raceDate" not in race or "raceTime" not in race:
             continue
         start = combine_ergast_date_time(race["raceDate"], race["raceTime"])
-        if start is not None and start <= now <= start + _GRACE_WINDOW:
+        if start is not None and start - _LEAD_WINDOW <= now <= start + _GRACE_WINDOW:
             return int(race["round"]), start
 
     return None

@@ -872,6 +872,7 @@ async def _resolve_undercut_overcut(
     resolved: dict[str, Any],
     session_id: uuid.UUID,
     driver_id: uuid.UUID,
+    lap_number: int,
 ) -> tuple[float, float]:
     """Undercut/overcut scores for one driver against their immediate track-position neighbors.
 
@@ -893,6 +894,10 @@ async def _resolve_undercut_overcut(
             target_ahead_driver_id, target_behind_driver_id.
         session_id: Session being evaluated.
         driver_id: Driver this prediction is for.
+        lap_number: The lap this prediction is for. Both drivers' tyre state
+            and race time are read as of this lap, matching the neighbours
+            _resolve_position_context already picked as of it; without it a
+            replay of an ingested race scored every lap from the race's end.
     Returns:
         (undercut_score, overcut_score).
     """
@@ -909,6 +914,7 @@ async def _resolve_undercut_overcut(
                 session_id,
                 driver_id,
                 target_ahead_driver_id,
+                as_of_lap=lap_number,
             )
             undercut_score = float(result["probability_pit_now_gains_position"])
         except ModelNotLoadedError:
@@ -930,6 +936,7 @@ async def _resolve_undercut_overcut(
                 session_id,
                 driver_id,
                 target_behind_driver_id,
+                as_of_lap=lap_number,
             )
             overcut_score = float(result["probability_stay_out_retains_position"])
         except ModelNotLoadedError:
@@ -1084,7 +1091,27 @@ def _compute_recommendation_fields(
         return empty_fields
 
 
-async def _persist_and_publish(context: dict[str, Any]) -> None:
+async def compute_prediction(
+    db: AsyncSession,
+    async_redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    """Run every strategy model for one driver's completed lap and return the result.
+
+    The compute half of run_strategy_prediction: it saves nothing, raises no
+    alerts and publishes nothing, so precompute_replay.py can run the exact
+    same prediction offline and store it itself. It only reads the DB and
+    Redis (weather, gaps, and the undercut/overcut cache it may also fill).
+
+    Args:
+        db: Async DB session.
+        async_redis_client: Async Redis client.
+        context: Driver + lap context (session_id, driver_id, lap_number,
+            compound, tyre_age_laps), as the live ingestor dispatches it.
+    Returns:
+        The StrategyPrediction column values (everything except id,
+        session_id, driver_id, predicted_at and lap_number).
+    """
     models = _load_models()
     maps_cache = _load_encoding_maps()
     mae_cache = _load_holdout_mae()
@@ -1094,33 +1121,41 @@ async def _persist_and_publish(context: dict[str, Any]) -> None:
     compound = str(context.get("compound", "")).upper()
     lap_number = int(context.get("lap_number", 0))
 
+    resolved = await _resolve_inference_context(
+        db, async_redis_client, session_id, driver_id, compound, lap_number
+    )
+    prediction = _run_inference(models, maps_cache, context, resolved, driver_id)
+    undercut_score, overcut_score = await _resolve_undercut_overcut(
+        async_redis_client, db, resolved, session_id, driver_id, lap_number
+    )
+    prediction["undercut_score"] = undercut_score
+    prediction["overcut_score"] = overcut_score
+    prediction.update(
+        _compute_recommendation_fields(
+            models,
+            maps_cache,
+            mae_cache,
+            driver_id,
+            context,
+            resolved,
+            undercut_score,
+            overcut_score,
+        )
+    )
+    return prediction
+
+
+async def _persist_and_publish(context: dict[str, Any]) -> None:
+    session_id = uuid.UUID(str(context["session_id"]))
+    driver_id = uuid.UUID(str(context["driver_id"]))
+
     async_redis_client: aioredis.Redis = aioredis.from_url(  # type: ignore[type-arg]
         get_redis_settings().redis_url, decode_responses=True
     )
     session_factory = _get_session_factory()
     try:
         async with session_factory() as db:
-            resolved = await _resolve_inference_context(
-                db, async_redis_client, session_id, driver_id, compound, lap_number
-            )
-            prediction = _run_inference(models, maps_cache, context, resolved, driver_id)
-            undercut_score, overcut_score = await _resolve_undercut_overcut(
-                async_redis_client, db, resolved, session_id, driver_id
-            )
-            prediction["undercut_score"] = undercut_score
-            prediction["overcut_score"] = overcut_score
-            prediction.update(
-                _compute_recommendation_fields(
-                    models,
-                    maps_cache,
-                    mae_cache,
-                    driver_id,
-                    context,
-                    resolved,
-                    undercut_score,
-                    overcut_score,
-                )
-            )
+            prediction = await compute_prediction(db, async_redis_client, context)
 
             row = StrategyPrediction(
                 id=uuid.uuid4(),

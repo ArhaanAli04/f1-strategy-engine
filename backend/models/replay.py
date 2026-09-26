@@ -4,7 +4,7 @@ A Demo Replay in production does not run the ML pipeline live: the
 precompute script (docs/internal/demo-deployment-plan-2026.md, Day 2) runs the
 same prediction code once per curated lap window and stores its output, and
 the playback process republishes it on a real-time clock (Day 4). Predictions
-themselves go to the existing strategy_predictions table; these three tables
+themselves go to the existing strategy_predictions table; these four tables
 hold the rest of what a replay needs.
 
 Times are seconds on FastF1's session clock (Lap.LapStartTime / Lap.Time), the
@@ -106,3 +106,28 @@ class ReplayAlertEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class ReplayCarNumber(Base):
+    """Each driver's car number in one race, for the car-number Redis keys the
+    circuit map uses to match position dots to drivers.
+
+    Live, the DriverList feed topic provides these; a replay has no feed, and
+    replay_pipeline.py reads them from FastF1 at run time — which playback must
+    not need.
+    """
+
+    __tablename__ = "replay_car_numbers"
+    __table_args__ = (
+        UniqueConstraint("session_id", "driver_id", name="uq_replay_car_numbers_session_driver"),
+        UniqueConstraint("session_id", "car_number", name="uq_replay_car_numbers_session_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    driver_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("drivers.id"), nullable=False
+    )
+    car_number: Mapped[str] = mapped_column(String(3), nullable=False)
