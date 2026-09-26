@@ -50,6 +50,7 @@ _EXPECTED_TABLES = {
     "replay_lap_timings",
     "replay_gap_snapshots",
     "replay_alert_events",
+    "replay_car_numbers",
     "alembic_version",
 }
 

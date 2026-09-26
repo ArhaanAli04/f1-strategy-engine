@@ -804,3 +804,103 @@ async def test_a_redis_failure_while_counting_never_breaks_alert_evaluation(
     await alert_service._bump_pipeline_stat(
         broken, _SEASON, _ROUND, "alerts_dispatched"
     )  # no raise
+
+
+# --- rank_undercut_threats: the shared, pure alert rules ---
+
+
+@pytest.mark.unit
+def test_rank_undercut_threats_pairs_each_car_with_the_one_ahead_above_the_threshold() -> None:
+    p1, p2, p3, p4 = (uuid.uuid4() for _ in range(4))
+    scores = {p2: 0.9, p3: 0.5, p4: 0.51}  # exactly 0.5 does not count
+
+    threats = alert_service.rank_undercut_threats([p1, p2, p3, p4], scores, {}, None)
+
+    assert threats == [
+        alert_service.UndercutThreat(p2, p1, 0.9, None),
+        alert_service.UndercutThreat(p4, p3, 0.51, None),
+    ]
+
+
+@pytest.mark.unit
+def test_rank_undercut_threats_names_why_an_alert_is_suppressed() -> None:
+    p1, p2, p3, p4 = (uuid.uuid4() for _ in range(4))
+    scores = {p2: 0.9, p3: 0.9, p4: 0.9}
+    race_state = {p2: (20, 3), p3: (40, 10)}  # fresh tyres; 13 laps left of 53; p4 unknown
+
+    threats = alert_service.rank_undercut_threats([p1, p2, p3, p4], scores, race_state, 53)
+
+    assert [t.suppressed_reason for t in threats] == ["tyre_age", "laps_remaining", None]
+
+
+# --- find_undercut_threats_at_lap: the field as it stood on one lap ---
+
+
+def _lap_row(driver_id: uuid.UUID, position: int, tyre_age_laps: int = 10) -> MagicMock:
+    """A lap_data row on lap 30, the lap these tests judge (22 laps left of 52)."""
+    return _fake_position(driver_id, position, 30, tyre_age_laps)
+
+
+@pytest.mark.unit
+async def test_find_undercut_threats_at_lap_judges_the_field_on_that_lap(
+    mock_db_session: AsyncMock,
+) -> None:
+    session_id = uuid.uuid4()
+    lec, ham, ver, rus = (uuid.uuid4() for _ in range(4))
+    laps = [
+        _lap_row(lec, 1),
+        _lap_row(ham, 2, tyre_age_laps=2),  # just pitted: suppressed
+        _lap_row(ver, 3),
+        _lap_row(rus, 4),
+    ]
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(laps),
+        _context_result(_context_row(total_laps=52)),
+        _rows_result(
+            [
+                MagicMock(id=lec, code="LEC"),
+                MagicMock(id=ham, code="HAM"),
+                MagicMock(id=ver, code="VER"),
+                MagicMock(id=rus, code="RUS"),
+            ]
+        ),
+    ]
+    scores = {ham: 0.95, ver: 0.2, rus: 0.8}
+
+    alerts = await alert_service.find_undercut_threats_at_lap(
+        mock_db_session, session_id, 30, scores
+    )
+
+    assert alerts == [
+        alert_service.LapUndercutAlert(
+            lap_number=30,
+            alert_type=AlertType.UNDERCUT_THREAT.value,  # what live Alert rows store
+            driver_id=rus,
+            rival_driver_id=ver,
+            message="Undercut threat: RUS on VER (80%)",
+            score=0.8,
+        )
+    ]
+    lap_query = mock_db_session.execute.call_args_list[0].args[0]
+    compiled = str(lap_query.compile(compile_kwargs={"literal_binds": True}))
+    assert "lap_data.lap_number = 30" in compiled
+    mock_db_session.add.assert_not_called()
+    mock_db_session.commit.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_find_undercut_threats_at_lap_skips_the_driver_code_lookup_when_nothing_fires(
+    mock_db_session: AsyncMock,
+) -> None:
+    lec, ham = uuid.uuid4(), uuid.uuid4()
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result([_lap_row(lec, 1), _lap_row(ham, 2)]),
+        _context_result(_context_row(total_laps=52)),
+    ]
+
+    alerts = await alert_service.find_undercut_threats_at_lap(
+        mock_db_session, uuid.uuid4(), 30, {ham: 0.1}
+    )
+
+    assert alerts == []
+    assert mock_db_session.execute.await_count == 2

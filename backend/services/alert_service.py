@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -274,6 +275,54 @@ async def _latest_undercut_scores(
     return {row.driver_id: row.undercut_score for row in rows}
 
 
+@dataclass(frozen=True)
+class UndercutThreat:
+    """A trailing car whose undercut score on the car ahead crossed the threshold."""
+
+    trailing_driver_id: uuid.UUID
+    ahead_driver_id: uuid.UUID
+    score: float
+    # Why the alert should not be shown ("tyre_age" / "laps_remaining"), or
+    # None when it should. See _alert_suppression_reason.
+    suppressed_reason: str | None
+
+
+def rank_undercut_threats(
+    running_order: list[uuid.UUID],
+    scores: dict[uuid.UUID, float],
+    race_state: dict[uuid.UUID, tuple[int, int]],
+    total_laps: int | None,
+) -> list[UndercutThreat]:
+    """Undercut threats between track-position-adjacent cars, with no I/O.
+
+    The one place the alert rules live, shared by the live path
+    (evaluate_threats) and the replay precompute (find_undercut_threats_at_lap).
+
+    Args:
+        running_order: Driver ids, leader first.
+        scores: driver_id -> undercut_score against the car ahead.
+        race_state: driver_id -> (lap_number, tyre_age_laps) it is judged at.
+            A driver without an entry is never suppressed (nothing to judge by).
+        total_laps: Real scheduled race distance, or None if unknown.
+    Returns:
+        One UndercutThreat per trailing car whose score exceeds
+        UNDERCUT_ALERT_THRESHOLD, in running order, suppressed ones included.
+    """
+    threats: list[UndercutThreat] = []
+    for trailing_id, ahead_id in zip(running_order[1:], running_order[:-1], strict=True):
+        score = scores.get(trailing_id)
+        if score is None or score <= UNDERCUT_ALERT_THRESHOLD:
+            continue
+        state = race_state.get(trailing_id)
+        reason = _alert_suppression_reason(*state, total_laps) if state is not None else None
+        threats.append(UndercutThreat(trailing_id, ahead_id, score, reason))
+    return threats
+
+
+def _undercut_message(trailing_code: str, ahead_code: str, score: float) -> str:
+    return f"Undercut threat: {trailing_code} on {ahead_code} ({score:.0%})"
+
+
 async def _driver_codes(db: AsyncSession, driver_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
     """Resolve driver_id -> short code (e.g. "HUL") for a set of drivers.
 
@@ -374,20 +423,21 @@ async def evaluate_threats(
 
     alert_type = AlertType.UNDERCUT_THREAT
     dispatched: list[dict[str, Any]] = []
-    for trailing_id, ahead_id in zip(running_order[1:], running_order[:-1], strict=True):
-        score = scores.get(trailing_id)
-        if score is None or score <= UNDERCUT_ALERT_THRESHOLD:
-            continue
-
+    for threat in rank_undercut_threats(running_order, scores, latest_state, total_laps):
+        trailing_id, ahead_id, score = (
+            threat.trailing_driver_id,
+            threat.ahead_driver_id,
+            threat.score,
+        )
         # Before the subscriber lookup and the dedup claim, so a suppressed
-        # alert neither costs a query nor uses up the pair's claim. A driver
-        # with no stored lap row gives nothing to judge by and is not suppressed.
-        state = latest_state.get(trailing_id)
-        reason = _alert_suppression_reason(*state, total_laps) if state is not None else None
-        if reason is not None:
+        # alert neither costs a query nor uses up the pair's claim.
+        if threat.suppressed_reason is not None:
             if context is not None:
                 await _bump_pipeline_stat(
-                    redis_client, season, round_number, f"alerts_suppressed_{reason}"
+                    redis_client,
+                    season,
+                    round_number,
+                    f"alerts_suppressed_{threat.suppressed_reason}",
                 )
             continue
 
@@ -409,7 +459,7 @@ async def evaluate_threats(
         payload = {
             "session_id": str(session_id),
             "driver_id": str(trailing_id),
-            "message": f"Undercut threat: {trailing_code} on {ahead_code} ({score:.0%})",
+            "message": _undercut_message(trailing_code, ahead_code, score),
         }
         alerts = await dispatch_alert(db, redis_client, user_ids, alert_type, payload)
         dispatched.extend(alerts)
@@ -417,6 +467,84 @@ async def evaluate_threats(
             await _bump_pipeline_stat(redis_client, season, round_number, "alerts_dispatched")
 
     return dispatched
+
+
+@dataclass(frozen=True)
+class LapUndercutAlert:
+    """An undercut alert the live pipeline would raise on one lap (shape of a
+    replay_alert_events row, minus its session)."""
+
+    lap_number: int
+    alert_type: str
+    driver_id: uuid.UUID
+    rival_driver_id: uuid.UUID
+    message: str
+    score: float
+
+
+async def find_undercut_threats_at_lap(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    lap_number: int,
+    scores: dict[uuid.UUID, float],
+) -> list[LapUndercutAlert]:
+    """Undercut alerts as the field stood on one lap, for the replay precompute.
+
+    evaluate_threats judges the field from each driver's LATEST stored lap and
+    latest prediction, which for an already-ingested race is the finish. This
+    judges it as of lap_number instead: running order and tyre ages come from
+    that lap's lap_data rows (a car with no row on that lap, e.g. retired, is
+    not in the order) and scores are the predictions made for that lap. Same
+    threshold and suppression rules (rank_undercut_threats). No subscriber
+    lookup, dedup, write or publish — playback turns these into Alert rows.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to evaluate.
+        lap_number: The lap to judge the field at.
+        scores: driver_id -> undercut_score predicted for this lap.
+    Returns:
+        One LapUndercutAlert per non-suppressed threat, in running order.
+    """
+    query = (
+        select(LapData)
+        .where(
+            LapData.session_id == session_id,
+            LapData.lap_number == lap_number,
+            LapData.position.is_not(None),
+        )
+        .order_by(LapData.position)
+    )
+    laps = list((await db.execute(query)).scalars().all())
+    running_order = [lap.driver_id for lap in laps]
+    race_state = {lap.driver_id: (lap.lap_number, lap.tyre_age_laps) for lap in laps}
+    context = await _session_race_context(db, session_id)
+    total_laps = context[2] if context is not None else None
+
+    threats = [
+        threat
+        for threat in rank_undercut_threats(running_order, scores, race_state, total_laps)
+        if threat.suppressed_reason is None
+    ]
+    if not threats:
+        return []
+
+    driver_codes = await _driver_codes(db, running_order)
+    return [
+        LapUndercutAlert(
+            lap_number=lap_number,
+            alert_type=AlertType.UNDERCUT_THREAT.value,
+            driver_id=threat.trailing_driver_id,
+            rival_driver_id=threat.ahead_driver_id,
+            message=_undercut_message(
+                driver_codes.get(threat.trailing_driver_id, str(threat.trailing_driver_id)),
+                driver_codes.get(threat.ahead_driver_id, str(threat.ahead_driver_id)),
+                threat.score,
+            ),
+            score=threat.score,
+        )
+        for threat in threats
+    ]
 
 
 async def dispatch_alert(

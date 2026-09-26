@@ -23,6 +23,7 @@ import redis.asyncio as redis_asyncio
 from celery import exceptions as celery_exceptions
 
 from backend.core.exceptions import NotFoundError
+from backend.services import alert_service, strategy_service
 from backend.services.ml import race_simulator, tire_deg_model
 from backend.workers import prediction_worker
 
@@ -1801,3 +1802,203 @@ def test_run_strategy_prediction_does_not_retry_on_success(
     prediction_worker.run_strategy_prediction.run(_prediction_context())
 
     retry.assert_not_called()
+
+
+def _neighbours(ahead: uuid.UUID | None, behind: uuid.UUID | None) -> dict[str, Any]:
+    return {
+        "season": 2026,
+        "round_number": 9,
+        "target_ahead_driver_id": ahead,
+        "target_behind_driver_id": behind,
+    }
+
+
+@pytest.mark.unit
+async def test_resolve_undercut_overcut_scores_both_neighbours_as_of_the_predicted_lap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both scores are asked for the prediction's own lap. Replaying an ingested
+    race, anything else scores every lap from the state at the race's end."""
+    session_id, driver_id = uuid.uuid4(), uuid.uuid4()
+    ahead, behind = uuid.uuid4(), uuid.uuid4()
+    undercut = AsyncMock(return_value={"probability_pit_now_gains_position": 0.7})
+    overcut = AsyncMock(return_value={"probability_stay_out_retains_position": 0.4})
+    monkeypatch.setattr(strategy_service, "get_undercut_score", undercut)
+    monkeypatch.setattr(strategy_service, "get_overcut_score", overcut)
+
+    scores = await prediction_worker._resolve_undercut_overcut(
+        AsyncMock(), AsyncMock(), _neighbours(ahead, behind), session_id, driver_id, 46
+    )
+
+    assert scores == (0.7, 0.4)
+    assert undercut.await_args is not None
+    assert undercut.await_args.args[5:] == (driver_id, ahead)
+    assert undercut.await_args.kwargs == {"as_of_lap": 46}
+    assert overcut.await_args is not None
+    assert overcut.await_args.args[5:] == (driver_id, behind)
+    assert overcut.await_args.kwargs == {"as_of_lap": 46}
+
+
+@pytest.mark.unit
+async def test_resolve_undercut_overcut_is_zero_without_neighbours(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    undercut, overcut = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(strategy_service, "get_undercut_score", undercut)
+    monkeypatch.setattr(strategy_service, "get_overcut_score", overcut)
+
+    scores = await prediction_worker._resolve_undercut_overcut(
+        AsyncMock(), AsyncMock(), _neighbours(None, None), uuid.uuid4(), uuid.uuid4(), 46
+    )
+
+    assert scores == (0.0, 0.0)
+    undercut.assert_not_awaited()
+    overcut.assert_not_awaited()
+
+
+# --- compute_prediction: the side-effect-free compute half of _persist_and_publish ---
+
+
+_COMPUTED_PREDICTION: dict[str, Any] = {
+    "optimal_pit_lap": 30,
+    "pit_probability": 0.42,
+    "undercut_score": 0.6,
+    "overcut_score": 0.3,
+    "tire_life_remaining": 12.0,
+    "confidence_score": 0.7,
+    "model_version": "production",
+    "recommended_pit_lap": 31,
+}
+
+
+def _stub_prediction_pieces(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stub each step compute_prediction chains, recording what they receive."""
+    seen: dict[str, Any] = {}
+    resolved = {"season": 2026, "round_number": 9, "position": 4}
+    monkeypatch.setattr(prediction_worker, "_load_models", lambda: {"m": "models"})
+    monkeypatch.setattr(prediction_worker, "_load_encoding_maps", lambda: {"m": "maps"})
+    monkeypatch.setattr(prediction_worker, "_load_holdout_mae", lambda: {"m": 0.5})
+
+    async def _resolve(
+        db: Any, client: Any, session_id: uuid.UUID, driver_id: uuid.UUID, compound: str, lap: int
+    ) -> dict[str, Any]:
+        seen["resolve"] = (session_id, driver_id, compound, lap)
+        return resolved
+
+    def _inference(
+        models: Any, maps: Any, context: Any, got_resolved: Any, driver_id: uuid.UUID
+    ) -> dict[str, Any]:
+        seen["inference_resolved"] = got_resolved
+        return {"optimal_pit_lap": 30, "pit_probability": 0.42}
+
+    async def _undercut(
+        client: Any,
+        db: Any,
+        got_resolved: Any,
+        session_id: uuid.UUID,
+        driver_id: uuid.UUID,
+        lap: int,
+    ) -> tuple[float, float]:
+        seen["undercut_lap"] = lap
+        return 0.6, 0.3
+
+    def _recommendation(*args: Any) -> dict[str, Any]:
+        seen["recommendation_scores"] = args[-2:]
+        return {"recommended_pit_lap": 31}
+
+    monkeypatch.setattr(prediction_worker, "_resolve_inference_context", _resolve)
+    monkeypatch.setattr(prediction_worker, "_run_inference", _inference)
+    monkeypatch.setattr(prediction_worker, "_resolve_undercut_overcut", _undercut)
+    monkeypatch.setattr(prediction_worker, "_compute_recommendation_fields", _recommendation)
+    seen["resolved"] = resolved
+    return seen
+
+
+@pytest.mark.unit
+async def test_compute_prediction_chains_the_models_without_side_effects(
+    monkeypatch: pytest.MonkeyPatch, mock_db_session: AsyncMock
+) -> None:
+    seen = _stub_prediction_pieces(monkeypatch)
+    context = _prediction_context()
+    redis_client = AsyncMock()
+
+    prediction = await prediction_worker.compute_prediction(mock_db_session, redis_client, context)
+
+    assert prediction == {
+        "optimal_pit_lap": 30,
+        "pit_probability": 0.42,
+        "undercut_score": 0.6,
+        "overcut_score": 0.3,
+        "recommended_pit_lap": 31,
+    }
+    assert seen["resolve"] == (
+        uuid.UUID(context["session_id"]),
+        uuid.UUID(context["driver_id"]),
+        "MEDIUM",
+        5,
+    )
+    assert seen["inference_resolved"] is seen["resolved"]
+    assert seen["undercut_lap"] == 5
+    assert seen["recommendation_scores"] == (0.6, 0.3)
+    mock_db_session.add.assert_not_called()
+    mock_db_session.commit.assert_not_awaited()
+    redis_client.publish.assert_not_awaited()
+
+
+class _RecordingAsyncSession:
+    """Stands in for `async with session_factory() as db:`, recording writes."""
+
+    def __init__(self) -> None:
+        self.added: list[Any] = []
+        self.commit = AsyncMock()
+
+    async def __aenter__(self) -> "_RecordingAsyncSession":
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+    def add(self, row: Any) -> None:
+        self.added.append(row)
+
+
+@pytest.mark.unit
+async def test_persist_and_publish_saves_alerts_and_publishes_the_computed_prediction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _prediction_context()
+    session = _RecordingAsyncSession()
+    monkeypatch.setattr(prediction_worker, "_get_session_factory", lambda: lambda: session)
+    redis_stub = MagicMock()
+    redis_stub.aclose = AsyncMock()
+    monkeypatch.setattr(redis_asyncio, "from_url", lambda *a, **k: redis_stub)
+    engine = MagicMock()
+    engine.dispose = AsyncMock()
+    monkeypatch.setattr(prediction_worker, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        prediction_worker, "compute_prediction", AsyncMock(return_value=dict(_COMPUTED_PREDICTION))
+    )
+    evaluate_threats = AsyncMock()
+    monkeypatch.setattr(alert_service, "evaluate_threats", evaluate_threats)
+    publish = MagicMock()
+    monkeypatch.setattr(prediction_worker, "_publish_prediction", publish)
+
+    await prediction_worker._persist_and_publish(context)
+
+    (row,) = session.added
+    assert row.session_id == uuid.UUID(context["session_id"])
+    assert row.driver_id == uuid.UUID(context["driver_id"])
+    assert row.lap_number == 5
+    assert row.undercut_score == 0.6
+    assert row.recommended_pit_lap == 31
+    session.commit.assert_awaited_once()
+    evaluate_threats.assert_awaited_once_with(session, redis_stub, uuid.UUID(context["session_id"]))
+    publish.assert_called_once_with(
+        uuid.UUID(context["session_id"]),
+        {
+            **_COMPUTED_PREDICTION,
+            "session_id": context["session_id"],
+            "driver_id": context["driver_id"],
+        },
+    )
+    engine.dispose.assert_awaited_once()

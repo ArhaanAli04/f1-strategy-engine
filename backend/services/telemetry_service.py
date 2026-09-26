@@ -437,6 +437,17 @@ async def get_lap_history(
     return await _fetch_lap_history(db, session_id, driver_id, last_n)
 
 
+def _consistent_gap(gap: float) -> float | None:
+    """A gap between two ordered drivers, or None when the times contradict the order.
+
+    The order comes from stored positions; the gap from cumulative times. A
+    negative gap means the times disagree with the order (a live-ingested
+    race's summed lap times, missing lap 1), so the number would be wrong —
+    showing no gap is more honest than showing that one.
+    """
+    return gap if gap >= 0 else None
+
+
 async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict[str, Any]:
     result = await db.execute(_GAPS_QUERY, {"session_id": str(session_id)})
     rows = result.mappings().all()
@@ -472,18 +483,31 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
         latest_per_driver[str(row["driver_id"])] = {
             "driver_id": row["driver_id"],
             "lap_number": row["lap_number"],
+            "position": row["position"],
             "cumulative_seconds": elapsed if elapsed is not None else (fallback or 0.0),
         }
 
-    # Laps completed first (descending), cumulative time only as a tiebreaker
-    # among drivers on the same lap. cumulative_seconds alone inverts a lapped
-    # driver's position: a driver lapped once completes fewer total laps, so
-    # their cumulative sum is smaller than an unlapped driver's full-distance
-    # sum even though they finished behind — confirmed live on 2025 Abu Dhabi
-    # (session b5fafd04-5397-4b51-b732-875ba99d66fd), where lapped HAD/LAW/GAS
-    # sorted ahead of unlapped PIA/NOR/LEC.
+    # Laps completed first (descending). cumulative_seconds alone inverts a
+    # lapped driver's position: a driver lapped once completes fewer total
+    # laps, so their cumulative sum is smaller than an unlapped driver's
+    # full-distance sum even though they finished behind — confirmed live on
+    # 2025 Abu Dhabi (session b5fafd04-5397-4b51-b732-875ba99d66fd), where
+    # lapped HAD/LAW/GAS sorted ahead of unlapped PIA/NOR/LEC.
+    #
+    # Among drivers on the same lap, the stored position comes next — F1's own
+    # order for a live-ingested race, FastF1's for a historical one — and
+    # cumulative time only breaks ties or covers a row with no position. For a
+    # live-ingested race the summed times have no lap-1 time (the live feed
+    # records none) and so lose every gap opened on lap 1: ranking by them
+    # showed VER winning the Azerbaijan GP 2026 by 4 s, while every driver's
+    # stored lap-51 position had the real result, RUS first.
     ordered = sorted(
-        latest_per_driver.values(), key=lambda r: (-r["lap_number"], r["cumulative_seconds"])
+        latest_per_driver.values(),
+        key=lambda r: (
+            -r["lap_number"],
+            r["position"] if r["position"] is not None else math.inf,
+            r["cumulative_seconds"],
+        ),
     )
     gaps: list[dict[str, Any]] = []
     for i, row in enumerate(ordered):
@@ -507,7 +531,7 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
                 gap_ahead = None
                 laps_behind = prev_row["lap_number"] - lap_number
             else:
-                gap_ahead = cumulative - prev_row["cumulative_seconds"]
+                gap_ahead = _consistent_gap(cumulative - prev_row["cumulative_seconds"])
 
         gap_behind: float | None
         if i == len(ordered) - 1:
@@ -517,7 +541,7 @@ async def _compute_session_gaps(db: AsyncSession, session_id: uuid.UUID) -> dict
             gap_behind = (
                 None
                 if next_row["lap_number"] != lap_number
-                else next_row["cumulative_seconds"] - cumulative
+                else _consistent_gap(next_row["cumulative_seconds"] - cumulative)
             )
 
         gaps.append(
