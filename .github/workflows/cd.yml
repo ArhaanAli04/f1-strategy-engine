@@ -41,7 +41,7 @@ jobs:
     name: Build and push images to ECR
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -105,7 +105,7 @@ jobs:
     needs: [build-and-push]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -161,7 +161,7 @@ jobs:
         # exist. The Helm chart itself (infra/helm-chart/) is ready — Day 22
         # proved `helm upgrade --install` works end-to-end locally:
         #
-        # - uses: actions/checkout@v4
+        # - uses: actions/checkout@v7
         # - name: Configure kubeconfig
         #   run: echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig
         # - name: Helm upgrade (staging)
@@ -208,7 +208,7 @@ jobs:
         # Docker Desktop-only (see Day 22/24 notes). Fly.io builds straight
         # from the existing backend Dockerfile:
         #
-        # - uses: actions/checkout@v4
+        # - uses: actions/checkout@v7
         # - name: Install flyctl
         #   uses: superfly/flyctl-actions/setup-flyctl@master
         # - name: Deploy to Fly.io
