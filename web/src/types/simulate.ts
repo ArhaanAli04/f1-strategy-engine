@@ -37,7 +37,7 @@ export interface SimulateStrategyRequest {
 // real outputs of the SAME 1000-run Monte Carlo simulate_race call behind
 // position_gain_loss/position_probabilities — added for the What-If
 // Simulator rebuild part (b) (see
-// docs/core-feature-rebuild-whatif-simulator.md §7). All three are null only
+// docs/internal/core-feature-rebuild-whatif-simulator.md §7). All three are null only
 // when the simulation genuinely has no data for this rival (should not
 // happen in practice), never coerced to a misleading 0.
 export interface OvertakingDriver {

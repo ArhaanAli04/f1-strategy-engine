@@ -393,8 +393,9 @@ f1:alerts:{session_id}                                       pub/sub       (no T
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
 f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
 f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. TTL is a safety net well above a curated window's ~20-min playout.)
+f1:demo:curated_sessions                                      TTL: 86400s   (2026-09-26 — JSON map "{season}:{round}" -> R session_id for demo_service.CURATED_RACES, resolved from THIS database. Curated races are identified by season/round, not a hard-coded session_id, because each database assigns its own UUIDs at ingest (local and production Supabase differ). A race missing from the DB has no entry and is left out of GET /demo/sessions. Ingested races never change, so a day is plenty; a newly ingested curated race appears once this expires or is deleted.)
 f1:strategy:last_ingested_session                            TTL: 86400s   (newest-race_date COMPLETED R session that has lap_data — GET /strategy/last-ingested-session, the Strategy Simulator's session source when no race is live. Race.status == "completed" filter added 2026-08-30 to exclude partially live-ingested sessions, see Deferred Wiring/Notes. Not written by ingestion, so a newer ingest surfaces after this expires or a manual cache_service delete. Constant key — resolved per-environment from that DB.)
-f1:{season}:{round}:ingest_stats                              TTL: 86400s   (V5, 2026-09-19 — not cached data: a JSON string of the live ingestor's session counters — timing_messages, laps_dispatched, rankings_by_f1_position / rankings_by_gaps, cars_flagged_out, connections_opened, subscribe_snapshots, position_first_message_seq (null = F1's Position field never streamed on the live feed), recording path, updated_at. Written by ingest_live_session.py's publish_stats at most every 15s and once when the session ends, so what the live feed actually did can be read after a race; the 24h TTL keeps it that long. See docs/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c.)
+f1:{season}:{round}:ingest_stats                              TTL: 86400s   (V5, 2026-09-19 — not cached data: a JSON string of the live ingestor's session counters — timing_messages, laps_dispatched, rankings_by_f1_position / rankings_by_gaps, cars_flagged_out, connections_opened, subscribe_snapshots, position_first_message_seq (null = F1's Position field never streamed on the live feed), recording path, updated_at. Written by ingest_live_session.py's publish_stats at most every 15s and once when the session ends, so what the live feed actually did can be read after a race; the 24h TTL keeps it that long. See docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c.)
 f1:{season}:{round}:pipeline_stats                            TTL: 86400s   (V5, 2026-09-19 — not cached data: a Redis HASH of counters, HINCRBY with the TTL refreshed on every write — gap_source_live / gap_source_summed (strategy_service's undercut/overcut maths), neighbors_source_live / neighbors_source_db (prediction_worker), alert_order_source_live / alert_order_source_db, alerts_suppressed_tyre_age / alerts_suppressed_laps_remaining, alerts_dispatched (alert_service). Best-effort: a Redis error is logged and ignored, never raised. Counts include non-live sessions (replays, historical), so read them in the context of the session.)
 ```
 
@@ -493,7 +494,7 @@ above) are always on, recording or not. To turn recording off: set
 --force-recreate worker` — a plain `restart` does not re-read compose
 settings). Manual host runs (`make ingest-live`) use the code default (off)
 unless the variable is set. Recordings are not cleaned up automatically.
-Full detail: `docs/live-race-ingestion-and-strategy-gaps-monza-2026.md`
+Full detail: `docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md`
 section 7c.
 
 ---
@@ -548,7 +549,7 @@ Update this section at the start of each day's session:
 ```
 Phase:    8
 Day:      Monza live-race fixes + verification tooling (2026-09-19/20) —
-          docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+          docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
 Status:   Monza issues A-E all fixed. Verification built: archive replay (V1),
           property tests (V4), live-feed counters + raw recorder (V5), shadow
           race (V3, full 53-lap run passed 14/14 on 2026-09-20). Two
@@ -556,9 +557,9 @@ Status:   Monza issues A-E all fixed. Verification built: archive replay (V1),
           persist ordering retry), plus the same dispose flaw in
           alert_worker (2026-09-20). Unit suite 651 passed. Nothing committed
           yet by the session. Earlier tire-deg work (2026-09-09/11) is
-          closed except CP6 — see docs/tire-deg-model-quality-and-rival-pit-
+          closed except CP6 — see docs/internal/tire-deg-model-quality-and-rival-pit-
           behavior.md and Deferred Wiring.
-Next:     Open items are in docs/live-pipeline-open-decisions-and-
+Next:     Open items are in docs/internal/live-pipeline-open-decisions-and-
           calibration-2026.md: chain-vs-retry decision (3b), V2 score
           calibration, V5 check at the next live race (Azerbaijan R15,
           2026-09-26, stack up with --env-file .env), lead-lap fallback only
@@ -788,7 +789,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   for rivals eventually pitting and losing time, while the narrative
   explaining that number did not, and could flatly contradict it. Discovered
   2026-09-06 building the What-If Simulator's multi-scenario compare feature
-  (see docs/core-feature-rebuild-whatif-simulator.md §7 for the full
+  (see docs/internal/core-feature-rebuild-whatif-simulator.md §7 for the full
   writeup) — the SAME misleading "not enough to recover on fresh tyres" text
   repeating almost verbatim across two different candidate pit laps, side
   by side in the new Compare Scenarios view, made the disconnect from the
@@ -1167,7 +1168,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
     underneath it. Still worth fixing at the source; just no longer the
     same practical risk it was.
 
-- **[✅ done 2026-09-11 — full writeup: `docs/tire-deg-model-quality-and-
+- **[✅ done 2026-09-11 — full writeup: `docs/internal/tire-deg-model-quality-and-
   rival-pit-behavior.md`] `predicted_life_remaining` pegged at
   `MAX_LOOKAHEAD_LAPS` for almost the whole realistic tyre-age range, and a
   measured `pit_predictor.pkl` same-lap-detector anomaly for LEC/COL/GAS —
@@ -1243,7 +1244,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   timing accuracy notably worse), so it was reverted; nothing was ever
   promoted to S3. Full checkpoint-by-checkpoint detail, all real numbers,
   and the working hypothesis for why the constraint didn't help:
-  `docs/tire-deg-model-quality-and-rival-pit-behavior.md`'s "2026-09-11
+  `docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md`'s "2026-09-11
   Session Update" section. Only CP6 (optional resilience layer) remains —
   CP5's negative result is a real reason to re-weigh whether CP6 is still
   "probably not needed" the way the 2026-09-09 pilot concluded.
@@ -1522,7 +1523,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   in the whole 2018-2025 corpus) — this removes the INTER-alias fudge, it
   doesn't produce a low-variance WET model; that would need real new WET
   data, not a retrain. Full analysis:
-  `docs/simulator-issues-wet-model-and-position-context.md` Part A, Option 1.
+  `docs/internal/simulator-issues-wet-model-and-position-context.md` Part A, Option 1.
 
 - **[✅ done 2026-09-02] The model promotion guard (`train_models.py`'s
   `serialize_evaluate_and_upload`) needed a feature-schema-compatibility
@@ -1539,7 +1540,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   in effect as the runtime symptom-guard — this closes the promotion-time gap
   that let an incompatible model reach production in the first place. See the
   Notes entry below for the full writeup and verification. Full original
-  analysis: `docs/simulator-issues-wet-model-and-position-context.md`
+  analysis: `docs/internal/simulator-issues-wet-model-and-position-context.md`
   Part A.6-A.7.
 
 - **[deferred — model limitation] The tyre-degradation models have no
@@ -1562,7 +1563,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   mitigated B1 below (neither the heuristic penalty nor the frontend guard
   was implemented — both would need their own dedicated scoping, per that
   session's own decision). Full analysis:
-  `docs/simulator-issues-wet-model-and-position-context.md` Part B.3.
+  `docs/internal/simulator-issues-wet-model-and-position-context.md` Part B.3.
 
 - **[✅ done 2026-09-01] `telemetry_worker._persist_lap` (and
   `_persist_tire_stint`) skipped `get_engine().dispose()` whenever an
@@ -1723,7 +1724,7 @@ Its throwaway race was cleaned up afterwards. Not yet done: the identical
 dispose flaw in `alert_worker._dispatch` (left alone deliberately). Chaining
 `process_lap` → prediction would remove the race instead of retrying it, but
 touches the telemetry worker, the ingestor and the replay tools — an open owner
-decision. Full write-up: `docs/live-race-ingestion-and-strategy-gaps-monza-2026.md`
+decision. Full write-up: `docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md`
 section 7d.
 
 **Pit-timing threshold retuning + a monotonic-constraint retrain — both
@@ -1765,7 +1766,7 @@ lap-time degradation can't predict pit timing that's actually driven by
 strategic factors (fuel-corrected stint planning, undercut threats, safety
 car timing), which a degradation-only model structurally can't see
 regardless of curve shape. Full numbers and the complete write-up:
-`docs/tire-deg-model-quality-and-rival-pit-behavior.md`'s CP5 section.
+`docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md`'s CP5 section.
 
 **Model artifact disk cache never invalidated across process restarts (✅
 fixed 2026-09-11):** `prediction_worker._download_from_s3`/
@@ -1830,7 +1831,7 @@ finishing-position probability distribution from 1000 real simulations
 every call — silently discarded before reaching the API or frontend — and
 `POST /simulate` only ever ran ONE scenario per request, with no mechanism
 to compare candidate pit laps side by side (see
-docs/core-feature-rebuild-whatif-simulator.md). Fixed: CP1 memoized
+docs/internal/core-feature-rebuild-whatif-simulator.md). Fixed: CP1 memoized
 `_tire_deg_predictions` on `(tyre_age, driver_id_encoded, compound_encoded)`
 — the only per-(sim,driver)-varying inputs — cutting one `simulate_race`
 call from ~50s to ~7-10s on a real ~22-driver field (bit-identical output,
@@ -1876,7 +1877,7 @@ that could contradict the real Monte Carlo `position_gain_loss` displayed
 right above it — this was a cheap mitigation at the time, not the full fix;
 see the `_build_plan_explanation` entry in Deferred Wiring above for that
 full fix, completed 2026-09-07 in a dedicated follow-on session. Full
-checkpoint-by-checkpoint detail: docs/core-feature-rebuild-whatif-simulator
+checkpoint-by-checkpoint detail: docs/internal/core-feature-rebuild-whatif-simulator
 .md §6-§7.
 
 **Core feature rebuild — pit-window recommendation engine (✅ fixed
@@ -1948,7 +1949,7 @@ not done this session.
 2026-09-03):** The Strategy Simulator's `predicted_finish_time` only
 accumulated small per-lap deltas-from-median on top of the real starting
 time, so it diverged wildly from an actual finish time (off by ~3000s in a
-real test case — see `docs/day-deferred-fixes-session2-handoff.md` item 4).
+real test case — see `docs/internal/day-deferred-fixes-session2-handoff.md` item 4).
 Fixed: `race_simulator.py` now adds each driver's own real median lap time
 (`DriverRaceState.baseline_lap_time_seconds`, computed by
 `prediction_worker._build_race_state` via `percentile_cont(0.5)`) to every
@@ -2107,7 +2108,7 @@ moving `dispose()` into a `finally` block for both functions. **Validated:**
 `dispose()` still runs; full unit suite 210 passed, no regressions.
 
 **WET tyre model schema mismatch — Strategy Simulator crash on any WET
-compound (✅ fixed 2026-08-30):** `docs/simulator-issues-wet-model-and-
+compound (✅ fixed 2026-08-30):** `docs/internal/simulator-issues-wet-model-and-
 position-context.md` Part A. Production `tire_deg_wet.pkl` was an 8-feature
 model (a 2026-07-10 weather-experiment leftover — see Data Quality Notes)
 while soft/medium/hard/inter are all 6-feature; the 2026-08-03 retrain's
@@ -2147,7 +2148,7 @@ per `_load_models` copy asserting the alias actually applies. `ruff` +
 
 **Strategy Simulator auto-picking a partially-live-ingested session (B1
 mitigation, ✅ fixed 2026-08-30 — deep fix still deferred):**
-`docs/simulator-issues-wet-model-and-position-context.md` Part B1.
+`docs/internal/simulator-issues-wet-model-and-position-context.md` Part B1.
 `GET /strategy/last-ingested-session` (`strategy_service
 ._fetch_last_ingested_session`) picked the newest-`race_date` R session
 with any `lap_data`, with no `status` filter — on a local DB this resolved

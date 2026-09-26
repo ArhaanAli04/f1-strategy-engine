@@ -44,7 +44,7 @@ PREDICTION_HORIZONS = (1, 2, 3, 5, 10)
 # pit_predictor.TRAINING_SCHEMA_VERSION — bump when a change to what build_lap_flags
 # is FED (not this module's own logic) makes holdout_mae non-comparable across
 # versions. train_models.serialize_evaluate_and_upload's promotion guard (CP2,
-# docs/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a candidate
+# docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md) force-promotes a candidate
 # over an incumbent recorded at a different version, regardless of MAE — the same
 # way it already force-promotes over a feature-count or feature-names mismatch.
 # This model has no feature vector at all (fitted_feature_count returns None for

@@ -81,7 +81,7 @@ _TOPICS = [
     "WeatherData",
     "DriverList",
     # The real scheduled race distance, broadcast live — see
-    # _handle_lap_count's own docstring and docs/live-race-ingestion-and-
+    # _handle_lap_count's own docstring and docs/internal/live-race-ingestion-and-
     # strategy-gaps-monza-2026.md Issue A. FastF1's own reference SignalR
     # client subscribes to this same topic (livetiming/client.py).
     "LapCount",
@@ -196,7 +196,7 @@ def _is_plausible_lap(
     already relies on) closely enough to apply the same standard live, without
     depending on data only FastF1's post-hoc reconstruction has (PitInTime/
     PitOutTime, FastF1Generated — pit in/out lap exclusion is intentionally
-    NOT attempted here, see docs/live-race-ingestion-and-strategy-gaps-monza-
+    NOT attempted here, see docs/internal/live-race-ingestion-and-strategy-gaps-monza-
     2026.md Issue D's "what needs investigating" list).
 
     Checks, all must hold:
@@ -247,7 +247,7 @@ def _is_plausible_lap(
 
 
 # Real F1 lapped-car gap strings, confirmed against Monza 2026's archived
-# TimingData stream (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+# TimingData stream (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
 # Issue C): "1 L", "1L", "52L" — not the "+1 LAP"/"2 LAPS" spelling this
 # pattern originally required, which meant a lapped car's gap was silently
 # never updated again and its last numeric gap was held forever.
@@ -523,7 +523,7 @@ class F1SignalRIngestor:
         Was subscribed (_TOPICS already lists "TrackStatus") but never
         handled at all before this fix — the signal was arriving and being
         silently discarded on every `else: logger.debug(...)` branch of
-        _on_feed. See docs/live-race-ingestion-and-strategy-gaps-monza-
+        _on_feed. See docs/internal/live-race-ingestion-and-strategy-gaps-monza-
         2026.md Issue D: this is the signal _is_plausible_lap needs to
         distinguish a red-flag-inflated "lap" from real racing pace, and the
         reason `track_status` was NULL for every live-ingested row before
@@ -554,7 +554,7 @@ class F1SignalRIngestor:
         as {"TotalLaps": N} — no FastF1 REST fetch works mid-race for this
         (session.total_laps is gated behind session.load(laps=True), and
         this codebase's live path deliberately loads laps=False; see
-        docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A for
+        docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A for
         the full "why this was missing" writeup). This is a genuine race
         property, not a per-car one — unlike every other handler in this
         class, there is nothing to key by car number here.
@@ -1310,7 +1310,7 @@ def _log_session_summary(stats: dict[str, Any]) -> None:
     """Log what the live feed did this session; warn if Position never streamed.
 
     That warning is the answer to the open question from
-    docs/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c (V5):
+    docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c (V5):
     if it fires after a real race, the whole race ran on the gap-based fallback.
     """
     logger.info("Live ingest summary: %s", stats)

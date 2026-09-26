@@ -28,7 +28,7 @@ from redis.exceptions import RedisError
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
 from backend.schemas.strategy_schema import PitWindowResponse
 from backend.services import cache_service, strategy_service
-from backend.services.ml import explainability
+from backend.services.ml import explainability, tire_deg_model
 from backend.services.ml.tire_deg_model import (
     FEATURE_COLUMNS,
     CategoricalEncodingMaps,
@@ -87,7 +87,7 @@ def _current_state_side_effects(
 ) -> list[MagicMock]:
     """The 2 db.execute() calls _current_state makes, in order: lap, circuit.
 
-    Fixed for docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
+    Fixed for docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue
     A: _current_state now reads Session.total_laps directly off the circuit
     query (a real stored value, not a separate MAX(lap_number) query) and
     only falls back to that proxy when the stored value is NULL — this
@@ -108,7 +108,7 @@ async def test_current_state_prefers_stored_total_laps_over_max_lap_number(
 ) -> None:
     """When Session.total_laps IS stored, it's used directly and the old
     MAX(lap_number) fallback query is never issued — only 2 db.execute()
-    calls, not 3 (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md
+    calls, not 3 (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
     Issue A)."""
     session_id = uuid.uuid4()
     driver_id = uuid.uuid4()
@@ -620,7 +620,7 @@ async def test_get_competitor_predicted_strategy_prefers_stored_total_laps(
     fakeredis: fakeredis_lib.FakeAsyncRedis,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The THIRD instance of Issue A's bug (docs/live-race-ingestion-and-
+    """The THIRD instance of Issue A's bug (docs/internal/live-race-ingestion-and-
     strategy-gaps-monza-2026.md), found while fixing the other two: this
     function's own total_laps = max(lap.lap_number for lap in latest_laps)
     is the same "how far has the race gotten" proxy, just computed in
@@ -713,6 +713,91 @@ async def test_get_competitor_predicted_strategy_falls_back_when_total_laps_unse
     )
 
     assert captured_total_laps == [20]  # max(20, 18) — the pre-fix proxy, unchanged
+
+
+@pytest.mark.unit
+def test_first_pit_laps_batch_passes_the_real_fuel_penalty_not_zeros(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tyre model must receive fuel_load_penalty_seconds, never zeros.
+
+    This call site passed np.zeros(...), telling every tyre model the tank was
+    empty on every lap — the same train/inference skew as the 2026-09-09
+    leakage defect (tire_deg_model's module docstring forbids building this
+    feature any other way), and the last call site still doing it while
+    prediction_worker's live path and race_simulator both used the helper.
+    Measured before the fix: it moved the predicted competitor pit lap for
+    27.7% of driver-snapshots across six real races, 13.7% by five laps or
+    more (no measurable accuracy change either way — this is a consistency
+    fix, not an accuracy one).
+
+    Zeros are a plausible-looking value inside the feature's real range, so
+    nothing downstream would ever raise on them; only asserting on the
+    argument itself can catch a regression. The pit model is held below
+    ALERT_THRESHOLD so the roll-forward runs its whole horizon, which also
+    lets this check that the penalty tracks the rolled-forward lap rather
+    than being any single fixed value.
+    """
+    total_laps = 50
+    current_lap = 10
+    captured_laps: list[np.ndarray] = []
+    captured_fuel: list[np.ndarray] = []
+
+    def _capturing_life_remaining(
+        pipeline: Any,
+        lap_number: np.ndarray,
+        compound_encoded: np.ndarray,
+        tyre_age_laps: np.ndarray,
+        fuel_load_penalty: np.ndarray,
+        circuit_id_encoded: np.ndarray,
+        driver_id_encoded: np.ndarray,
+    ) -> np.ndarray:
+        captured_laps.append(np.asarray(lap_number, dtype=np.float64))
+        captured_fuel.append(np.asarray(fuel_load_penalty, dtype=np.float64))
+        return np.full(len(lap_number), 30)
+
+    def _below_threshold(features: np.ndarray) -> np.ndarray:
+        rows = len(features)
+        return np.column_stack([np.full(rows, 0.9), np.full(rows, 0.1)])
+
+    monkeypatch.setattr(
+        tire_deg_model,
+        "predict_life_remaining_batch",
+        _capturing_life_remaining,
+    )
+    pit_model = MagicMock()
+    pit_model.predict_proba.side_effect = _below_threshold
+
+    strategy_service._first_pit_laps_over_threshold_batch(
+        pit_model,
+        {"tire_deg_medium.pkl": object()},
+        {},
+        [str(uuid.uuid4())],
+        ["MEDIUM"],
+        "Test Circuit",
+        np.array([current_lap]),
+        np.array([8]),
+        np.array([1]),
+        np.array([5.0]),
+        np.array([5.0]),
+        np.array([0.0]),
+        total_laps,
+    )
+
+    assert captured_fuel, "the tyre model was never consulted"
+    for laps, fuel in zip(captured_laps, captured_fuel, strict=True):
+        expected = np.asarray(
+            tire_deg_model.fuel_load_penalty_seconds(laps, float(total_laps)),
+            dtype=np.float64,
+        )
+        assert np.allclose(fuel, expected)
+        assert (fuel > 0.0).all()  # the regression guard: zeros must never come back
+
+    # Fuel burns off as the race runs, so a later rolled-forward lap must carry less.
+    flat_laps = np.concatenate(captured_laps)
+    flat_fuel = np.concatenate(captured_fuel)
+    order = np.argsort(flat_laps)
+    assert np.all(np.diff(flat_fuel[order]) < 0.0)
 
 
 @pytest.mark.unit
@@ -1142,7 +1227,7 @@ async def test_resolve_season_round_raises_not_found_when_no_session(
 
 
 # --- validate_current_lap ---
-# See docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+# See docs/internal/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
 # follow-up finding: a current_lap of 68 was silently accepted for a session
 # whose real race was 44 laps. mock_db_session.execute.side_effect below
 # always supplies exactly 2 results in order — session-existence check, then
@@ -1459,7 +1544,7 @@ async def test_get_last_ingested_session_query_filters_completed_status(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,
 ) -> None:
-    """B1 mitigation (docs/simulator-issues-wet-model-and-position-context.md):
+    """B1 mitigation (docs/internal/simulator-issues-wet-model-and-position-context.md):
     a scheduled/in-progress session (e.g. a partial live-ingestion dry run like
     Dutch GP 2026 Round 12) must never be picked, even with the newest
     race_date and ingested lap_data — only Race.status == "completed" is
@@ -1494,7 +1579,7 @@ async def test_get_last_ingested_session_query_filters_completed_status(
 
 
 # --- _load_models: WET/INTER schema-mismatch alias (Checkpoint 3) ---
-# See docs/simulator-issues-wet-model-and-position-context.md Part A. Unlike
+# See docs/internal/simulator-issues-wet-model-and-position-context.md Part A. Unlike
 # every other test in this file, this one exercises the REAL _load_models
 # body (not a monkeypatched replacement) — it's the only test that needs to,
 # since it's specifically testing what _load_models itself does with the
@@ -1680,7 +1765,7 @@ async def test_cumulative_race_time_defaults_to_zero_when_no_laps(
 
 
 # --- live gaps drive the undercut/overcut deficit and neighbour lookup
-# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+# (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
 
 
 def _elapsed_result(value: float) -> MagicMock:

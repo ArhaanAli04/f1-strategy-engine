@@ -83,7 +83,7 @@ class Session(Base):
     # (gated behind load(laps=True), only available post-race) and by
     # ingest_live_session.py from the live feed's LapCount topic's
     # TotalLaps field (the one thing F1's own timing system broadcasts this
-    # number through mid-race — see docs/live-race-ingestion-and-strategy-
+    # number through mid-race — see docs/internal/live-race-ingestion-and-strategy-
     # gaps-monza-2026.md Issue A). NULL for every session ingested before
     # this column existed (migration 20260918_add_total_laps_to_sessions)
     # and for a completed session that a backfill script has not yet run

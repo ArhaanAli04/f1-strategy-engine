@@ -14,7 +14,7 @@ This document covers how the F1 Strategy Engine is run, demonstrated, and develo
 6. [Desktop App Build & Distribution](#desktop-app-build--distribution)
 7. [General Development Workflow](#general-development-workflow)
 8. [Local Kubernetes Deployment (Docker Desktop)](#local-kubernetes-deployment-docker-desktop)
-9. [Production Deployment — Fly.io (After Day 40)](#production-deployment--flyio-after-day-40)
+9. [Production Deployment — Fly.io (Planned)](#production-deployment--flyio-planned)
 10. [Local Kubernetes — When to Use It](#local-kubernetes--when-to-use-it)
 
 
@@ -26,34 +26,34 @@ The backend runs locally via Docker Compose. All three frontend clients (web, de
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Local Machine                         │
-│                                                          │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  Web App     │  │ Desktop App  │  │  Mobile App  │  │
-│  │  (React)     │  │  (Tauri)     │  │(React Native)│  │
-│  │  :3000       │  │  native win  │  │  iPhone      │  │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
-│         │                 │                  │           │
-│         └─────────────────┴──────────────────┘           │
-│                           │                              │
-│                    HTTP / WebSocket                       │
-│                           │                              │
-│  ┌────────────────────────▼─────────────────────────┐   │
-│  │              FastAPI Backend  :8000               │   │
-│  │   REST API · WebSocket · Prometheus /metrics      │   │
-│  └──────┬──────────────────────────┬────────────────┘   │
-│         │                          │                     │
+│                     Local Machine                       │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │   Web App    │  │ Desktop App  │  │  Mobile App  │   │
+│  │   (React)    │  │   (Tauri)    │  │    (Expo)    │   │
+│  │    :5173     │  │  native win  │  │ phone / emu  │   │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘   │
+│         │                 │                 │           │
+│         └─────────────────┼─────────────────┘           │
+│                           │                             │
+│                    HTTP / WebSocket                     │
+│                           │                             │
+│  ┌────────────────────────▼──────────────────────────┐  │
+│  │              FastAPI Backend  :8000               │  │
+│  │    REST API · WebSocket · Prometheus /metrics     │  │
+│  └──────┬──────────────────────────┬─────────────────┘  │
+│         │                          │                    │
 │  ┌──────▼──────┐          ┌────────▼────────┐           │
-│  │    Redis    │          │   PostgreSQL     │           │
-│  │   :6379     │          │   :5432          │           │
-│  │  cache·pub  │          │  TimescaleDB     │           │
+│  │    Redis    │          │   PostgreSQL    │           │
+│  │    :6379    │          │      :5432      │           │
+│  │ cache · pub │          │  laps · users   │           │
 │  └──────┬──────┘          └────────┬────────┘           │
-│         │                          │                     │
-│  ┌──────▼──────────────────────────▼────────────────┐   │
-│  │           Celery Worker (prediction_queue)        │   │
-│  │   XGBoost · LightGBM · Monte Carlo · SHAP        │   │
-│  └───────────────────────────────────────────────────┘   │
-│                                                          │
+│         │                          │                    │
+│  ┌──────▼──────────────────────────▼─────────────────┐  │
+│  │        Celery worker  +  Celery beat              │  │
+│  │    XGBoost · LightGBM · Monte Carlo · SHAP        │  │
+│  └───────────────────────────────────────────────────┘  │
+│                                                         │
 │  ┌──────────────┐  ┌──────────────┐                     │
 │  │  Prometheus  │  │   Grafana    │                     │
 │  │    :9090     │  │    :3000     │                     │
@@ -74,8 +74,9 @@ The backend runs locally via Docker Compose. All three frontend clients (web, de
 ### Starting the Full Stack
 
 ```bash
-# From repo root
+# From repo root. Always pass --env-file .env, or secrets are silently blank.
 docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+# (or simply: make dev)
 
 # Verify all containers are healthy
 docker compose -f infra/docker/docker-compose.yml ps
@@ -87,10 +88,11 @@ Expected running containers:
 |---|---|---|
 | docker-backend-1 | FastAPI API | 8000 |
 | docker-worker-1 | Celery worker | — |
-| docker-postgres-1 | PostgreSQL/TimescaleDB | 5432 |
+| docker-beat-1 | Celery beat (schedules automatic race detection) | — |
+| docker-postgres-1 | PostgreSQL (TimescaleDB extension installed) | 5432 |
 | docker-redis-1 | Redis | 6379 |
 | docker-prometheus-1 | Prometheus | 9090 |
-| docker-grafana-1 | Grafana | 3001 |
+| docker-grafana-1 | Grafana | 3000 |
 | docker-alertmanager-1 | Alertmanager | 9093 |
 | docker-redis-exporter-1 | Redis metrics | 9121 |
 | docker-postgres-exporter-1 | Postgres metrics | 9187 |
@@ -104,8 +106,8 @@ curl http://localhost:8000/health
 # API docs (Swagger UI)
 open http://localhost:8000/docs
 
-# Grafana dashboard (admin / admin-dev)
-open http://localhost:3001
+# Grafana dashboard (user admin; password is GRAFANA_ADMIN_PASSWORD from .env, default "admin")
+open http://localhost:3000
 
 # Prometheus targets
 open http://localhost:9090/targets
@@ -115,17 +117,19 @@ open http://localhost:9090/targets
 
 ```bash
 docker compose -f infra/docker/docker-compose.yml down
+# (or: make dev-down)
 ```
 
 ### What Each Service Provides
 
 | Service | What It Does |
 |---|---|
-| FastAPI backend | REST API, WebSocket telemetry, Prometheus /metrics |
-| Celery worker | ML inference, Monte Carlo simulation, alert dispatch |
+| FastAPI backend | REST API, WebSocket telemetry, Prometheus /metrics; also launches Demo Replay runs |
+| Celery worker | Per-lap processing, ML inference, Monte Carlo simulation, alert dispatch |
+| Celery beat | Every 5 minutes, checks the F1 calendar and starts live ingestion when a race is about to begin |
 | PostgreSQL | Persistent storage — lap data, predictions, users, alerts |
 | Redis | Cache (TTL keys), Celery broker, pub/sub channels |
-| Prometheus | Scrapes metrics every 10s from backend and worker |
+| Prometheus | Scrapes metrics from backend and worker |
 | Grafana | 9-panel dashboard — latency, cache hit rate, ML inference time, WS connections, Celery queue depth |
 | Alertmanager | Routes alerts to Slack (#alerts-critical, #alerts-warning) |
 
@@ -133,7 +137,7 @@ docker compose -f infra/docker/docker-compose.yml down
 
 ## Using the App — Quick Start
 
-This section covers exactly what to do to start using the full system day-to-day — backend, web app, and mobile app on your iPhone.
+This section covers exactly what to do to start using the full system day-to-day: backend, web app, desktop app and mobile app.
 
 ### Step 1 — Start the Backend (always first)
 
@@ -150,74 +154,61 @@ docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
 docker compose -f infra/docker/docker-compose.yml ps
 ```
 
-Takes about 30-60 seconds for all containers to be ready. You only need to do this once per session — containers stay running until you stop them.
+The backend takes a minute or two to become healthy: importing the ML libraries is slow on a cold start. You only need to do this once per session; containers stay running until you stop them.
 
 ### Step 2 — Open the Web App
 
 ```bash
-cd clients/web
+cd web
 npm run dev
 ```
 
-Open your browser at `http://localhost:3000`. Log in or register a new account. You now have access to:
-- Live race dashboard with timing tower and circuit map
-- Strategy simulator (pit window recommendations, Monte Carlo)
-- Alert notifications panel
-- Historical race analysis
+The web app needs `web/.env.local` with `VITE_API_URL=http://localhost:8000` and `VITE_WS_URL=ws://localhost:8000` (see [web/README.md](web/README.md)).
 
-### Step 3 — Use the Mobile App on Your iPhone
+Open your browser at `http://localhost:5173`. Log in or register a new account. You now have access to:
+- Race page with timing tower, circuit map, lap and sector charts, pit windows and undercut threats
+- Demo Replay (replay a real 2026 race through the full pipeline)
+- Strategy simulator (Monte Carlo, compare up to 4 pit strategies)
+- Driver analytics and alerts
 
-**Prerequisite: iPhone and laptop must be on the same WiFi network.**
+See [docs/features.md](docs/features.md) for the full tour.
 
-```bash
-# Find your laptop's local IP address
-ipconfig
-# Look for "IPv4 Address" under your WiFi adapter
-# Example: 192.168.1.105
-```
-
-Make sure `clients/mobile/.env` has:
-```
-API_BASE_URL=http://192.168.1.105:8000
-WS_BASE_URL=ws://192.168.1.105:8000
-```
-Replace `192.168.1.105` with your actual laptop IP.
-
-Then start the Expo dev server:
-```bash
-cd clients/mobile
-npx expo start
-```
-
-On your iPhone — tap the **F1 Strategy** app icon (installed via EAS Development Build). It connects automatically to your laptop and opens the app. Live reload is active — any code changes appear on your iPhone instantly.
-
-> **Note:** If the app shows a connection error, your laptop's IP may have changed since you last connected. Run `ipconfig` again and update the `.env` file.
-
-### Step 4 — Open the Desktop App
+### Step 3 — Open the Desktop App
 
 ```bash
-cd clients/desktop
+cd desktop
 npm run tauri dev
 ```
 
-A native Windows application window opens — same functionality as the web app but as a standalone desktop application.
+A native Windows application window opens, with the same core features as the web app plus the always-on-top overlay. See [desktop/README.md](desktop/README.md) for prerequisites (Rust, Visual Studio Build Tools).
 
-### Step 5 — Watch Live Telemetry (Optional)
+### Step 4 — Open the Mobile App (Optional)
 
-To simulate live race data flowing through the system:
+The mobile app runs on an Android emulator (free) or a physical device via an Expo development build. Full setup, including which paths need paid accounts, is in [mobile/README.md](mobile/README.md). In short:
 
-```bash
-# In a separate terminal — replay a real 2025 race session
-python backend/tests/load/replay_publisher.py \
-  --session-id 00b4f598-40ec-4792-8687-6eae51257977 \
-  --rate 5
-```
+1. Create `mobile/.env` with your backend's address:
+   ```
+   EXPO_PUBLIC_API_URL=http://<address>:8000
+   EXPO_PUBLIC_WS_URL=ws://<address>:8000
+   ```
+   Use `10.0.2.2` on the Android emulator (its alias for your machine), or your laptop's LAN IP (`ipconfig`) on a physical device on the same WiFi. `localhost` won't work, because it points at the phone itself.
+2. Start Metro:
+   ```bash
+   cd mobile
+   npx expo start
+   ```
 
-This publishes real lap data through Redis pub/sub. The timing tower, circuit map, and strategy alerts all update in real time across all three clients simultaneously.
+> The mobile app has not yet been run on a physical device; it has been verified with type checks and Metro builds only.
+
+### Step 5 — Watch a Race Play Through the System (Optional)
+
+On the web app's race page, use the **Watch a Replay** panel to start one of the three curated 2026 races. The replay feeds real laps through the same workers, cache and WebSocket a live race uses, so the timing tower, circuit map, pit windows, undercut threats and alerts all update lap by lap across every connected client. Stop it from the same panel.
+
+(`backend/tests/load/replay_publisher.py` also exists, but it is a load-testing helper: it only re-publishes lap events onto the WebSocket channel and doesn't run any predictions.)
 
 ### Step 6 — View Monitoring Dashboard (Optional)
 
-Open Grafana at `http://localhost:3001` (login: `admin` / `admin-dev`).
+Open Grafana at `http://localhost:3000` (user `admin`; the password is `GRAFANA_ADMIN_PASSWORD` from `.env`, default `admin`).
 
 The F1 Strategy Engine dashboard shows:
 - Request rate and latency per endpoint
@@ -232,9 +223,7 @@ The F1 Strategy Engine dashboard shows:
 # Stop all Docker containers
 docker compose -f infra/docker/docker-compose.yml down
 
-# Stop the web app dev server: Ctrl+C in that terminal
-# Stop the Expo dev server: Ctrl+C in that terminal
-# Stop the replay publisher: Ctrl+C in that terminal
+# Stop the web / desktop / Expo dev servers: Ctrl+C in each terminal
 ```
 
 ### Troubleshooting
@@ -242,102 +231,68 @@ docker compose -f infra/docker/docker-compose.yml down
 | Problem | Fix |
 |---|---|
 | Container not starting | Check Docker Desktop is running, then `docker compose down` and `up -d` again |
-| Mobile app can't connect | Run `ipconfig`, update `API_BASE_URL` in `clients/mobile/.env` with new IP |
+| Features fail with auth or S3 errors after a restart | The stack was started without `--env-file .env`; recreate it with the flag |
+| Mobile app can't connect | Check `EXPO_PUBLIC_API_URL` in `mobile/.env` (`10.0.2.2` on the emulator, current LAN IP on a device) |
 | Strategy predictions failing | Check AWS credentials in `.env` — S3 model download may be failing |
 | WebSocket not updating | Restart the backend container: `docker compose restart backend` |
+| Worker still running old code | Workers don't hot-reload: `docker compose restart worker` |
 | Grafana shows no data | Wait 30s after starting — Prometheus needs time to scrape first metrics |
 
 ---
 
 ## Demo Videos
 
-All demo recordings are in the `demos/` directory and linked below. Videos show the system running locally with live F1 data from the 2025 season.
-
-### Web App
-
-| Video | Description | Duration |
-|---|---|---|
-| [Live Race Dashboard](demos/web-app/01-live-race-dashboard.mp4) | Circuit map with moving driver dots, timing tower updating via WebSocket | ~3 min |
-| [Strategy Simulator](demos/web-app/02-strategy-simulator.mp4) | Monte Carlo simulation form → result with position probability distributions | ~2 min |
-| [Pit Window with SHAP](demos/web-app/03-pit-window-shap.mp4) | Pit window recommendation with SHAP explanation showing top contributing features | ~2 min |
-| [Alert System](demos/web-app/04-alerts.mp4) | Undercut threat alert appearing in notification panel, full alert pipeline | ~1 min |
-| [Grafana Monitoring](demos/web-app/05-grafana-monitoring.mp4) | Live Grafana dashboard during load test — cache hit rate, Celery queue depth, ML inference time | ~2 min |
-
-### Desktop App (Tauri)
-
-| Video | Description | Duration |
-|---|---|---|
-| [Desktop Overview](demos/desktop-app/01-overview.mp4) | Native desktop app — same features as web but as a standalone application | ~2 min |
-| [Offline Analysis](demos/desktop-app/02-offline-analysis.mp4) | Historical race analysis using locally cached data | ~2 min |
-
-### Mobile App (React Native — iOS)
-
-| Video | Description | Duration |
-|---|---|---|
-| [Live Race View](demos/mobile-app/01-live-race.mp4) | Mobile timing tower and circuit map during a race session | ~2 min |
-| [Push Notification](demos/mobile-app/02-push-notification.mp4) | Undercut alert push notification arriving on iPhone, opening to strategy detail | ~1 min |
-| [Strategy Cards](demos/mobile-app/03-strategy-cards.mp4) | Per-driver strategy cards with pit window recommendations | ~1 min |
-
-### System & Infrastructure
-
-| Video | Description | Duration |
-|---|---|---|
-| [CI Pipeline](demos/system/01-ci-pipeline.mp4) | GitHub Actions CI running all 5 jobs on a commit | ~1 min |
-| [Load Test](demos/system/02-load-test.mp4) | Locust load test at 100 users with Grafana panels updating live | ~3 min |
-| [Kubernetes Deploy](demos/system/03-kubernetes.mp4) | Helm deploy to local Kubernetes, pods scaling, rolling update | ~2 min |
+No demo videos have been recorded yet. Screenshots and short clips of each
+feature will live in [docs/features.md](docs/features.md), which lists
+exactly what to capture. Until then, the quickest way to see the system
+working is to run it locally and start a **Demo Replay** from the race page.
 
 ---
 
 ## Mobile App — Development Build
 
-The mobile app uses **Expo Development Build** — a custom version of Expo Go installed once on your iPhone. It does not require an Apple Developer account ($99/year) and does not need to be on the App Store.
+The mobile app uses an **Expo development build**: a custom build of the app, installed once, that then live-reloads from your laptop like Expo Go. It's needed because the app uses native modules (Skia, Reanimated, react-native-svg) that the stock Expo Go app doesn't include.
+
+[mobile/README.md](mobile/README.md) is the full guide. The key facts:
+
+| Target | Cost | Notes |
+|---|---|---|
+| Android emulator | Free | Recommended way to try the app; no device or paid account needed |
+| Android phone | Free | Only a free Expo account |
+| iPhone | Apple Developer Program, $99/year | Apple requires it to install a development build on a real device |
 
 ### One-Time Setup
 
 ```bash
-# Install EAS CLI
+# Install EAS CLI and log in (free Expo account)
 npm install -g eas-cli
-
-# Login to Expo account (free at expo.dev)
 eas login
 
-# From the mobile app directory
 cd mobile
-
-# Build the development client (runs in EAS cloud, ~15 minutes)
-eas build --profile development --platform ios
+eas build --profile development --platform android   # free
+eas build --profile development --platform ios       # needs Apple Developer account
 ```
 
-When the build completes, EAS provides a QR code. Scan it with your iPhone camera to install the development build. The app icon appears on your home screen and stays there permanently.
+Each build runs in Expo's cloud and gives you a link to install the result.
 
 ### Daily Development Workflow
 
 ```bash
-# 1. Start the backend stack
-docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
+# 1. Start the backend stack (repo root)
+make dev
 
-# 2. Find your laptop's local IP
-ipconfig  # Windows — look for IPv4 Address under WiFi adapter
-# Example: 192.168.1.105
+# 2. Point the app at your backend in mobile/.env
+#    EXPO_PUBLIC_API_URL=http://<address>:8000
+#    EXPO_PUBLIC_WS_URL=ws://<address>:8000
+#    (10.0.2.2 on the Android emulator, your LAN IP on a physical device)
 
-# 3. Set the API URL in mobile app .env
-# API_BASE_URL=http://192.168.1.105:8000
-# WS_BASE_URL=ws://192.168.1.105:8000
-
-# 4. Start Expo dev server
+# 3. Start Metro
 cd mobile
 npx expo start
 
-# 5. Open the development build app on your iPhone
-# Tap the app icon → it auto-connects to your laptop
-# Code changes appear instantly (live reload)
+# 4. Open the development build on the emulator or device
+#    Code changes appear instantly (live reload)
 ```
-
-### Requirements
-
-- iPhone and laptop on the **same WiFi network**
-- Backend Docker stack running on laptop
-- Expo dev server running (`npx expo start`)
 
 ### When to Rebuild
 
@@ -345,24 +300,19 @@ A new EAS build is only needed when:
 - Adding a new native Expo module (e.g. expo-camera, expo-notifications)
 - Updating the Expo SDK version
 
-Regular development (new screens, UI changes, API calls, new components) uses live reload — no rebuild needed.
-
-### EAS Free Tier Limits
-
-- 30 builds per month — more than sufficient for a 4-day build sprint
-- No Apple Developer account required for personal device installation
+Regular development (new screens, UI changes, API calls, new components) uses live reload — no rebuild needed. EAS's free plan includes a limited number of cloud builds per month; check Expo's pricing page for the current limit.
 
 ---
 
 ## Desktop App Build & Distribution
 
 Covers producing a distributable Windows installer for the Tauri desktop
-app and getting it into reviewers' hands, as opposed to `cargo tauri dev`
+app and getting it into reviewers' hands, as opposed to `npm run tauri dev`
 (development, live-reload, used elsewhere in this doc).
 
 ### Prerequisites
 
-Already set up as part of Day 30 (see CLAUDE.md's Desktop Sync Protocol /
+Already set up on the development machine (see CLAUDE.md's Desktop Sync Protocol /
 Architecture Decisions for how these were verified):
 
 - rustup + cargo (`stable-x86_64-pc-windows-msvc` toolchain)
@@ -376,7 +326,7 @@ Architecture Decisions for how these were verified):
 api client, shared UI components — see CLAUDE.md's **Desktop Sync
 Protocol** section and `desktop/src/README.md` for the exact file list).
 Before cutting a release build, diff `desktop/src/` against `web/src/` for
-anything changed since Day 30 and re-sync — a stale copy won't fail the
+anything changed since the last sync and re-sync — a stale copy won't fail the
 build, it'll just ship desktop with outdated types/API calls silently.
 
 ### Before Building — Point at the Real Backend
@@ -388,10 +338,10 @@ VITE_API_URL=https://placeholder.fly.dev
 ```
 
 Replace it with the real Fly.io backend URL once that's deployed (see
-[Production Deployment — Fly.io](#production-deployment--flyio-after-day-40)):
+[Production Deployment — Fly.io](#production-deployment--flyio-planned)):
 
 ```
-VITE_API_URL=https://f1-strategy-engine-backend.fly.dev
+VITE_API_URL=https://f1-strategy.fly.dev
 ```
 
 A release build bundles whatever this file says at build time — there's no
@@ -401,32 +351,34 @@ runtime override once the installer is built, so get this right first.
 
 ```bash
 cd desktop
-cargo tauri build
+npm run tauri build
 ```
 
 First build: 10-15 minutes (full Rust dependency compile, release
-profile). Subsequent builds are much faster (incremental). This is
-separate from — and slower than — the `cargo tauri dev` 15-20 min *first*
-compile mentioned earlier in this repo's setup notes; that one is a debug
-build, this one is release + bundling.
+profile). Subsequent builds are much faster (incremental).
 
 ### Output
 
 ```
 desktop/src-tauri/target/release/bundle/
 ├── nsis/
-│   └── f1-strategy-engine_x.x.x_x64-setup.exe   ← NSIS installer
+│   └── F1 Strategy Engine_x.x.x_x64-setup.exe   ← NSIS installer
 └── msi/
-    └── f1-strategy-engine_x.x.x_x64.msi          ← MSI installer
+    └── F1 Strategy Engine_x.x.x_x64_en-US.msi    ← MSI installer
 ```
 
 `x.x.x` is the `version` field in `desktop/src-tauri/tauri.conf.json`
-(currently `0.1.0`). Both installers are produced by default
+(currently `1.0.0`). Both installers are produced by default
 (`bundle.targets: "all"` in that same file) — either is fine to ship; NSIS
 is the more common choice for a portfolio project since it doesn't require
 elevated install permissions.
 
 ### Distributing via GitHub Releases
+
+This is automated: pushing a version tag (e.g. `v1.0.0`) runs
+`.github/workflows/cd-desktop.yml`, which builds on Windows and attaches both
+installers to a GitHub Release, using `docs/release-notes-v1.0.0.md` as the
+release text. To do it by hand instead:
 
 1. Upload the `.exe` (or `.msi`) installer as a release asset on the same
    GitHub Releases page already used for ML model releases.
@@ -448,8 +400,8 @@ the app actually does.
   info"** → **"Run anyway"**.
 - **Alternative:** if asking a reviewer to click through a security
   warning feels like too much friction, share a screen recording of the
-  app instead of the installer (see [Demo Videos](#demo-videos)) — same
-  content, no SmartScreen prompt to explain.
+  app instead of the installer — same content, no SmartScreen prompt to
+  explain.
 
 ---
 
@@ -464,50 +416,43 @@ docker compose -f infra/docker/docker-compose.yml --env-file .env up -d
 # 2. Start whichever client you're working on:
 
 # Web app
-cd clients/web && npm run dev          # http://localhost:3000
+cd web && npm run dev                 # http://localhost:5173
 
 # Desktop app
-cd clients/desktop && npm run tauri dev  # opens native window
+cd desktop && npm run tauri dev       # opens native window
 
 # Mobile app
-cd clients/mobile && npx expo start    # scan QR with iPhone
+cd mobile && npx expo start           # open the dev build on emulator/device
 ```
 
 ### Making a Demo Recording
 
 **Web app / Desktop app:**
 - Use OBS Studio (free) or Windows Game Bar (Win+G) to record the screen
-- Run the live telemetry replay publisher for realistic data:
-  ```bash
-  python backend/tests/load/replay_publisher.py \
-    --session-id <session_id> --rate 5
-  ```
+- Start a **Demo Replay** from the race page so every panel has live, moving data
+- For short GIFs, ScreenToGif (free) works well; see the screenshot checklist in [docs/features.md](docs/features.md)
 
 **Mobile app:**
-- iPhone built-in screen recorder: Settings → Control Center → Screen Recording
-- Or QuickTime on Mac with iPhone connected via USB
+- Android emulator: the emulator's own screen-record button, or `adb shell screenrecord`
+- iPhone (if you have a development build installed): Settings → Control Center → Screen Recording
 
 ### Sharing the System Temporarily (Remote Demo)
 
 For a live demo over video call without cloud deployment:
 
 ```bash
-# Install ngrok (free)
-# Download from ngrok.com
-
-# Start ngrok tunnel to your backend
+# Install ngrok (free) from ngrok.com, then tunnel to your backend
 ngrok http 8000
 # → provides a public URL like https://abc123.ngrok-free.app
-
-# Update client .env with the ngrok URL
-# API_BASE_URL=https://abc123.ngrok-free.app
-# WS_BASE_URL=wss://abc123.ngrok-free.app
-
-# Share the frontend URL (if web app is deployed on Vercel)
-# or screen share for desktop/mobile
 ```
 
-The ngrok URL is active as long as your laptop is on and ngrok is running.
+Then point the client at that URL:
+
+- **Web / desktop:** `VITE_API_URL=https://abc123.ngrok-free.app` and `VITE_WS_URL=wss://abc123.ngrok-free.app`
+- **Mobile:** `EXPO_PUBLIC_API_URL` and `EXPO_PUBLIC_WS_URL`, same values
+- If the web app is served from another origin (e.g. Vercel), add that origin to the backend's `ALLOWED_ORIGINS`
+
+Otherwise, screen share the desktop or mobile app directly. The ngrok URL is active as long as your laptop is on and ngrok is running.
 
 ---
 
@@ -515,11 +460,11 @@ The ngrok URL is active as long as your laptop is on and ngrok is running.
 
 This runs the backend + worker on a real local Kubernetes cluster (Docker
 Desktop's built-in Kubernetes) via the Helm chart in `infra/helm-chart/` —
-proving the deployment path works before any cloud cluster exists. **It
-runs alongside docker-compose, not instead of it** — docker-compose keeps
-owning Postgres/Redis/monitoring, and the K8s backend/worker pods reach
-those same containers over the host network. Do not stop docker-compose
-before or during this.
+proving the deployment path works before any cloud cluster exists. The chart
+doesn't include Postgres or Redis: the pods connect to the cloud databases
+(Supabase and Upstash) using the URLs in `.env`. Keep docker-compose running
+anyway if you use KEDA (step 5), whose local trigger reads docker-compose's
+Redis.
 
 ### Prerequisites
 
@@ -529,9 +474,8 @@ before or during this.
   `docker-desktop`.
 - Helm installed (`helm version`). Install via `winget install Helm.Helm`
   if missing.
-- docker-compose stack already running (`docker compose -f
-  infra/docker/docker-compose.yml ps` — postgres and redis must be healthy),
-  since this deployment does not include its own Postgres/Redis.
+- `.env` contains `SUPABASE_DATABASE_URL` and `UPSTASH_REDIS_URL` (the pods
+  use these, not `.env`'s local `DATABASE_URL`/`REDIS_URL`).
 
 ### 1. Build and Verify Images
 
@@ -552,11 +496,10 @@ use the local image instead of attempting a registry pull.
 ```bash
 kubectl create namespace local
 
-# Reads DATABASE_URL/TIMESCALE_URL/REDIS_URL/SECRET_KEY/AWS credentials from
-# .env at repo root, rewriting "localhost" to "host.docker.internal" so
-# pods in the cluster can reach docker-compose's Postgres/Redis over the
-# host network.
-./infra/k8s/create-secrets.sh local --rewrite-localhost
+# Builds DATABASE_URL/TIMESCALE_URL from SUPABASE_DATABASE_URL (with the
+# +asyncpg driver) and REDIS_URL from UPSTASH_REDIS_URL, plus SECRET_KEY,
+# SENTRY_DSN and AWS credentials, all read from .env at repo root.
+./infra/k8s/create-secrets.sh local
 ```
 
 `create-secrets.sh` is gitignored (never committed) — it's a local-only
@@ -629,104 +572,195 @@ exist yet, so a scheduled run will fail until that script is written.
 | Problem | Fix |
 |---|---|
 | Pods stuck `ImagePullBackOff` | Confirm `docker build` used the exact tag in `values.local.yaml` (`f1-backend:local` / `f1-worker:local`); rebuild if stale |
-| Backend pods not `Ready` | `kubectl logs -n local deploy/f1-strategy-engine-backend` — usually a DB/Redis connectivity issue; confirm docker-compose's postgres/redis are healthy and reachable at `host.docker.internal` |
+| Backend pods not `Ready` | Allow up to 5 minutes: the ML imports make startup slow, and the startup probe waits for it. Then `kubectl logs -n local deploy/f1-strategy-engine-backend` — usually a DB/Redis connectivity issue; check `SUPABASE_DATABASE_URL`/`UPSTASH_REDIS_URL` in `.env` and re-run `create-secrets.sh` |
+| Pods keep running old code after `docker build` | The cluster doesn't re-resolve an image tag it has already cached. Tag each build uniquely (e.g. `f1-backend:<git-sha>`) and pass it with `--set backend.image.tag=... --set worker.image.tag=...` |
+| Crash loop with completely empty logs | The container was killed before it logged anything — usually the liveness probe firing during the slow ML import. Check the chart still has its `startupProbe` |
 | `create-secrets.sh` fails "namespace does not exist" | Run `kubectl create namespace local` first |
 | `helm upgrade` fails on an existing release in a bad state | `helm status f1-strategy-engine -n local` to see what's wrong before retrying |
 
 ---
 
-## Production Deployment — Fly.io (After Day 40)
+## Production Deployment — Fly.io (Planned)
 
-The recommended production deployment after all three clients are built. 
-Fly.io runs the backend and worker containers publicly at $0-4/month. 
-All features work including WebSockets — no compromises.
+> **Not live yet.** This section is the deployment *strategy*: what to run,
+> where, and what it costs. It was revised on 2026-09-25 and replaces the
+> earlier "hybrid" plan. The step-by-step commands (secrets, deploy, rollback)
+> are in [docs/runbook.md's Fly.io deployment section](docs/runbook.md#flyio-deployment).
+> Do **not** run `fly launch`, which can overwrite the committed `fly.toml`.
 
-### Production Stack
+### Why the hybrid plan was dropped
 
-| Component | Platform | Cost |
+The original plan kept only `web` running all the time and scaled `worker` and
+`beat` to zero except on race weekends, for about $7/month. That made sense
+when the worker was only needed during live races.
+
+Demo Replay changed that. A visitor can start a replay of a real race at any
+time, and a replay needs the worker: every replayed lap is processed and
+predicted by Celery tasks. The What-If Simulator also runs on the worker. With
+the worker scaled to zero, the two features that best show off the system
+would be broken most of the month. So the worker has to be available at all
+times.
+
+### What was measured (2026-09-25)
+
+Running the worker all the time isn't just "scale it to 1". These findings come
+from the local Docker stack and Fly's and Upstash's pricing pages.
+
+**1. Region is the biggest cost lever.** Fly prices regions differently.
+`fly.toml` currently uses Singapore (`sin`), which costs 2x.
+
+| Region | Price multiplier |
+|---|---|
+| Amsterdam (`ams`), Ashburn (`iad`) | 1.0x |
+| Frankfurt, London, Paris, Stockholm, Chicago, Dallas and others | 1.21x |
+| Singapore (`sin`), Tokyo, Sydney | 2.0x |
+| Mumbai (`bom`), Johannesburg | 3.0x |
+
+| shared-cpu-1x machine, running 24/7 | at 1.0x | in `sin` (2.0x) |
 |---|---|---|
-| FastAPI backend | Fly.io | $0-2/month |
-| Celery worker | Fly.io | $0-2/month |
-| PostgreSQL | Supabase (Day 23) | $0 |
-| Redis | Upstash (Day 23) | $0 |
-| ML Models | AWS S3 (Day 7) | ~$1/month |
-| Web frontend | Vercel | $0 |
-| **Total** | | **~$1-5/month** |
+| 512 MB | $3.69/month | $7.38/month |
+| 1 GB | $6.57/month | $13.14/month |
+| 2 GB | $12.36/month | $24.72/month |
 
-### One-Time Setup (After Day 40)
+Singapore was chosen because Supabase and the S3 model bucket are in Mumbai
+(`ap-south-1`). Production Supabase holds only the 3 curated Demo Replay races
+plus reference data (circuits, teams, drivers), so moving it to another region
+is a small job.
 
-```bash
-# Install Fly CLI
-curl -L https://fly.io/install.sh | sh
+**2. An idle worker would cost more in Redis than in compute.** Thirty seconds
+of Redis traffic from an idle local worker showed about 2 commands a second,
+roughly 5.5 million a month:
 
-# Login
-fly auth login
+| Source | Rate | Per month |
+|---|---|---|
+| Celery polling for new tasks (`BRPOP`, 1 s timeout) | ~1/s | ~2.6M |
+| Our queue-depth metrics poller (`LLEN` on 3 queues every 5 s, `celery_app._poll_queue_depth`) | ~0.6/s | ~1.6M |
+| Celery worker heartbeats (`PUBLISH`, every 2 s) | ~0.5/s | ~1.3M |
 
-# Deploy backend
-fly launch --dockerfile infra/docker/Dockerfile.backend \
-  --name f1-strategy-engine-backend \
-  --region sin  # Singapore — closest to Mumbai
-fly deploy
+Fly's health check adds more: it calls `/health` every 10 seconds, and
+`/health` pings Redis, which is about 260K commands a month.
 
-# Deploy worker
-fly launch --dockerfile infra/docker/Dockerfile.worker \
-  --name f1-strategy-engine-worker \
-  --region sin
-fly deploy
-```
+Upstash's free tier allows 500K commands a month, then charges $0.20 per 100K.
+Untuned, that's about $10/month for a worker doing nothing.
 
-### Environment Variables to Set on Fly.io
+**3. The web machine would likely run out of memory during a replay.** Demo
+Replay runs `replay_pipeline.py` as a subprocess on the **web** machine, not on
+the worker. Measured locally: the web process uses about 560 MB once models
+are loaded, and the replay process needs about 390 MB just to start. That's
+roughly 950 MB on the 1 GB machine `fly.toml` currently specifies.
 
-```bash
-# Set for both backend and worker apps
-fly secrets set \
-  DATABASE_URL=<supabase-pooler-url> \
-  REDIS_URL=<upstash-rediss-url> \
-  SECRET_KEY=<your-secret-key> \
-  AWS_ACCESS_KEY_ID=<key> \
-  AWS_SECRET_ACCESS_KEY=<secret> \
-  AWS_BUCKET_NAME=f1-strategy-models \
-  AWS_REGION=ap-south-1 \
-  SENTRY_DSN=<your-dsn> \
-  ENVIRONMENT=production \
-  --app f1-strategy-engine-backend
-```
+**4. Startup could take around 12 minutes on a shared CPU.** A Fly shared vCPU
+is guaranteed 6.25% of a core. It can burst to 100% using saved-up credit, but
+a new machine starts with only 5 seconds of credit (the maximum is 500 seconds,
+earned while idle). Importing the app measured about 50 CPU-seconds locally: 5
+seconds at full speed, then about 45 seconds of work at 6.25%, which is roughly
+12 minutes. That is far past the 300-second health-check grace in `fly.toml`.
+About 20 of those 50 seconds come from one import chain,
+`backend.services.ml.driver_style` → `umap` → `pynndescent`, which recompiles
+numba code on every start. It's loaded at startup even though only the driver
+style page uses it.
 
-### After Deployment
+**5. The separate beat machine is wasteful.** `beat` uses about 310 MB to send
+one task (`check_for_live_session`) every 5 minutes. Celery can run the
+scheduler inside the worker process (`celery worker -B`), which is safe with a
+single worker.
 
-```bash
-# Verify backend is healthy
-curl https://f1-strategy-engine-backend.fly.dev/health
+### Options compared
 
-# Update frontend .env to point at Fly.io
-# VITE_API_URL=https://f1-strategy-engine-backend.fly.dev
-# VITE_WS_URL=wss://f1-strategy-engine-backend.fly.dev
+| Option | Monthly cost | Verdict |
+|---|---|---|
+| Hybrid (web always on; worker and beat only on race weekends), `sin` | ~$13 + race weekends | Replay and simulator broken most of the time. Rejected. |
+| Current `fly.toml` run always-on (web 1 GB, worker 1 GB, beat 512 MB), `sin`, untuned | ~$34 compute + ~$10 Upstash ≈ **$44** | Works (after the startup and memory fixes) but pays twice for region and Redis. |
+| **Recommended:** web 1 GB + worker 1 GB with beat built in, Redis tuned, 1.0x region | $13.14 + ~$1 S3 ≈ **$14** | Everything available 24/7 at the lowest cost that doesn't hurt the experience. |
+| Same as recommended, but stay in `sin` with Mumbai data stores | $26.28 + ~$1 ≈ **$27** | No database move, but twice the compute price. |
+| Everything on one 2 GB machine (web + worker + beat) | $12.36 + ~$1 ≈ $13 | Saves $0.78 but shares one CPU allowance between the site and heavy ML work, so the site slows during every replay or simulation. Needs a process manager. Not worth it. |
+| Scale to zero with Fly auto-stop/auto-start | a few dollars | A stopped machine restarts with 5 seconds of CPU credit, so a visitor's first page waits minutes. The worker can't auto-start at all (no public port for Fly's proxy to wake it on). Not suitable. |
 
-# Deploy frontend to Vercel (points at Fly.io backend)
-vercel deploy
-```
+### Recommended setup
 
-### RAM Note
+| Component | Where | Size | $/month |
+|---|---|---|---|
+| `web` (FastAPI, plus replays as a subprocess) | Fly.io, 1.0x region | shared-cpu-1x, 1 GB + 512 MB swap | $6.57 |
+| `worker` (Celery, scheduler built in with `-B`) | Fly.io, same region | shared-cpu-1x, 1 GB | $6.57 |
+| Redis (cache, broker, pub/sub) | Upstash free tier, same region | — | $0 |
+| PostgreSQL | Supabase free tier, same region | — | $0 |
+| ML models | AWS S3 (`ap-south-1`, read once per process start) | — | ~$1 |
+| Web frontend | Vercel | — | $0 |
+| **Total** | | | **~$14** |
 
-Fly.io free VMs are 256MB shared. Your backend loads XGBoost + LightGBM + 
-SHAP at startup (~512MB needed). Upgrade to 512MB if needed:
+Two separate machines cost only $0.78 more than one shared machine and give
+the site and the ML work separate CPU allowances. Keep the shared IPv4 that
+Fly assigns; a dedicated IPv4 ($2/month) isn't needed for HTTP.
 
-```bash
-fly scale memory 512 --app f1-strategy-engine-backend
-# Cost: ~$1.94/month — still nearly free
-```
+**Region decision (open).**
 
-### What Works on Fly.io
+- **Recommended: Amsterdam (`ams`), with Supabase and Upstash moved to
+  Frankfurt (`eu-central-1`).** Cheapest price tier, about 8 ms from the
+  databases, and a reasonable middle ground for visitors (~120 ms from India,
+  ~85 ms from the US East Coast).
+- **Alternative: Ashburn (`iad`), with Supabase and Upstash in `us-east-1`.**
+  Same price, and the better choice if most visitors are in the US.
+- **Staying in `sin`** avoids the database move but costs about $27/month and
+  still pays ~60 ms per database round trip to Mumbai.
 
-- ✅ All REST API endpoints
-- ✅ WebSocket live telemetry
-- ✅ ML inference (XGBoost, LightGBM, Monte Carlo)
-- ✅ Celery background tasks
-- ✅ SHAP explanations
-- ✅ Push notifications
-- ✅ Authentication (JWT)
-- ✅ Always-on (no spin-down)
-- ✅ Public permanent URL
+### What needs to be done
+
+**Code and config changes (before the first deploy)**
+
+1. **Merge beat into the worker.** Add `-B --schedule=/tmp/celerybeat-schedule`
+   to the `worker` command in `fly.toml` and remove the `beat` process group and
+   its `[[vm]]` block.
+2. **Cut idle Redis traffic to fit Upstash's free tier:**
+   - Start the worker with `--without-heartbeat --without-gossip --without-mingle`.
+   - Set `broker_transport_options={"polling_interval": 30}` in
+     `backend/workers/celery_app.py`. This only makes the idle `BRPOP` loop
+     re-poll less often; a new task is still picked up immediately.
+   - Make the queue-depth poller configurable and turn it off on Fly, where no
+     Prometheus scrapes it.
+   - Raise the Fly health-check `interval` from 10 s to 60 s.
+   - Estimated result: about 150–400K commands a month before visitor and
+     replay traffic. If real usage goes over the free tier, the overage is a
+     few dollars; the fallback is a self-hosted Redis on a 256 MB Fly machine
+     ($2.25/month, no per-command billing).
+3. **Give web enough memory for replays.** Add 512 MB of swap to the web
+   machine. If swap proves too slow, move web to 2 GB (+$5.79/month).
+4. **Cut startup CPU:**
+   - Import `umap` inside the driver-style fitting function instead of at module
+     level, so the site doesn't pay ~20 CPU-seconds at every boot.
+   - Set `NUMBA_CACHE_DIR` to a directory baked into the Docker image, so
+     numba-compiled code isn't rebuilt on every start.
+5. **Update `primary_region` in `fly.toml`** to the chosen region, and update
+   `fly.toml`'s header comment, which still describes the hybrid plan.
+
+**Infrastructure (only if moving region)**
+
+6. Create a new free Supabase project in the chosen region. Run the Alembic
+   migrations, the circuit/team/outline seeds, the 3 curated race ingests and
+   the backfills (`session_elapsed_seconds`, tyre degradation, session total
+   laps). Confirm the Demo Replay position data (`driver_positions`) is present
+   too, not only locally.
+7. Create a new free Upstash database in the same region.
+8. Update the `SUPABASE_DIRECT_URL` GitHub secret (used by CI migrations and
+   the keep-alive job) and the Fly secrets.
+
+**Deploy and verify**
+
+9. Follow the runbook's Fly.io procedure, with the changes above.
+10. Re-measure on Fly, because the numbers above come from Docker Desktop on
+    Windows:
+    - time from deploy to a healthy `/health`
+    - web memory while a replay runs
+    - Upstash's command count after a few idle days
+11. Point the frontend at the new backend: update the `VITE_API_URL_PROD`
+    GitHub secret, `desktop/.env.production`, and the backend's
+    `ALLOWED_ORIGINS`.
+12. Retire the race-weekend scaling steps in the runbook (`make fly-race-up` /
+    `fly-race-down`), which only existed for the hybrid plan.
+
+Pricing sources: [Fly.io pricing](https://docs.fly.io/about/pricing/),
+[Fly.io shared CPU quotas](https://docs.fly.io/machines/cpu-performance/),
+[Upstash Redis pricing](https://upstash.com/pricing/redis). Prices checked
+2026-09-25.
 
 ---
 
@@ -746,9 +780,9 @@ Local Kubernetes (Docker Desktop) remains available for:
 - Compare single-instance vs multi-replica performance
 
 **Future cloud migration:**
-- The same Helm chart in `infra/helm-chart/` deploys to GKE/EKS unchanged
-- If real traffic ever demands it, migrate from Fly.io to GKE in one afternoon
-- Same Docker images, same configuration, different cluster endpoint
+- The Helm chart in `infra/helm-chart/` is a starting point for a managed
+  cluster (GKE/EKS) if real traffic ever outgrows Fly.io, using the same
+  Docker images
 
 ```bash
 # Resume local Kubernetes deployment any time
@@ -758,6 +792,13 @@ helm upgrade --install f1-strategy-engine ./infra/helm-chart \
 kubectl get pods -n local
 ```
 
-The Kubernetes manifests and Helm charts in `infra/helm-chart/` are ready for GKE/EKS deployment when needed — same Docker images, same configuration, pointed at cloud infrastructure instead of local.
+The chart and manifests have only been validated against this local cluster.
+Before a real cloud cluster, they would need:
+- images pushed to a registry, instead of the local `:local` tags
+- a production namespace
+- Redis authentication restored in `infra/k8s/worker-scaledobject.yaml`
+- secrets managed properly (e.g. Sealed Secrets) instead of `create-secrets.sh`
+- the missing `backend/scripts/prescale_for_session.py`, if the race-weekend
+  CronJob is kept
 
-Migration steps are documented in `docs/runbook.md`.
+Each manifest's header comment lists its local-only overrides.

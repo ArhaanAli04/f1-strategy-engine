@@ -436,7 +436,7 @@ async def test_update_subscription_replaces_preferences(mock_db_session: AsyncMo
 
 
 # --- live standings + race-state gates
-# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
+# (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B) ---
 
 _SEASON, _ROUND = 2026, 13
 

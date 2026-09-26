@@ -286,7 +286,7 @@ async def simulate_strategy(
     # Reject before enqueueing anything — a bad current_lap should never
     # cost a Celery round trip, and the caller gets a synchronous 404/422
     # instead of having to poll a task to FAILURE to find out. See
-    # docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+    # docs/internal/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
     # follow-up finding and strategy_service.validate_current_lap's own
     # docstring for what this actually checks and why. Also enforced
     # independently inside prediction_worker._run_simulation (defense in

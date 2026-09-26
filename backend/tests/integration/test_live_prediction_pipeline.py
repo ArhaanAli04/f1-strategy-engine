@@ -203,7 +203,7 @@ def test_live_prediction_pipeline_populates_recommendation_fields(
     )
     driver = Driver(id=uuid.uuid4(), code="VER", full_name="Max Verstappen", nationality="NED")
     # session_row above has no total_laps set (Session.total_laps, added for
-    # docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
+    # docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue A —
     # see strategy_service.py's module docstring), so total_laps falls back
     # to MAX(lap_number) across the session, same as before that fix. A
     # second, further-along driver establishes a real race distance under

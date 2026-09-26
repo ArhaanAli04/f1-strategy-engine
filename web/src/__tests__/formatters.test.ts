@@ -18,7 +18,7 @@ describe("formatLapTime", () => {
 describe("formatRaceTime", () => {
   it("formats a time past an hour as h:mm:ss.sss", () => {
     // 1h16m44.567s = 3600 + 960 + 44.567 = 4604.567 — VER's real Belgian GP
-    // 2026 R10 finish time (see docs/day-deferred-fixes-session2-handoff.md
+    // 2026 R10 finish time (see docs/internal/day-deferred-fixes-session2-handoff.md
     // Test 2), a realistic full-race magnitude now that predicted_finish_time
     // is a genuine absolute elapsed time (race_simulator.py's
     // baseline_lap_time_seconds), not a small relative delta.

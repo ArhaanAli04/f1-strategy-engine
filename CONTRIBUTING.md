@@ -8,7 +8,7 @@ workflows actually run, not an idealized version of it.
 ## Getting Started
 
 **Prerequisites** (same as [README.md](README.md)):
-- Python 3.12+
+- Python 3.11+ (CI runs 3.12)
 - Node 20+
 - Docker Desktop
 - Rust + Visual Studio Build Tools — only if you're building the desktop app

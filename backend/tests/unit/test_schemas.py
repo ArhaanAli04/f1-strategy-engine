@@ -27,7 +27,7 @@ def test_simulate_request_validates_compound_list() -> None:
 
 # --- SimulateStrategyRequest bounds (current_lap/remaining_laps/current_tyre_age
 # minimums, pit_laps horizon) — see
-# docs/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
+# docs/internal/simulator-issues-wet-model-and-position-context.md's Checkpoint-6
 # follow-up: a request with no bounds at all let a 68-lap what-if run against
 # a 44-lap race. The current_lap-vs-real-session-progress check itself needs a
 # DB lookup (strategy_service.validate_current_lap, covered in
@@ -104,7 +104,7 @@ def test_simulate_request_accepts_pit_lap_at_horizon_boundaries() -> None:
 
 
 # --- SimulateStrategyRequest.scenarios (What-If Simulator multi-scenario
-# rebuild, Checkpoint 3 — see docs/core-feature-rebuild-whatif-simulator.md) ---
+# rebuild, Checkpoint 3 — see docs/internal/core-feature-rebuild-whatif-simulator.md) ---
 
 
 @pytest.mark.unit

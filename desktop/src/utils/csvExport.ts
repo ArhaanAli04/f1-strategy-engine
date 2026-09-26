@@ -5,7 +5,7 @@ import type { SimulatedRaceOutcome } from "@/types"
 
 // Mean Position/P(Gain)/P(Hold)/P(Lose) added alongside the What-If
 // Simulator multi-scenario rebuild (see
-// docs/core-feature-rebuild-whatif-simulator.md) — the same breakdown
+// docs/internal/core-feature-rebuild-whatif-simulator.md) — the same breakdown
 // web/desktop's PositionDistributionChart.tsx renders, exported here too
 // since CSV export is desktop-exclusive functionality that should reflect
 // the full richness of a simulation result, not just its pre-existing

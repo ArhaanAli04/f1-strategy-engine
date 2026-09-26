@@ -193,7 +193,7 @@ async def test_get_driver_laps_paginates_correctly(
         # _is_session_live return False (historical TTL), same as this test
         # already implicitly assumed before that call existed.
         _one_or_none_result(None),
-        # Issue E's fix (docs/live-race-ingestion-and-strategy-gaps-monza-
+        # Issue E's fix (docs/internal/live-race-ingestion-and-strategy-gaps-monza-
         # 2026.md): a non-empty result with _is_session_live == False now
         # also calls _resolve_race_status before the long TTL is granted —
         # an equally-unresolvable session_id resolves to None here too,
@@ -216,7 +216,7 @@ async def test_get_driver_laps_uses_long_ttl_only_when_race_completed(
 ) -> None:
     """Issue E fix: the 86400s TTL requires a genuinely completed race.
 
-    Reproduces the exact failure mode docs/live-race-ingestion-and-strategy-
+    Reproduces the exact failure mode docs/internal/live-race-ingestion-and-strategy-
     gaps-monza-2026.md's Issue E describes: _is_session_live reads False
     (e.g. a transient ingestor reconnect gap let the 30s `gaps` key lapse)
     but the race is NOT actually completed — the old logic would have

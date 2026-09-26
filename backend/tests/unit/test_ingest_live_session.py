@@ -1,5 +1,5 @@
 """Unit tests for ingest_live_session.py's Checkpoint 1 live-parity fixes
-(see docs/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
+(see docs/internal/core-feature-rebuild-strategy-recommendations.md and CLAUDE.md's
 core-feature-rebuild session):
 
 1. tyre_age_laps was previously hardcoded to 0 for every lap — now derived
@@ -11,7 +11,7 @@ core-feature-rebuild session):
 3. A retired car's gap freezing in the live standings for the rest of the
    race. An earlier fix waited for a "RETIRED" GapToLeader string that F1's
    real feed was later confirmed (Monza 2026 archive,
-   docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C) to never
+   docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C) to never
    send — it sends Retired/ShowPosition/Stopped booleans instead, which are
    what the retirement, lapped-car ("1 L"/"52L") and Position-vs-gap ranking
    tests below pin.
@@ -252,7 +252,7 @@ def test_handle_timing_data_recomputes_positions_before_dispatching_within_one_m
 
 
 # --- retirement: F1's real signals are Retired / ShowPosition / Stopped booleans ---
-# (docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C — F1 never
+# (docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue C — F1 never
 # sends a "RETIRED" gap string; confirmed against Monza 2026's archived feed)
 
 
@@ -545,7 +545,7 @@ def test_position_diff_seen_is_set_by_a_live_diff_but_not_by_the_subscribe_snaps
     assert ingestor._position_diff_seen is True
 
 
-# --- _is_plausible_lap (Issue D: docs/live-race-ingestion-and-strategy-
+# --- _is_plausible_lap (Issue D: docs/internal/live-race-ingestion-and-strategy-
 # gaps-monza-2026.md) ---
 
 
@@ -617,7 +617,7 @@ def test_is_plausible_lap_magnitude_backstop_rejects_a_red_flag_scale_lap() -> N
     )
 
 
-# --- _handle_lap_count (Issue A, docs/live-race-ingestion-and-strategy-
+# --- _handle_lap_count (Issue A, docs/internal/live-race-ingestion-and-strategy-
 # gaps-monza-2026.md) ---
 
 
@@ -893,7 +893,7 @@ def test_handle_timing_data_publishes_gaps_with_recomputed_positions() -> None:
 
 
 # --- Real-world verification: actual field data from the 2026 Italian GP
-# (Monza, session_id 3ddc84bd-f10e-4870-9e98-631d79695beb) — see docs/live-
+# (Monza, session_id 3ddc84bd-f10e-4870-9e98-631d79695beb) — see docs/internal/live-
 # race-ingestion-and-strategy-gaps-monza-2026.md Issue D. Every value below
 # was queried directly from the local DB's lap_data table, not fabricated —
 # see that document's Section 0b / Issue D re-verification note for the
@@ -998,7 +998,7 @@ def test_is_plausible_lap_real_monza_lap3_is_a_known_uncloseable_gap(
     code: str, lap_time: float, sector1: float, sector2: float, sector3: float
 ) -> None:
     """Documents a real, known limitation rather than papering over it: lap 3
-    is ALSO part of the same red-flag window (docs/live-race-ingestion-and-
+    is ALSO part of the same red-flag window (docs/internal/live-race-ingestion-and-
     strategy-gaps-monza-2026.md Issue D re-verification, laps 3-6), but every
     field here is genuinely present and sums correctly (confirmed: 0 of 21
     lap-3 rows are missing a sector), and 120-170s is well under

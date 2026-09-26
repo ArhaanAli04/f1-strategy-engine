@@ -47,6 +47,9 @@ _EXPECTED_TABLES = {
     "users",
     "alerts",
     "subscriptions",
+    "replay_lap_timings",
+    "replay_gap_snapshots",
+    "replay_alert_events",
     "alembic_version",
 }
 

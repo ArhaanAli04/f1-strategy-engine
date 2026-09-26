@@ -7,7 +7,7 @@ verification done against F1's archived feed shows what F1 recorded server-side,
 which is not necessarily what this connection received. With RECORD_RAW_FEED
 on, this writes one gzip'd JSONL file per session that
 `verify_live_feed_archive --recording` can replay and compare with the archive.
-See docs/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c (V5).
+See docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c (V5).
 
 One JSON object per line: {"t": <receive time, epoch seconds>, "topic": ...,
 "data": ...}. Besides feed messages there are two extra topics:

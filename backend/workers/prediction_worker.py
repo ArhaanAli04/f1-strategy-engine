@@ -115,7 +115,7 @@ def _download_from_s3(filename: str) -> Path:
     the download if so — that was the original behavior (see git history) and
     it silently served stale models forever, since the local file never
     expires and nothing else ever invalidates it. Confirmed as a real bug
-    2026-09-11 (docs/tire-deg-model-quality-and-rival-pit-behavior.md's CP3):
+    2026-09-11 (docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md's CP3):
     both the host machine's and the running worker container's cache
     directories held .pkl files dated weeks/a session earlier than the
     latest real promotion, so "docker compose restart worker" — this
@@ -227,7 +227,7 @@ def _load_models() -> dict[str, Any]:
             _holdout_mae_cache[filename] = tire_deg_model.holdout_mae_from_metrics(metrics)
     # Guards against a stale/schema-incompatible production model (e.g. the
     # 8-feature tire_deg_wet.pkl leftover from the reverted weather
-    # experiment — see docs/simulator-issues-wet-model-and-position-
+    # experiment — see docs/internal/simulator-issues-wet-model-and-position-
     # context.md) by aliasing it (and its encoding maps/holdout_mae) to a
     # compatible fallback for this process.
     tire_deg_model.apply_incompatible_model_fallbacks(
@@ -387,7 +387,7 @@ async def _resolve_position_context_from_redis(
             "session_id"). The key is per season/round, not per session, and
             a replay or a cache-aside write to it carries no live gaps — for
             a live session the DB cumulative-sum path this preempts is the
-            wrong one (lap 1 has no recorded time, see docs/live-race-
+            wrong one (lap 1 has no recorded time, see docs/internal/live-race-
             ingestion-and-strategy-gaps-monza-2026.md Issue B).
     Returns:
         Same shape as _resolve_position_context's return value, or None if
@@ -471,7 +471,7 @@ async def _resolve_position_context(
     anyone, so every gap that opened on the first lap is missing (Monza 2026:
     the sum said the requester was already ahead of the car ahead in 33% of
     real predictions vs 4% on the road; median gap error 2.6s — see
-    docs/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). The
+    docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md Issue B). The
     live snapshot is the CURRENT tower, not the tower as of current_lap, so a
     worker running well behind the race sees a slightly newer field than the
     lap it is predicting; on Monza the worker was level with the race on 95%
@@ -486,7 +486,7 @@ async def _resolve_position_context(
     ingestor fix landed (position was never set at all previously; ON
     CONFLICT DO NOTHING means those rows stay NULL permanently — same
     accepted-limitation shape as the compound-tracking gap documented in
-    docs/day36-fixes.md's Bug 5). A historical session never needs this
+    docs/internal/day36-fixes.md's Bug 5). A historical session never needs this
     fallback: ingest_historical.py populates position on every row.
 
     Uses the same "latest LapData row per driver, ordered by position" pattern
@@ -616,7 +616,7 @@ async def _resolve_inference_context(
         same value OR the MAX(lap_number)-so-far fallback proxy. Callers
         that need to distinguish "a real race length is known" from "we're
         using the mid-race proxy" (e.g. _run_inference's optimal_pit_lap
-        clamp — see docs/live-race-ingestion-and-strategy-gaps-monza-
+        clamp — see docs/internal/live-race-ingestion-and-strategy-gaps-monza-
         2026.md Issue A) must check stored_total_laps, not total_laps: the
         proxy is itself meaningless mid-race, so treating it as equally
         trustworthy would silently replace one wrong number with another.
@@ -633,7 +633,7 @@ async def _resolve_inference_context(
         await db.execute(context_query)
     ).one()
 
-    # Prefer the real scheduled distance (docs/live-race-ingestion-and-
+    # Prefer the real scheduled distance (docs/internal/live-race-ingestion-and-
     # strategy-gaps-monza-2026.md Issue A) — Session.total_laps, populated
     # historically from FastF1's own session.total_laps and live from the
     # feed's LapCount topic (see ingest_historical.py/ingest_live_session.py).
@@ -819,7 +819,7 @@ def _run_inference(
     # current_lap + 1 almost always. predicted_life_remaining is the
     # genuine laps-until-degradation-threshold count.
     optimal_pit_lap = lap_number + max(int(predicted_life_remaining), 1)
-    # Clamped 2026-09-19 (docs/live-race-ingestion-and-strategy-gaps-monza-
+    # Clamped 2026-09-19 (docs/internal/live-race-ingestion-and-strategy-gaps-monza-
     # 2026.md Issue A): predicted_life_remaining caps at tire_deg_model.
     # MAX_LOOKAHEAD_LAPS (40), so this was unbounded against real race
     # length — the exact bug behind "Recommended: Lap 78" on a 53-lap race.
@@ -1519,7 +1519,7 @@ class _OvertakingDriverEntry(TypedDict):
     driver_id: str
     gap_seconds: float
     # Added for the What-If Simulator rebuild part (b) — see
-    # docs/core-feature-rebuild-whatif-simulator.md §7 and
+    # docs/internal/core-feature-rebuild-whatif-simulator.md §7 and
     # _build_plan_explanation's own docstring for the full rationale. Both
     # None when the simulation has no data for this rival (should not happen
     # for a driver who actually raced in the same simulate_race call, but
@@ -1542,7 +1542,7 @@ def _project_pit_stop_degradation(
     """Real tire_deg-derived (fresh_tyre_gain_per_lap, total_recoverable_seconds).
 
     What-If Simulator rebuild part (a) — see
-    docs/core-feature-rebuild-whatif-simulator.md §7. Compares, for the
+    docs/internal/core-feature-rebuild-whatif-simulator.md §7. Compares, for the
     plan's LAST forced pit stop, the OLD compound continuing to degrade (tyre
     age growing from its real value at that pit lap — "what if the driver had
     stayed out instead") against the NEW compound starting fresh at
@@ -1712,7 +1712,7 @@ def _build_plan_explanation(
     regardless of whether this plan has a forced pit stop — the frontend
     relabels the same list ("overtake you" vs "you overtake") based on
     position_gain_loss's sign. Deliberately UNCHANGED by either part of the
-    What-If Simulator rebuild fix — see docs/core-feature-rebuild-whatif-
+    What-If Simulator rebuild fix — see docs/internal/core-feature-rebuild-whatif-
     simulator.md §7's own scope decision: part (a) enriched fresh_tyre_
     gain_per_lap/total_recoverable_seconds only, and this part (b) enriches
     each row's DATA (finish_ahead_probability/rival_projected_pit_lap/
@@ -1854,7 +1854,7 @@ def _run_one_scenario(
 
     Shared by both the single-plan path (SimulateStrategyRequest.scenarios
     omitted) and the multi-scenario compare path (Checkpoint 3, see
-    docs/core-feature-rebuild-whatif-simulator.md) — the only difference
+    docs/internal/core-feature-rebuild-whatif-simulator.md) — the only difference
     between the two is how many times this is called per request and
     whether rng_seed is shared across those calls.
 
@@ -1871,7 +1871,7 @@ def _run_one_scenario(
         maps_cache: Output of _load_encoding_maps() — threaded into
             _build_plan_explanation for its real tire_deg-derived degradation
             comparison (What-If Simulator rebuild part (a), see
-            docs/core-feature-rebuild-whatif-simulator.md §7).
+            docs/internal/core-feature-rebuild-whatif-simulator.md §7).
         pit_laps, compounds: This scenario's forced pit plan — may be empty
             (that scenario's pit timing is left fully model-driven).
         total_laps, remaining_laps: Request-level race-length context,
@@ -1917,7 +1917,7 @@ def _run_one_scenario(
     requester_id_str = str(requesting_driver_id)
     # Built once per scenario, keyed by driver_id — feeds _build_plan_
     # explanation's finish_ahead_probability/projected-pit-lap enrichment
-    # (What-If Simulator rebuild part (b), see docs/core-feature-rebuild-
+    # (What-If Simulator rebuild part (b), see docs/internal/core-feature-rebuild-
     # whatif-simulator.md §7): every driver's own DriverPositionDistribution
     # from THIS scenario's simulate_race call, not a fresh computation.
     driver_distributions_by_id = {d.driver_id: d for d in result.driver_distributions}
@@ -1978,7 +1978,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             Raising here degrades to a Celery task FAILURE (logged, no
             result stored) rather than silently running phantom laps beyond
             the session's actual race distance — see
-            docs/simulator-issues-wet-model-and-position-context.md's
+            docs/internal/simulator-issues-wet-model-and-position-context.md's
             Checkpoint-6 follow-up finding.
     """
     models = _load_models()

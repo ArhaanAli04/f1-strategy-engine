@@ -13,7 +13,7 @@ fix, the stored values had a negative median for every compound across all
 them. tire_deg_model.fuel_load_penalty_seconds is the same fuel model the
 tyre-degradation models themselves train against, reused here deliberately so
 the two definitions of "degradation" can't drift apart. See
-docs/tire-deg-model-quality-and-rival-pit-behavior.md.
+docs/internal/tire-deg-model-quality-and-rival-pit-behavior.md.
 
 Re-run after this fix to correct already-backfilled seasons — the values
 stored by earlier runs carry the uncorrected slope.

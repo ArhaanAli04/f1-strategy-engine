@@ -9,18 +9,42 @@
 
 ![Docker](https://img.shields.io/badge/Docker-blue?style=flat-square&logo=docker&logoColor=white) ![GitHub Actions](https://img.shields.io/badge/GitHub_Actions-black?style=flat-square&logo=githubactions&logoColor=white) ![Vercel](https://img.shields.io/badge/Vercel-black?style=flat-square&logo=vercel&logoColor=white)
 
-A full-stack F1 race strategy platform that ingests lap-by-lap telemetry from
-the FastF1 API, runs XGBoost/LightGBM models and a Monte Carlo race simulator
-to predict pit windows and undercut probabilities, and streams the results to
-a web, desktop, and mobile client over a live WebSocket feed. It exists as a
-from-scratch build-in-public project to work through a production-shaped
-stack — async FastAPI, Celery, Kubernetes, real ML — end to end rather than
-as a pre-existing tool.
+A full-stack F1 race strategy platform that ingests lap-by-lap timing from
+F1's live feed and the FastF1 API, runs XGBoost/LightGBM models and a Monte
+Carlo race simulator to predict pit windows and undercut probabilities, and
+streams the results to a web, desktop, and mobile client over a live WebSocket
+feed. It exists as a from-scratch build-in-public project to work through a
+production-shaped stack — async FastAPI, Celery, Kubernetes, real ML — end to
+end rather than as a pre-existing tool.
+
+<img src="docs/assets/features/race-page.png" alt="Race page: live timing tower, circuit map, lap charts and strategy panels" width="900">
+
+## Features
+
+- **Live race view:** timing tower, animated circuit map, lap-time and sector
+  charts, updated every lap over a WebSocket.
+- **Pit-window recommendations:** when to pit, onto which tyre, with a
+  confidence score and a plain-English explanation of why (SHAP).
+- **Undercut and overcut threats + alerts:** the chance of gaining or losing a
+  place to the cars around you if someone pits now, with real-time alerts.
+- **What-If Strategy Simulator:** compare up to 4 pit strategies, each run
+  1,000 times (Monte Carlo), and see the full spread of finishing positions.
+- **Driver analytics:** driving-style radar and archetype, sector times vs.
+  teammate, lap times by compound.
+- **Demo Replay:** play a real 2026 race back through the full live pipeline
+  when no race is on.
+- **Automatic race detection:** the backend spots an upcoming race and starts
+  live ingestion on its own.
+- **Three clients:** web (React), Windows desktop with an always-on-top overlay
+  (Tauri), and mobile (Expo).
+
+**See [docs/features.md](docs/features.md) for the full tour with screenshots.**
 
 ## Architecture
 
 ```
-FastF1 API ──▶ ingestion scripts ──▶ PostgreSQL (Supabase)
+F1 live ───┐
+FastF1 API─┴─▶ ingestion scripts ──▶ PostgreSQL (Supabase)
                                           │
                                           ├──▶ Celery workers ──▶ ML models (XGBoost/LightGBM)
                                           │         │                  │
@@ -41,7 +65,7 @@ Key components:
 - **FastAPI backend** — async REST + WebSocket API, zero business logic in
   route handlers (`backend/apis/v1/`), all logic in `backend/services/`.
 - **Celery workers** — run ML inference and the Monte Carlo race simulator
-  off the request path, on Redis Streams as the broker.
+  off the request path, with Redis as the broker.
 - **PostgreSQL (Supabase)** — primary datastore for laps, stints, races,
   strategy predictions.
 - **Redis (Upstash)** — cache-aside for predictions, pub/sub for WebSocket
@@ -53,7 +77,7 @@ Key components:
 ## Prerequisites
 
 **Required:**
-- Python 3.12+
+- Python 3.11+ (CI runs 3.12)
 - Node 20+
 - Docker Desktop
 
@@ -93,7 +117,7 @@ The backend API is at `http://localhost:8000` (interactive docs at
 | `desktop/` | Tauri v2 + React desktop app. Shares most of its source with `web/` via manual sync — see `desktop/src/README.md`. |
 | `mobile/` | Expo (React Native) mobile app. Same manual-sync relationship to `web/` — see `mobile/src/README.md`. |
 | `infra/` | Docker Compose files, Kubernetes manifests + Helm chart, and Prometheus/Grafana/Alertmanager monitoring config. |
-| `docs/` | Architecture decisions, ML model documentation, load test results, and the operational runbook. |
+| `docs/` | Feature tour, architecture decisions, ML model documentation, load test results, and the operational runbook. |
 
 ## Available Make Targets
 
@@ -121,11 +145,14 @@ The backend API is at `http://localhost:8000` (interactive docs at
 
 | Doc | Covers |
 |---|---|
+| [docs/features.md](docs/features.md) | Every feature, what it shows, how it works, and its limitations, with screenshots. |
 | [docs/architecture.md](docs/architecture.md) | Why each major technology was chosen, including tradeoffs that were reconsidered along the way. |
 | [docs/ml-models.md](docs/ml-models.md) | All 7 ML models — type, features, training data, performance, retraining. |
-| [docs/performance-report.md](docs/performance-report.md) | Day 35 load test results and the N+1 fix that produced them. |
-| [docs/load_test_results.md](docs/load_test_results.md) | Running log of load test runs across the project (Day 13 onward). |
+| [docs/engineering-notes.md](docs/engineering-notes.md) | Eight real bugs and performance problems from building this: symptom, root cause, fix, measured result. |
+| [docs/performance-report.md](docs/performance-report.md) | Index audit, an N+1 query fix, and the load test results before and after it. |
+| [docs/load_test_results.md](docs/load_test_results.md) | Running log of every load test run, so improvements and regressions are visible over time. |
 | [docs/runbook.md](docs/runbook.md) | Rollback, scaling, and secret rotation procedures. |
+| [docs/release-notes-v1.0.0.md](docs/release-notes-v1.0.0.md) | What shipped in v1.0.0 and how to install the desktop app. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching strategy, PR process, and local dev setup. |
 
 ## Tech Stack
@@ -133,7 +160,7 @@ The backend API is at `http://localhost:8000` (interactive docs at
 | Layer | Technology | Why |
 |---|---|---|
 | Backend API | FastAPI, SQLAlchemy 2.0 (async), Pydantic v2 | Async-native, auto-generated OpenAPI docs, request/response validation, and `mypy --strict` type safety throughout. |
-| Task Queue | Celery + Redis Streams | ML inference and race simulation run in separate worker processes so they never block the API event loop, and scale independently of it. |
+| Task Queue | Celery + Redis | ML inference and race simulation run in separate worker processes so they never block the API event loop, and scale independently of it. |
 | ML | XGBoost, LightGBM, scikit-learn, NumPy, SciPy, Numba | Tabular data (~20 features, ~166k training rows) — gradient-boosted trees outperform and are far more interpretable than a neural net at this scale. Numba JIT-compiles the Monte Carlo simulation's hot loop. |
 | Explainability | SHAP (TreeExplainer) | Native support for XGBoost/LightGBM; used to explain individual pit/tire-degradation predictions. |
 | Data Ingestion | FastF1, httpx (async), websockets, APScheduler | FastF1 is the standard open-source F1 timing/telemetry library; async httpx and APScheduler drive both historical backfills and live-session polling. |
@@ -141,8 +168,8 @@ The backend API is at `http://localhost:8000` (interactive docs at
 | Cache | Redis (Upstash), in-memory fallback | Cache-aside for predictions, pub/sub for WebSocket fan-out across API instances, and the Celery broker/result backend. |
 | Migrations | Alembic | Async-engine, autogenerate-driven schema migrations. |
 | Tests | pytest, testcontainers, Playwright, Locust | Unit (no DB/network) / integration (real Postgres+Redis) / e2e (real browser) / load, run as separate marked suites. |
-| Containers | Docker (multi-stage), Kubernetes, Helm | Validated locally against Docker Desktop Kubernetes; production target is Fly.io, not Kubernetes (see docs/runbook.md). |
-| CI/CD | GitHub Actions | Lint/type-check/test on every PR; separate CD workflows per client (web → Vercel, desktop → GitHub Releases, backend → TBD Day 40). |
+| Containers | Docker (multi-stage), Kubernetes, Helm | Kubernetes manifests and Helm chart are validated on local Docker Desktop Kubernetes; the planned cloud host for the backend is Fly.io (see docs/runbook.md). |
+| CI/CD | GitHub Actions | Lint/type-check/test on every PR; separate CD workflows per client (web → Vercel, desktop → GitHub Releases); weekly automated model retraining. Backend cloud deploy is not set up yet. |
 | Web | React + Vite, TanStack Query, Zustand, Recharts | Fast dev server, server-state caching that matches the API's cache-aside model, minimal client state. |
 | Desktop | Tauri v2 + React | Native OS WebView instead of bundled Chromium — same React source as `web/`, ~5MB binary instead of Electron's ~150MB. |
 | Mobile | Expo (React Native) + Expo Router | Shared TypeScript/React knowledge with `web/`, single codebase for iOS and Android, managed workflow avoids native build setup. |
@@ -150,11 +177,12 @@ The backend API is at `http://localhost:8000` (interactive docs at
 
 ## Live Demo
 
-The web app deploys to Vercel automatically on every push to `main`
-(`.github/workflows/cd-web.yml`), but its URL isn't published here yet: it's
-currently built against a placeholder `VITE_API_URL_PROD`, because the
-backend itself has no cloud deployment yet — that's planned for Day 40
-(Fly.io). Once the backend is live, both the web app URL and interactive API
-docs (`/docs`) will be linked here.
+There's no hosted demo yet. The web app deploys to Vercel automatically on
+every push to `main` (`.github/workflows/cd-web.yml`), but the backend has no
+cloud deployment yet (Fly.io is planned), so a hosted frontend would have
+nothing to talk to. Once the backend is live, the web app URL and interactive
+API docs (`/docs`) will be linked here.
 
-Until then, run everything locally via [Quick Start](#quick-start-local-development) above.
+Until then, run everything locally via [Quick Start](#quick-start-local-development)
+above, then use **Demo Replay** on the race page to watch a real 2026 race play
+through the full pipeline.
