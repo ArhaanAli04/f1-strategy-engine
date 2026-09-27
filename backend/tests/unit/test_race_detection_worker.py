@@ -146,6 +146,28 @@ def test_launch_window_opens_ten_minutes_before_the_start(
 
 
 @pytest.mark.unit
+def test_ingestor_cap_outlasts_a_full_length_race_from_the_earliest_launch() -> None:
+    """Launched up to _LEAD_WINDOW before the start, the ingestor must still be
+    running at start + 3 h — F1's longest possible race, red flags included —
+    and the dedup key must outlive the ingestor so no second one launches."""
+    from backend.scripts.ingest_live_session import MAX_SESSION_DURATION
+
+    earliest_launch_to_race_end = race_detection_worker._LEAD_WINDOW + timedelta(hours=3)
+    assert MAX_SESSION_DURATION >= earliest_launch_to_race_end
+    assert race_detection_worker._TRIGGER_KEY_TTL_SECONDS > MAX_SESSION_DURATION.total_seconds()
+
+
+@pytest.mark.unit
+def test_live_ingestor_uses_the_session_cap_by_default() -> None:
+    import inspect
+
+    from backend.scripts import ingest_live_session
+
+    default = inspect.signature(ingest_live_session.run_live_ingestor).parameters["max_duration"]
+    assert default.default == ingest_live_session.MAX_SESSION_DURATION
+
+
+@pytest.mark.unit
 def test_already_triggered_skips_second_launch() -> None:
     """Simulates two consecutive 5-minute polls landing on the same race."""
     settings = MagicMock(auto_race_detection_enabled=True)

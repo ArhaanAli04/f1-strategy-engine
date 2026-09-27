@@ -86,7 +86,9 @@ _TOPIC_ORDER = {
     "TimingData": 5,
 }
 _QUEUES = ("telemetry_queue", "prediction_queue", "alert_queue")
-_ALERT_MESSAGE = re.compile(r"Undercut threat: (\w+) on (\w+) \((\d+)%\)")
+# The percentage has one decimal place since 2026-09-27 ("72.5%"); older rows
+# have a whole number ("72%").
+_ALERT_MESSAGE = re.compile(r"Undercut threat: (\w+) on (\w+) \((\d+(?:\.\d+)?)%\)")
 _PROGRESS_EVERY_SECONDS = 60.0
 _QUEUE_SAMPLE_EVERY_SECONDS = 30.0
 _MIN_POSITION_MATCH = 0.99
@@ -124,10 +126,10 @@ def max_completed_lap(content: dict[str, Any]) -> int:
     return max(laps, default=0)
 
 
-def parse_alert_message(message: str) -> tuple[str, str, int] | None:
-    """'Undercut threat: VER on RUS (55%)' -> ('VER', 'RUS', 55); None if not that shape."""
+def parse_alert_message(message: str) -> tuple[str, str, float] | None:
+    """'Undercut threat: VER on RUS (55.5%)' -> ('VER', 'RUS', 55.5); None if not that shape."""
     match = _ALERT_MESSAGE.match(message)
-    return (match.group(1), match.group(2), int(match.group(3))) if match else None
+    return (match.group(1), match.group(2), float(match.group(3))) if match else None
 
 
 def is_shadow_race(season: int, event_name: str | None) -> bool:

@@ -30,6 +30,7 @@ below, not a 1:1 mapping of the Kubernetes commands.
 - [One-time: backfill session_elapsed_seconds on Supabase](#one-time-backfill-session_elapsed_seconds-on-supabase)
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
+- [Refreshing the Demo Replay data in production](#refreshing-the-demo-replay-data-in-production)
 - [Fly.io deployment](#flyio-deployment)
 - [App rollback (Helm — local cluster only)](#app-rollback-helm--local-cluster-only)
 - [Database rollback (Alembic)](#database-rollback-alembic)
@@ -200,6 +201,53 @@ JOIN circuits c ON r.circuit_id = c.id
 WHERE r.season = 2025 AND s.session_type = 'R'
 ORDER BY c.name;
 ```
+
+---
+
+## Refreshing the Demo Replay data in production
+
+Production does not run the prediction pipeline during a Demo Replay: the
+predictions, alerts, gap snapshots, lap timings and car numbers for the three
+curated races are computed once and stored. Refresh them after a new model is
+promoted to S3 `production/`, or after a change to the prediction or alert
+code.
+
+Compute on the **local** database and copy to production. Do not run the
+precompute directly against Supabase yet: the tyre models look drivers up by
+the local database's UUIDs, so predictions computed there would silently use
+stand-in driver codes (tracked as Day 3b in the internal deployment plan).
+
+1. With the local stack up, compute the three races locally (about 20 minutes;
+   `--dry-run` first if you want the counts without writing):
+   ```bash
+   python -m backend.scripts.precompute_replay
+   ```
+2. Check the result. Exit code 0 means every hard check passed; read the
+   reported pit-probability and alert numbers too:
+   ```bash
+   python -m backend.scripts.validate_replay_precompute
+   ```
+3. Copy to Supabase, translating ids (drivers by code, sessions by season and
+   round). The URLs are read from environment variables named on the command
+   line; dry run first:
+   ```bash
+   export SRC_DB_URL="<local DATABASE_URL>" TGT_DB_URL="<SUPABASE_DIRECT_URL>"
+   python -m backend.scripts.copy_replay_precompute \
+       --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL --dry-run
+   python -m backend.scripts.copy_replay_precompute \
+       --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL
+   ```
+   Each race is replaced in one transaction, so a failure leaves the previous
+   copy in place.
+4. Run the check against Supabase and compare with step 2:
+   ```bash
+   DATABASE_URL="<SUPABASE_DIRECT_URL with postgresql+asyncpg://>" \
+       python -m backend.scripts.validate_replay_precompute
+   ```
+
+The undercut probabilities come from an unseeded Monte Carlo, so a re-run can
+move a score sitting right on the 50 % alert threshold to the other side; a
+difference of an alert or two between runs is expected.
 
 ---
 

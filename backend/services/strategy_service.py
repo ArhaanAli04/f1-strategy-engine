@@ -2181,6 +2181,52 @@ def _first_pit_laps_over_threshold_batch(
     return last_lap, last_prob
 
 
+# A driver still racing completes a lap within about one lap time of the
+# leader's latest completion (a lapped car crosses the line just after the
+# leader); a retired car's last lap keeps falling further behind. 1.5 sits
+# between the closest cases seen in real races — a running lapped car 0.8 lap
+# times behind, BOT retiring in Azerbaijan 2026 1.8 behind — and matched
+# FastF1's official retirements in all 18 cases across four 2026 races.
+RETIRED_AFTER_LAP_TIMES = 1.5
+
+
+def _still_racing(latest_laps: list[LapData]) -> list[LapData]:
+    """Drop drivers who have stopped racing, from each driver's latest lap row.
+
+    Without this the strategy wall kept "predicting" a pit stop for cars that
+    had retired (Azerbaijan 2026: STR, out on lap 7, shown pitting on lap 22).
+
+    A driver counts as still racing when their latest lap was completed within
+    RETIRED_AFTER_LAP_TIMES lap times of the leader's latest completion. The
+    lap time is the larger of the field's current pace (median of these latest
+    laps) and the leader's own last lap, so the slow laps of a Safety Car
+    raise the limit instead of dropping running cars. Completion times come
+    from session_elapsed_seconds for a historically ingested race and from
+    the row's created_at for a live one, which records no session clock.
+
+    Args:
+        latest_laps: Each driver's latest lap_data row in the session.
+    Returns:
+        The rows of the drivers still racing (the leader is always kept), in
+        the same order.
+    """
+    lap_times = [lap.lap_time_seconds for lap in latest_laps if lap.lap_time_seconds is not None]
+    if len(latest_laps) < 2 or not lap_times:
+        return latest_laps
+
+    session_clock = all(lap.session_elapsed_seconds is not None for lap in latest_laps)
+
+    def completed_at(lap: LapData) -> float:
+        if session_clock and lap.session_elapsed_seconds is not None:
+            return lap.session_elapsed_seconds
+        return lap.created_at.timestamp()
+
+    leader = max(latest_laps, key=completed_at)
+    lap_time = max(float(np.median(lap_times)), leader.lap_time_seconds or 0.0)
+    cutoff = completed_at(leader) - RETIRED_AFTER_LAP_TIMES * lap_time
+    return [lap for lap in latest_laps if completed_at(lap) >= cutoff]
+
+
 def _key_competitor_strategy(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2199,7 +2245,9 @@ async def get_competitor_predicted_strategy(
     round_number: int,
     session_id: uuid.UUID,
 ) -> list[dict[str, Any]]:
-    """For every driver in a session, estimate their most likely upcoming pit lap.
+    """For every driver still racing in a session, estimate their most likely upcoming pit lap.
+
+    Retired drivers are left out (see _still_racing).
 
     Args:
         client: Redis client (cache-aside).
@@ -2225,7 +2273,7 @@ async def get_competitor_predicted_strategy(
         LapData.lap_number == subq.c.max_lap
     )
     query = select(LapData).join(subq, join_condition).where(LapData.session_id == session_id)
-    latest_laps = list((await db.execute(query)).scalars().all())
+    latest_laps = _still_racing(list((await db.execute(query)).scalars().all()))
     if not latest_laps:
         return []
 
