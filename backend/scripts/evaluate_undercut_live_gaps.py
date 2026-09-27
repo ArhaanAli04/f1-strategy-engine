@@ -71,7 +71,8 @@ _RETIREE_LAP_SHARE = 0.95
 _SATURATED_HIGH = 0.999
 _SATURATED_LOW = 0.001
 _FLIP_JUMP = 0.9
-_ALERT_MESSAGE = re.compile(r"Undercut threat: (\w+) on (\w+) \((\d+)%\)")
+# One decimal place since 2026-09-27 ("72.5%"); older rows have a whole number.
+_ALERT_MESSAGE = re.compile(r"Undercut threat: (\w+) on (\w+) \((\d+(?:\.\d+)?)%\)")
 
 
 # --- data ---

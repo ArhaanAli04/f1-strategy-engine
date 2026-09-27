@@ -320,7 +320,10 @@ def rank_undercut_threats(
 
 
 def _undercut_message(trailing_code: str, ahead_code: str, score: float) -> str:
-    return f"Undercut threat: {trailing_code} on {ahead_code} ({score:.0%})"
+    # One decimal place: the score is a count out of 200 simulations, so this
+    # shows it exactly. Whole percentages rounded a score just over the 0.5
+    # threshold (0.505) to "50%", and a 0.995 to "100%".
+    return f"Undercut threat: {trailing_code} on {ahead_code} ({score:.1%})"
 
 
 async def _driver_codes(db: AsyncSession, driver_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:

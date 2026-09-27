@@ -137,7 +137,7 @@ async def test_undercut_threat_message_uses_driver_codes_not_uuids(
     dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
 
     assert len(dispatched) == 1
-    assert dispatched[0]["message"] == "Undercut threat: HUL on RUS (75%)"
+    assert dispatched[0]["message"] == "Undercut threat: HUL on RUS (75.0%)"
     assert str(trailing_id) not in dispatched[0]["message"]
     assert str(leader_id) not in dispatched[0]["message"]
 
@@ -166,7 +166,7 @@ async def test_undercut_threat_message_falls_back_to_uuid_when_code_missing(
 
     dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
 
-    assert dispatched[0]["message"] == f"Undercut threat: {trailing_id} on {leader_id} (75%)"
+    assert dispatched[0]["message"] == f"Undercut threat: {trailing_id} on {leader_id} (75.0%)"
 
 
 @pytest.mark.unit
@@ -505,7 +505,7 @@ async def test_live_standings_replace_a_retirees_stale_slot_in_the_pairing(
 
     dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
 
-    assert [d["message"] for d in dispatched] == ["Undercut threat: VER on RUS (90%)"]
+    assert [d["message"] for d in dispatched] == ["Undercut threat: VER on RUS (90.0%)"]
 
 
 @pytest.mark.unit
@@ -537,7 +537,7 @@ async def test_a_payload_that_is_not_this_sessions_live_standings_keeps_the_db_o
     dispatched = await alert_service.evaluate_threats(mock_db_session, fakeredis, session_id)
 
     # The DB order is unchanged behaviour: the trailing car is paired with the car at P2.
-    assert [d["message"] for d in dispatched] == ["Undercut threat: VER on LEC (90%)"]
+    assert [d["message"] for d in dispatched] == ["Undercut threat: VER on LEC (90.0%)"]
 
 
 @pytest.mark.unit
@@ -810,6 +810,22 @@ async def test_a_redis_failure_while_counting_never_breaks_alert_evaluation(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("score", "shown"),
+    [
+        (0.505, "50.5%"),  # just over the threshold: was shown as "50%"
+        (0.75, "75.0%"),
+        (0.995, "99.5%"),  # not certain: was shown as "100%"
+        (1.0, "100.0%"),
+    ],
+)
+def test_undercut_message_shows_the_score_exactly(score: float, shown: str) -> None:
+    assert alert_service._undercut_message("HAM", "LEC", score) == (
+        f"Undercut threat: HAM on LEC ({shown})"
+    )
+
+
+@pytest.mark.unit
 def test_rank_undercut_threats_pairs_each_car_with_the_one_ahead_above_the_threshold() -> None:
     p1, p2, p3, p4 = (uuid.uuid4() for _ in range(4))
     scores = {p2: 0.9, p3: 0.5, p4: 0.51}  # exactly 0.5 does not count
@@ -877,7 +893,7 @@ async def test_find_undercut_threats_at_lap_judges_the_field_on_that_lap(
             alert_type=AlertType.UNDERCUT_THREAT.value,  # what live Alert rows store
             driver_id=rus,
             rival_driver_id=ver,
-            message="Undercut threat: RUS on VER (80%)",
+            message="Undercut threat: RUS on VER (80.0%)",
             score=0.8,
         )
     ]

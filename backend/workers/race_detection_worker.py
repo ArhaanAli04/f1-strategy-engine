@@ -6,7 +6,7 @@ is at most 10 minutes away or up to 30 minutes past. On a match, launches
 ingest_live_session.py as a **detached
 subprocess** rather than calling run_live_ingestor() inline — the worker
 runs a single --pool=solo process handling telemetry_queue/prediction_queue/
-alert_queue, and the ingestor blocks for up to 3 hours while itself
+alert_queue, and the ingestor blocks for up to 3 h 15 m while itself
 dispatching process_lap/run_strategy_prediction tasks back onto that same
 worker. Running it inline would block the only worker thread for the whole
 race, and its own .delay() calls would never execute — a self-deadlock.
@@ -48,9 +48,10 @@ _GRACE_WINDOW = timedelta(minutes=30)
 # lights go out; F1's feed is already streaming pre-race.
 _LEAD_WINDOW = timedelta(minutes=10)
 
-# Dedup key TTL: covers run_live_ingestor's 3h default max_duration plus a
-# buffer, so a re-poll during the same race never launches a second
-# ingestor. Not a CLAUDE.md-documented cache/prediction key (no data is
+# Dedup key TTL: covers run_live_ingestor's max_duration (ingest_live_session.
+# MAX_SESSION_DURATION, 3 h 15 m) plus a buffer, so a re-poll during the same
+# race never launches a second ingestor. Not a CLAUDE.md-documented
+# cache/prediction key (no data is
 # stored under it) — see CLAUDE.md's Redis Cache Key Schema for the entry.
 _TRIGGER_KEY_TTL_SECONDS = 4 * 60 * 60
 

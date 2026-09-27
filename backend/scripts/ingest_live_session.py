@@ -151,6 +151,13 @@ _GAPS_KEY_TTL_SECONDS = 30
 # must never be written mid-race.
 _FINAL_GAPS_KEY_TTL_SECONDS = 30 * 24 * 60 * 60
 
+# How long one ingestor run streams before it stops itself. F1's rules end a
+# race at most 3 hours after its scheduled start, red flags included, and the
+# auto-launch now starts the ingestor up to 10 minutes BEFORE the start
+# (race_detection_worker._LEAD_WINDOW) — a flat 3 h cap would stop at start +
+# 2 h 50 m and could cut off the end of a long red-flagged race.
+MAX_SESSION_DURATION = timedelta(hours=3, minutes=15)
+
 # f1:{season}:{round}:ingest_stats — a JSON snapshot of this session's counters
 # (see F1SignalRIngestor.stats_snapshot), refreshed at most this often and kept
 # a day, so what the live feed actually did can be read after the race.
@@ -1367,7 +1374,7 @@ def run_live_ingestor(
     round_number: int,
     session_type: str,
     no_auth: bool,
-    max_duration: timedelta = timedelta(hours=3),
+    max_duration: timedelta = MAX_SESSION_DURATION,
 ) -> None:
     """Resolve DB context and stream one live session until it ends or max_duration elapses.
 

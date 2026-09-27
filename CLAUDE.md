@@ -417,7 +417,7 @@ with only the after-start window the launch landed 0-5 minutes after the start
 
 **Why a subprocess, not an inline Celery task call:** the worker runs
 `--pool=solo` (single process, single thread) across all three queues.
-`run_live_ingestor()` blocks for up to 3 hours and itself dispatches
+`run_live_ingestor()` blocks for up to 3 h 15 m and itself dispatches
 `process_lap.delay()`/`run_strategy_prediction.delay()` back onto that same
 worker — calling it inline from a Celery task would deadlock the whole race
 (the worker stuck inside the detection task, never picking up the lap/
@@ -430,8 +430,10 @@ same mechanism `make ingest-live` already uses manually, just auto-triggered.
 **Dedup:** a Redis `SET key NX EX 14400` (`f1:{season}:{round}:R:
 auto_ingestion_triggered`, see Redis Cache Key Schema above) claims the
 race atomically on first trigger; later polls within the same race see the
-key already set and no-op. TTL (4h) covers the ingestor's 3h default
-`max_duration` plus buffer. Deliberately Redis-only, not a DB column — no
+key already set and no-op. TTL (4h) covers the ingestor's default
+`max_duration` (`ingest_live_session.MAX_SESSION_DURATION`, 3 h 15 m since
+2026-09-27 — F1's 3 h race cap measured from a launch up to 10 min before the
+start) plus buffer. Deliberately Redis-only, not a DB column — no
 migration needed, and `get_or_create_session`/`get_or_create_race` (called
 inside the subprocess's own `_resolve_context`) are already idempotent, so
 a duplicate launch after a Redis flush is harmless (a second SignalR

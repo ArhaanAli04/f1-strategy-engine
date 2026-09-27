@@ -45,7 +45,9 @@ def test_max_completed_lap_takes_the_highest_count_in_a_message() -> None:
 
 @pytest.mark.unit
 def test_parse_alert_message() -> None:
-    assert sr.parse_alert_message("Undercut threat: VER on RUS (55%)") == ("VER", "RUS", 55)
+    assert sr.parse_alert_message("Undercut threat: VER on RUS (55.5%)") == ("VER", "RUS", 55.5)
+    # Alerts stored before 2026-09-27 have a whole percentage.
+    assert sr.parse_alert_message("Undercut threat: VER on RUS (55%)") == ("VER", "RUS", 55.0)
     assert sr.parse_alert_message("Something else entirely") is None
 
 
