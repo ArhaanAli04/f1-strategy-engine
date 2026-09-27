@@ -14,7 +14,7 @@ tests against real Redis, not this tier.
 import json
 import random
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -261,15 +261,31 @@ async def test_undercut_and_overcut_read_both_drivers_as_of_the_given_lap(
         assert 0 < ttl <= strategy_service.UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS
 
 
+_RACE_START = datetime(2026, 9, 27, 13, 0, tzinfo=UTC)
+
+
 def _fake_competitor_lap(
-    driver_id: uuid.UUID, lap_number: int, compound: str, tyre_age_laps: int, position: int
+    driver_id: uuid.UUID,
+    lap_number: int,
+    compound: str,
+    tyre_age_laps: int,
+    position: int,
+    completed_at: float | None = None,
+    lap_time_seconds: float | None = 90.0,
+    session_clock: bool = True,
 ) -> SimpleNamespace:
+    """A driver's latest lap row. By default every car — lapped or not — crossed
+    the line at the same moment, as running cars do, so none looks retired."""
+    completed = completed_at if completed_at is not None else 1800.0
     return SimpleNamespace(
         driver_id=driver_id,
         lap_number=lap_number,
         compound=compound,
         tyre_age_laps=tyre_age_laps,
         position=position,
+        lap_time_seconds=lap_time_seconds,
+        session_elapsed_seconds=completed if session_clock else None,
+        created_at=_RACE_START + timedelta(seconds=completed),
     )
 
 
@@ -679,6 +695,103 @@ async def test_cache_miss_triggers_computation_and_writes_cache(
 
     assert len(result) > 0
     assert await fakeredis.get(key) is not None
+
+
+def _codes_still_racing(laps: dict[str, SimpleNamespace]) -> list[str]:
+    # SimpleNamespace rows stand in for LapData, with only the fields used.
+    kept = strategy_service._still_racing(list(laps.values()))  # type: ignore[arg-type]
+    by_id = {lap.driver_id: code for code, lap in laps.items()}
+    return [by_id[lap.driver_id] for lap in kept]
+
+
+def _lap(lap_number: int, completed_at: float, **kwargs: Any) -> SimpleNamespace:
+    return _fake_competitor_lap(uuid.uuid4(), lap_number, "MEDIUM", 10, 1, completed_at, **kwargs)
+
+
+@pytest.mark.unit
+def test_still_racing_drops_a_car_that_stopped_long_ago_and_keeps_lapped_runners() -> None:
+    """Azerbaijan 2026 shape: the leader finishes lap 51; a car two laps down
+    crosses the line just after; STR's last lap was lap 7."""
+    laps = {
+        "RUS": _lap(51, 5600.0),
+        "VER": _lap(51, 5604.0),
+        "BOT": _lap(49, 5404.0),  # retired: 196 s (1.8 laps) before the leader's finish
+        "HUL": _lap(49, 5650.0),  # two laps down but still running
+        "STR": _lap(7, 800.0),
+    }
+
+    assert _codes_still_racing(laps) == ["RUS", "VER", "HUL"]
+
+
+@pytest.mark.unit
+def test_still_racing_keeps_everyone_under_a_safety_car() -> None:
+    """Behind the Safety Car laps take ~150 s instead of 90 s; a running car one
+    slow lap behind the leader's latest completion must not look retired."""
+    laps = {
+        "LEC": _lap(47, 4500.0, lap_time_seconds=150.0),
+        "HAM": _lap(47, 4502.0, lap_time_seconds=150.0),
+        "ALB": _lap(46, 4360.0, lap_time_seconds=150.0),  # 140 s behind: > 1.5 x 90
+    }
+
+    assert _codes_still_racing(laps) == ["LEC", "HAM", "ALB"]
+
+
+@pytest.mark.unit
+def test_still_racing_uses_the_stored_time_for_a_live_race() -> None:
+    """A live-ingested race has no session clock; the row's created_at is used."""
+    laps = {
+        "RUS": _lap(51, 5600.0, session_clock=False),
+        "STR": _lap(7, 800.0, session_clock=False),
+    }
+
+    assert _codes_still_racing(laps) == ["RUS"]
+
+
+@pytest.mark.unit
+def test_still_racing_keeps_everyone_when_nobody_has_retired() -> None:
+    laps = {code: _lap(30, 2700.0 + i) for i, code in enumerate(("A", "B", "C", "D"))}
+
+    assert _codes_still_racing(laps) == ["A", "B", "C", "D"]
+
+
+@pytest.mark.unit
+def test_still_racing_keeps_everyone_when_there_are_no_lap_times_to_judge_by() -> None:
+    laps = {"A": _lap(1, 100.0, lap_time_seconds=None), "B": _lap(1, 10.0, lap_time_seconds=None)}
+
+    assert _codes_still_racing(laps) == ["A", "B"]
+
+
+@pytest.mark.unit
+async def test_get_competitor_predicted_strategy_leaves_out_a_retired_driver(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    running, retired = uuid.uuid4(), uuid.uuid4()
+    laps = [
+        _fake_competitor_lap(running, 40, "MEDIUM", 12, 1, completed_at=3600.0),
+        _fake_competitor_lap(retired, 7, "MEDIUM", 7, 2, completed_at=630.0),
+    ]
+    mock_db_session.execute.side_effect = [
+        _scalars_all_result(laps),
+        _one_result((uuid.uuid4(), "Test Circuit", 51)),
+    ]
+    pit_model = MagicMock()
+    pit_model.predict_proba.side_effect = lambda features: np.tile([0.2, 0.8], (len(features), 1))
+    monkeypatch.setattr(
+        strategy_service,
+        "_load_models",
+        lambda: {
+            "pit_predictor.pkl": pit_model,
+            "tire_deg_medium.pkl": _fit_slope_pipeline(slope=0.2, seed=9),
+        },
+    )
+
+    results = await strategy_service.get_competitor_predicted_strategy(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, uuid.uuid4()
+    )
+
+    assert [r["driver_id"] for r in results] == [str(running)]
 
 
 @pytest.mark.unit
