@@ -1698,6 +1698,47 @@ prevent silent breaks during pip install --upgrade.
 
 ### Notes
 
+**Tyre models look drivers up by code; retired cars are no longer
+neighbours (✅ fixed 2026-09-28, demo deployment Day 3b —
+`docs/internal/demo-deployment-plan-2026.md`):** Each tire_deg sidecar's
+driver table was keyed by the local database's driver UUIDs. Production
+Supabase assigns its own, so 0 of 22 current drivers resolved there and every
+prediction silently used the crc32 stand-in (+50% to +265% MAE, see "Driver/
+circuit encoding persisted" below). Fixed:
+- **Inference:** `tire_deg_model.resolve_driver_code` looks up
+  `driver_code_to_code` first, through the database's own id -> code table
+  that `strategy_service.encoding_maps_for_database` attaches (the drivers
+  table, read once per process, re-read for an unseen driver). It then falls
+  back to the old UUID table, then to a crc32 of the driver CODE, so a driver
+  a model never saw (LIN) gets the same value on every database.
+- **Training:** `train_models.encode_categoricals` categorises drivers by
+  code. That also makes a driver one category across `retrain_incremental`'s
+  S3 base corpus (UUIDs) and its FastF1 current-season laps (codes); they were
+  two before. Sidecars carry both tables. The base corpus
+  (`training-data/base/*.parquet`) was re-exported with a `driver_code` column,
+  and `retrain_incremental` refuses an export without one. Holdout MAE by code
+  vs by UUID: MEDIUM 0.548/0.561, SOFT 0.636/0.636, HARD 0.592/0.585.
+- **Production sidecars:** `backend/scripts/backfill_sidecar_driver_codes.py`
+  added the code table to all 5, without retraining; the originals are in S3
+  `archive/2026-09-28/production/`, and the old training files in
+  `training-data/archive/2026-09-28/`.
+- **Retired neighbours:** a retired car's last `lap_data` row keeps its
+  position, so `prediction_worker._resolve_position_context` counted it as a
+  neighbour and could tie it with a running car (Canada 2026: ALO, out after
+  lap 24, level with PER at P17). The tie resolved in database row order, so
+  local and Supabase picked different neighbours. It now applies
+  `strategy_service.still_racing` (public, was `_still_racing`) with the
+  requesting driver as `reference`: in a field cut off at a lap, the latest
+  completion is the LAST car on the road, so without a reference every car
+  more than 1.5 lap times ahead of it looked retired. Ties are broken by
+  completion time.
+
+**Verified:** the 3 curated replays were recomputed directly on Supabase.
+Every deterministic value (pit probability, tyre life, pit laps and window)
+matched a local run on all 579 driver-laps; alerts matched apart from two
+Belgian scores sitting on the 0.5 threshold. The validator passes. Unit suite
+778 passed.
+
 **Two `prediction_worker` bugs found by the V3 shadow race (✅ fixed
 2026-09-19):** `backend/scripts/shadow_race.py` (V3 — replays Monza's
 archived F1 feed through the real ingestor, Redis, Celery worker and Postgres
@@ -1928,7 +1969,10 @@ WET→INTER model alias; every call site resolves via `resolve_driver_code`/
 (e.g. `get_optimal_pit_window`'s stint-2 candidates each use their own
 compound's map). A missing map (legacy sidecar, or an id that debuted after
 a model's training) falls back to the old crc32 formula — non-regressive by
-construction. One documented limitation: `RaceSimulationInput.
+construction. (The map was keyed by the training database's driver UUIDs,
+which matched no production driver; drivers are looked up by code since
+2026-09-28 — see "Tyre models look drivers up by code" at the top of Notes.)
+One documented limitation: `RaceSimulationInput.
 circuit_id_encoded` is a single value shared across all compound groups in
 `race_simulator.py`, so it's resolved against the requesting driver's own
 compound — correct when all compounds share one training run (the normal

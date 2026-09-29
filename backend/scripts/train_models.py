@@ -18,8 +18,8 @@ If a tire_deg compound has no holdout-season data (e.g. a dry 2025 means zero
 WET laps), promotion falls back to comparing cv_mae instead of a true holdout
 score — see promotion_basis in that model's metrics.json.
 
-Each tire_deg model's metrics.json also carries driver_id_to_code/
-circuit_name_to_code (tire_deg_model.build_categorical_encoding_maps) — the
+Each tire_deg model's metrics.json also carries driver_code_to_code/
+driver_id_to_code/circuit_name_to_code (tire_deg_model.build_categorical_encoding_maps) — the
 real pd.Categorical code map encode_categoricals fit for this run, embedded
 per-model rather than as one shared artifact since each compound is promoted
 independently (see tire_deg_model.py's own "Training-time categorical
@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_aws_settings
 from backend.core.database import get_engine
+from backend.models.driver import Driver
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.telemetry import LapData, TireStint
@@ -99,6 +100,7 @@ async def fetch_laps_from_db() -> pd.DataFrame:
         select(
             LapData.session_id,
             LapData.driver_id,
+            Driver.code.label("driver_code"),
             LapData.lap_number,
             LapData.lap_time_seconds,
             LapData.compound,
@@ -114,6 +116,7 @@ async def fetch_laps_from_db() -> pd.DataFrame:
         .join(SessionModel, LapData.session_id == SessionModel.id)
         .join(Race, SessionModel.race_id == Race.id)
         .join(Circuit, Race.circuit_id == Circuit.id)
+        .join(Driver, LapData.driver_id == Driver.id)
         .where(
             Race.season.between(TRAIN_SEASON_START, HOLDOUT_SEASON),
             LapData.lap_time_seconds.is_not(None),
@@ -128,6 +131,7 @@ async def fetch_laps_from_db() -> pd.DataFrame:
         columns=[
             "session_id",
             "driver_id",
+            "driver_code",
             "lap_number",
             "lap_time_seconds",
             "compound",
@@ -178,14 +182,23 @@ def encode_categoricals(laps: pd.DataFrame) -> pd.DataFrame:
     holdout) avoids unseen-category failures for drivers debuting in 2025 — this is
     an ID mapping, not a target-derived statistic, so it introduces no leakage.
 
+    Drivers are categorised by driver CODE, not database UUID (demo deployment Day
+    3b): a code is the same on every database, and it is also what the FastF1-fetched
+    current-season laps in retrain_incremental.py carry, so a driver is one category
+    across the base corpus and the current season.
+
     Args:
-        laps: Raw laps frame with circuit_name, driver_id, compound columns.
+        laps: Raw laps frame with circuit_name, driver_code, compound columns.
     Returns:
         Copy of laps with circuit_id_encoded, driver_id_encoded, compound_encoded added.
+    Raises:
+        ValueError: A lap has no driver_code (pd.Categorical would silently code it -1).
     """
+    if laps["driver_code"].isna().any():
+        raise ValueError("encode_categoricals: every lap needs a driver_code")
     df = laps.copy()
     df["circuit_id_encoded"] = pd.Categorical(df["circuit_name"]).codes
-    df["driver_id_encoded"] = pd.Categorical(df["driver_id"].astype(str)).codes
+    df["driver_id_encoded"] = pd.Categorical(df["driver_code"]).codes
     df["compound_encoded"] = pd.Categorical(df["compound"]).codes
     return df
 

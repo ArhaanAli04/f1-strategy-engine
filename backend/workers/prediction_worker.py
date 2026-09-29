@@ -534,13 +534,29 @@ async def _resolve_position_context(
     join_condition = (LapData.driver_id == subq.c.driver_id) & (
         LapData.lap_number == subq.c.max_lap
     )
+    # A retired car's last row keeps its frozen position, so without
+    # still_racing it stays a "neighbour" and can tie a running car's position
+    # (Canada 2026: ALO, out after lap 24, level with PER at P17 from lap 26).
+    # The tie then resolved in whatever order the database returned the rows,
+    # so local and Supabase picked different neighbours (demo deployment Day
+    # 3b, CP5). Completion time breaks any remaining tie the same way on every
+    # database.
     query = (
         select(LapData)
         .join(subq, join_condition)
         .where(LapData.session_id == session_id, LapData.position.is_not(None))
-        .order_by(LapData.position)
+        .order_by(
+            LapData.position,
+            LapData.session_elapsed_seconds.asc().nulls_last(),
+            LapData.created_at,
+        )
     )
     field = list((await db.execute(query)).scalars().all())
+    requester = next((lap for lap in field if lap.driver_id == driver_id), None)
+    if requester is not None:
+        # The field is cut off at current_lap, so retirements are judged
+        # against the requester's own lap (see still_racing's reference).
+        field = strategy_service.still_racing(field, reference=requester)
     index = next((i for i, lap in enumerate(field) if lap.driver_id == driver_id), None)
 
     if index is None:
@@ -1113,11 +1129,13 @@ async def compute_prediction(
         session_id, driver_id, predicted_at and lap_number).
     """
     models = _load_models()
-    maps_cache = _load_encoding_maps()
     mae_cache = _load_holdout_mae()
 
     session_id = uuid.UUID(str(context["session_id"]))
     driver_id = uuid.UUID(str(context["driver_id"]))
+    maps_cache = await strategy_service.encoding_maps_for_database(
+        db, _load_encoding_maps(), [driver_id]
+    )
     compound = str(context.get("compound", "")).upper()
     lap_number = int(context.get("lap_number", 0))
 
@@ -2017,7 +2035,6 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
             Checkpoint-6 follow-up finding.
     """
     models = _load_models()
-    maps_cache = _load_encoding_maps()
     tire_deg_pipelines = {
         compound: models[f"tire_deg_{suffix}.pkl"]
         for compound, suffix in _COMPOUND_TO_MODEL_SUFFIX.items()
@@ -2042,6 +2059,11 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         async with session_factory() as db:
             await strategy_service.validate_current_lap(db, session_id, current_lap)
+            # A fresh read (driver_ids=None): the whole field is resolved below and
+            # its ids are not known yet. One small query per simulation.
+            maps_cache = await strategy_service.encoding_maps_for_database(
+                db, _load_encoding_maps()
+            )
             race_state = await _build_race_state(
                 db,
                 async_redis_client,

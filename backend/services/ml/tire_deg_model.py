@@ -46,7 +46,8 @@ from __future__ import annotations
 
 import logging
 import zlib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -218,6 +219,15 @@ def apply_incompatible_model_fallbacks(
 # fall back to the same crc32 formula the pre-fix code used everywhere —
 # this makes the fix strictly non-regressive: worst case is identical to
 # today for exactly the ids it can't do better for.
+#
+# Drivers are looked up by driver CODE first (2026-09-28, demo deployment Day
+# 3b). The UUID table only works against the database the model was trained
+# from: production Supabase assigns its own driver UUIDs, so 0 of 22 current
+# drivers resolved there and every one silently fell back to crc32. A sidecar
+# now also carries driver_code_to_code, and the caller attaches its own
+# database's driver id -> code table (attach_database_driver_codes) so the
+# lookup is id -> code -> training code on any database. The UUID table stays
+# as a fallback for sidecars written before this change.
 
 
 @dataclass(frozen=True)
@@ -229,10 +239,16 @@ class CategoricalEncodingMaps:
     S3 object), loaded alongside the model itself by each service's
     _load_models() and cached per filename — see resolve_driver_code/
     resolve_circuit_code below for how these are used.
+
+    database_driver_codes is not part of the sidecar: it is this process's own
+    database's driver id -> driver code table, attached per call by
+    attach_database_driver_codes, so resolve_driver_code can go through the code.
     """
 
     driver_id_to_code: dict[str, int]
     circuit_name_to_code: dict[str, int]
+    driver_code_to_code: dict[str, int] = field(default_factory=dict)
+    database_driver_codes: Mapping[str, str] = field(default_factory=dict)
 
 
 def build_categorical_encoding_maps(df: pd.DataFrame) -> dict[str, dict[str, int]]:
@@ -243,16 +259,31 @@ def build_categorical_encoding_maps(df: pd.DataFrame) -> dict[str, dict[str, int
     that same encoded frame shares an identical map, since encode_categoricals fits the
     codes once across the whole combined frame before per-compound filtering.
 
+    encode_categoricals categorises drivers by code, so driver_code_to_code is the
+    model's own table. driver_id_to_code (training database's UUID -> the same code)
+    is still written for inference code that predates the code table. Laps
+    retrain_incremental.py fetches from FastF1 carry the driver code as their
+    driver_id too; those are left out of the UUID table.
+
     Args:
         df: A laps frame already run through encode_categoricals — must include driver_id,
-            driver_id_encoded, circuit_name, circuit_id_encoded.
+            driver_code, driver_id_encoded, circuit_name, circuit_id_encoded.
     Returns:
-        {"driver_id_to_code": {str(driver_id): code}, "circuit_name_to_code": {circuit_name:
-        code}} — plain-str-keyed, plain-int-valued (not numpy scalars) so this is directly
-        JSON-serializable for embedding in a model sidecar's metrics dict, matching how
-        n_features/feature_names are already embedded there (item 9).
+        {"driver_code_to_code": {driver_code: code}, "driver_id_to_code": {str(driver_id):
+        code}, "circuit_name_to_code": {circuit_name: code}} — plain-str-keyed,
+        plain-int-valued (not numpy scalars) so this is directly JSON-serializable for
+        embedding in a model sidecar's metrics dict, matching how n_features/feature_names
+        are already embedded there (item 9).
     """
-    driver_unique = df[["driver_id", "driver_id_encoded"]].drop_duplicates()
+    code_unique = df[["driver_code", "driver_id_encoded"]].drop_duplicates()
+    code_map = {
+        str(driver_code): int(code)
+        for driver_code, code in zip(
+            code_unique["driver_code"], code_unique["driver_id_encoded"], strict=True
+        )
+    }
+    by_database_id = df[df["driver_id"].astype(str) != df["driver_code"].astype(str)]
+    driver_unique = by_database_id[["driver_id", "driver_id_encoded"]].drop_duplicates()
     driver_map = {
         str(driver_id): int(code)
         for driver_id, code in zip(
@@ -266,7 +297,11 @@ def build_categorical_encoding_maps(df: pd.DataFrame) -> dict[str, dict[str, int
             circuit_unique["circuit_name"], circuit_unique["circuit_id_encoded"], strict=True
         )
     }
-    return {"driver_id_to_code": driver_map, "circuit_name_to_code": circuit_map}
+    return {
+        "driver_code_to_code": code_map,
+        "driver_id_to_code": driver_map,
+        "circuit_name_to_code": circuit_map,
+    }
 
 
 def encoding_maps_from_metrics(metrics: dict[str, Any] | None) -> CategoricalEncodingMaps | None:
@@ -277,19 +312,54 @@ def encoding_maps_from_metrics(metrics: dict[str, Any] | None) -> CategoricalEnc
             train_models.download_metrics for the sidecar-fetch pattern this complements),
             or None if no sidecar could be fetched at all.
     Returns:
-        CategoricalEncodingMaps if both driver_id_to_code and circuit_name_to_code are
-        present and are dicts, else None. A legacy sidecar (predates this fix) or a
-        non-tire_deg model's sidecar (pit_predictor.pkl/safety_car_model.pkl never carry
-        these keys) both correctly resolve to None — callers must treat None as "use the
-        crc32 fallback for every id," not as an error.
+        CategoricalEncodingMaps if circuit_name_to_code and at least one driver table
+        (driver_id_to_code or driver_code_to_code) are present and are dicts, else None;
+        a missing driver table is read as empty. A legacy sidecar (predates this fix) or
+        a non-tire_deg model's sidecar (pit_predictor.pkl/safety_car_model.pkl never
+        carry these keys) both correctly resolve to None — callers must treat None as
+        "use the crc32 fallback for every id," not as an error.
     """
     if metrics is None:
         return None
-    driver_map = metrics.get("driver_id_to_code")
+    id_map = metrics.get("driver_id_to_code")
+    code_map = metrics.get("driver_code_to_code")
     circuit_map = metrics.get("circuit_name_to_code")
-    if not isinstance(driver_map, dict) or not isinstance(circuit_map, dict):
+    if not isinstance(circuit_map, dict):
         return None
-    return CategoricalEncodingMaps(driver_id_to_code=driver_map, circuit_name_to_code=circuit_map)
+    if not isinstance(id_map, dict) and not isinstance(code_map, dict):
+        return None
+    return CategoricalEncodingMaps(
+        driver_id_to_code=id_map if isinstance(id_map, dict) else {},
+        circuit_name_to_code=circuit_map,
+        driver_code_to_code=code_map if isinstance(code_map, dict) else {},
+    )
+
+
+def attach_database_driver_codes(
+    maps_cache: Mapping[str, CategoricalEncodingMaps | None],
+    driver_codes: Mapping[str, str],
+) -> dict[str, CategoricalEncodingMaps | None]:
+    """Give every model's encoding maps this database's driver id -> code table.
+
+    A model with no usable sidecar gets empty tables rather than None, so its
+    drivers still fall back to a checksum of their code — the same value on every
+    database — instead of a checksum of a database-specific UUID.
+
+    Args:
+        maps_cache: Model filename -> its sidecar's maps (or None), as loaded.
+        driver_codes: This database's str(driver id) -> driver code.
+    Returns:
+        A new mapping; the loaded maps themselves are not modified.
+    """
+    return {
+        filename: replace(
+            maps
+            if maps is not None
+            else CategoricalEncodingMaps(driver_id_to_code={}, circuit_name_to_code={}),
+            database_driver_codes=driver_codes,
+        )
+        for filename, maps in maps_cache.items()
+    }
 
 
 def holdout_mae_from_metrics(metrics: dict[str, Any] | None) -> float | None:
@@ -341,10 +411,16 @@ def _crc32_fallback_code(value: str, modulus: int = 1000) -> int:
 def resolve_driver_code(maps: CategoricalEncodingMaps | None, driver_id: str) -> int:
     """The tire_deg feature vector's driver_id_encoded value for one driver.
 
-    Prefers the real training-time pd.Categorical code recovered from the currently-loaded
+    Uses the real training-time pd.Categorical code recovered from the currently-loaded
     model's own sidecar — the code that model's driver_id_encoded feature was actually fit
-    against. Falls back to a deterministic hash (see _crc32_fallback_code) for a driver
-    missing from the map, or when maps itself is None (no sidecar at all).
+    against — looked up in this order:
+      1. the driver's code (via maps.database_driver_codes) in driver_code_to_code —
+         works on any database;
+      2. the driver id in driver_id_to_code — only matches the database the model
+         was trained from, kept for sidecars that predate the code table;
+      3. a deterministic hash (see _crc32_fallback_code) of the driver's code, or of
+         the id when the code is unknown. Hashing the code keeps a driver the model
+         never saw (a rookie) on the same value on every database.
 
     Args:
         maps: This compound's CategoricalEncodingMaps, or None if unavailable.
@@ -353,11 +429,17 @@ def resolve_driver_code(maps: CategoricalEncodingMaps | None, driver_id: str) ->
     Returns:
         The integer driver_id_encoded feature value.
     """
-    if maps is not None:
-        code = maps.driver_id_to_code.get(driver_id)
+    if maps is None:
+        return _crc32_fallback_code(driver_id)
+    driver_code = maps.database_driver_codes.get(driver_id)
+    if driver_code is not None:
+        code = maps.driver_code_to_code.get(driver_code)
         if code is not None:
             return code
-    return _crc32_fallback_code(driver_id)
+    code = maps.driver_id_to_code.get(driver_id)
+    if code is not None:
+        return code
+    return _crc32_fallback_code(driver_code if driver_code is not None else driver_id)
 
 
 def resolve_circuit_code(maps: CategoricalEncodingMaps | None, circuit_name: str) -> int:

@@ -7,6 +7,7 @@ behavior — that's covered by integration tests against the actual promoted mod
 """
 
 import zlib
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -23,6 +24,7 @@ from backend.services.ml.tire_deg_model import (
     _build_pipeline,
     add_engineered_features,
     apply_incompatible_model_fallbacks,
+    attach_database_driver_codes,
     build_categorical_encoding_maps,
     encoding_maps_from_metrics,
     fuel_load_penalty_seconds,
@@ -405,6 +407,7 @@ def test_build_categorical_encoding_maps_recovers_unique_codes() -> None:
     df = pd.DataFrame(
         {
             "driver_id": ["d1", "d1", "d2", "d3"],
+            "driver_code": ["ALB", "ALB", "BOT", "COL"],
             "driver_id_encoded": [0, 0, 1, 2],
             "circuit_name": ["Silverstone", "Silverstone", "Monza", "Monza"],
             "circuit_id_encoded": [5, 5, 9, 9],
@@ -414,9 +417,30 @@ def test_build_categorical_encoding_maps_recovers_unique_codes() -> None:
     maps = build_categorical_encoding_maps(df)
 
     assert maps == {
+        "driver_code_to_code": {"ALB": 0, "BOT": 1, "COL": 2},
         "driver_id_to_code": {"d1": 0, "d2": 1, "d3": 2},
         "circuit_name_to_code": {"Silverstone": 5, "Monza": 9},
     }
+
+
+@pytest.mark.unit
+def test_build_categorical_encoding_maps_keeps_fastf1_laps_out_of_the_id_table() -> None:
+    """retrain_incremental's current-season laps use the code as driver_id: they are
+    in the code table (one category with the base corpus) but not the UUID table."""
+    df = pd.DataFrame(
+        {
+            "driver_id": ["uuid-alb", "ALB", "LIN"],
+            "driver_code": ["ALB", "ALB", "LIN"],
+            "driver_id_encoded": [0, 0, 1],
+            "circuit_name": ["Monza", "Monza", "Monza"],
+            "circuit_id_encoded": [9, 9, 9],
+        }
+    )
+
+    maps = build_categorical_encoding_maps(df)
+
+    assert maps["driver_code_to_code"] == {"ALB": 0, "LIN": 1}
+    assert maps["driver_id_to_code"] == {"uuid-alb": 0}
 
 
 @pytest.mark.unit
@@ -425,6 +449,7 @@ def test_build_categorical_encoding_maps_values_are_plain_python_ints() -> None:
     df = pd.DataFrame(
         {
             "driver_id": ["d1"],
+            "driver_code": ["ALB"],
             "driver_id_encoded": pd.array([0], dtype="int8"),
             "circuit_name": ["Silverstone"],
             "circuit_id_encoded": pd.array([5], dtype="int8"),
@@ -433,6 +458,7 @@ def test_build_categorical_encoding_maps_values_are_plain_python_ints() -> None:
 
     maps = build_categorical_encoding_maps(df)
 
+    assert type(maps["driver_code_to_code"]["ALB"]) is int
     assert type(maps["driver_id_to_code"]["d1"]) is int
     assert type(maps["circuit_name_to_code"]["Silverstone"]) is int
 
@@ -479,6 +505,117 @@ def test_resolve_driver_code_falls_back_when_maps_none() -> None:
 def test_resolve_driver_code_falls_back_when_driver_missing_from_map() -> None:
     maps = CategoricalEncodingMaps(driver_id_to_code={"d1": 7}, circuit_name_to_code={})
     assert resolve_driver_code(maps, "d2") == zlib.crc32(b"d2") % 1000
+
+
+# --- driver lookup by code (demo deployment Day 3b) ---
+
+LOCAL_VER = "11111111-1111-1111-1111-111111111111"
+PROD_VER = "22222222-2222-2222-2222-222222222222"
+
+
+def _sidecar_maps(**tables: dict[str, int]) -> CategoricalEncodingMaps:
+    return CategoricalEncodingMaps(
+        driver_id_to_code=tables.get("by_id", {}),
+        circuit_name_to_code={},
+        driver_code_to_code=tables.get("by_code", {}),
+    )
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_reads_the_code_table() -> None:
+    maps = encoding_maps_from_metrics(
+        {
+            "driver_id_to_code": {LOCAL_VER: 19},
+            "driver_code_to_code": {"VER": 19},
+            "circuit_name_to_code": {"Monza": 9},
+        }
+    )
+
+    assert maps is not None
+    assert maps.driver_code_to_code == {"VER": 19}
+    assert maps.driver_id_to_code == {LOCAL_VER: 19}
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_accepts_a_code_table_alone() -> None:
+    maps = encoding_maps_from_metrics(
+        {"driver_code_to_code": {"VER": 19}, "circuit_name_to_code": {"Monza": 9}}
+    )
+
+    assert maps is not None
+    assert maps.driver_id_to_code == {}
+
+
+@pytest.mark.unit
+def test_encoding_maps_from_metrics_none_without_any_driver_table() -> None:
+    assert encoding_maps_from_metrics({"circuit_name_to_code": {"Monza": 9}}) is None
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_prefers_the_code_table_over_the_id_table() -> None:
+    maps = replace(
+        _sidecar_maps(by_id={LOCAL_VER: 5}, by_code={"VER": 19}),
+        database_driver_codes={LOCAL_VER: "VER"},
+    )
+    assert resolve_driver_code(maps, LOCAL_VER) == 19
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_resolves_a_driver_from_another_database_by_code() -> None:
+    """Production Supabase: its own UUID for VER, unknown to the id table."""
+    maps = replace(
+        _sidecar_maps(by_id={LOCAL_VER: 19}, by_code={"VER": 19}),
+        database_driver_codes={PROD_VER: "VER"},
+    )
+    assert resolve_driver_code(maps, PROD_VER) == 19
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_uses_the_id_table_for_a_sidecar_without_codes() -> None:
+    maps = replace(_sidecar_maps(by_id={LOCAL_VER: 19}), database_driver_codes={LOCAL_VER: "VER"})
+    assert resolve_driver_code(maps, LOCAL_VER) == 19
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_hashes_the_code_of_a_driver_the_model_never_saw() -> None:
+    """A rookie gets the same fallback on every database, whatever its UUID there."""
+    local_lin, prod_lin = "33333333-3333-3333-3333-333333333333", PROD_VER
+    maps = _sidecar_maps(by_id={LOCAL_VER: 19}, by_code={"VER": 19})
+    local = replace(maps, database_driver_codes={local_lin: "LIN"})
+    prod = replace(maps, database_driver_codes={prod_lin: "LIN"})
+
+    expected = zlib.crc32(b"LIN") % 1000
+    assert resolve_driver_code(local, local_lin) == expected
+    assert resolve_driver_code(prod, prod_lin) == expected
+
+
+@pytest.mark.unit
+def test_resolve_driver_code_hashes_the_id_when_its_code_is_unknown() -> None:
+    maps = _sidecar_maps(by_code={"VER": 19})
+    assert resolve_driver_code(maps, "d9") == zlib.crc32(b"d9") % 1000
+
+
+@pytest.mark.unit
+def test_attach_database_driver_codes_leaves_the_loaded_maps_untouched() -> None:
+    loaded = _sidecar_maps(by_code={"VER": 19})
+    cache: dict[str, CategoricalEncodingMaps | None] = {"tire_deg_medium.pkl": loaded}
+
+    attached = attach_database_driver_codes(cache, {PROD_VER: "VER"})
+
+    assert loaded.database_driver_codes == {}
+    medium = attached["tire_deg_medium.pkl"]
+    assert medium is not None
+    assert resolve_driver_code(medium, PROD_VER) == 19
+
+
+@pytest.mark.unit
+def test_attach_database_driver_codes_gives_a_model_without_a_sidecar_the_codes() -> None:
+    attached = attach_database_driver_codes({"tire_deg_wet.pkl": None}, {PROD_VER: "LIN"})
+
+    wet = attached["tire_deg_wet.pkl"]
+    assert wet is not None
+    assert resolve_driver_code(wet, PROD_VER) == zlib.crc32(b"LIN") % 1000
+    assert resolve_circuit_code(wet, "Monza") == zlib.crc32(b"Monza") % 1000
 
 
 @pytest.mark.unit
