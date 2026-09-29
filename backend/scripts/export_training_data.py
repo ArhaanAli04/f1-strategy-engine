@@ -12,7 +12,9 @@ only the current season's completed rounds on top of it, fetched directly from
 FastF1 (no DB needed for that part).
 
 Only needs re-running if the 2018-2025 historical corpus itself changes (e.g. a
-backfill fixes a previously-missing circuit) — not on any regular schedule.
+backfill fixes a previously-missing circuit) or fetch_laps_from_db gains a column
+training needs (driver_code, 2026-09-28: retrain_incremental.py refuses an export
+without it) — not on any regular schedule.
 
 Run via: python -m backend.scripts.export_training_data
 """

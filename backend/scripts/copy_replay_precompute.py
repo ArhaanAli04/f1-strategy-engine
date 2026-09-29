@@ -1,13 +1,13 @@
 """Copy precomputed Demo Replay data from one database to another, translating ids.
 
-Why this exists: the tyre-degradation models resolve each driver through a
-lookup table keyed by DRIVER UUID, built from the database they were trained
-on (the local one). Production Supabase assigned its own UUIDs when the races
-were ingested there, so none of its drivers is in that table and every
-prediction computed against Supabase would silently use a stand-in driver code
-(docs/internal/demo-deployment-plan-2026.md, Day 3 CP4). Until that lookup is
-keyed by something stable, the replay data is precomputed and validated
-against the local database and copied here.
+Why this exists: until 2026-09-28 the tyre-degradation models resolved each
+driver through a lookup table keyed by the local database's DRIVER UUIDs, so
+predictions computed against production Supabase (its own UUIDs) silently used
+a stand-in driver code (docs/internal/demo-deployment-plan-2026.md, Day 3 CP4).
+The replay data was therefore precomputed locally and copied here. The lookup
+now goes through the driver code (Day 3b) and precompute_replay.py runs
+directly on Supabase; this copy remains the rollback path, or an alternative
+when Supabase is slow to reach.
 
 Every id is translated: drivers by their 3-letter code, sessions by (season,
 round, "R") via precompute_replay.resolve_targets — including the ids stored

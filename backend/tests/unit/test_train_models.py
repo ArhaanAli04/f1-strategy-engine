@@ -26,6 +26,7 @@ from typing import Any
 
 import joblib
 import numpy as np
+import pandas as pd
 import pytest
 from botocore.exceptions import ClientError
 from lightgbm import LGBMClassifier
@@ -721,3 +722,41 @@ def test_training_schema_mismatch_true_for_legacy_incumbent_with_no_version_reco
 @pytest.mark.unit
 def test_training_schema_mismatch_false_when_identical() -> None:
     assert train_models._training_schema_mismatch(2, {"training_schema_version": 2}) is False
+
+
+# --- encode_categoricals: drivers by code (demo deployment Day 3b) ---
+
+
+def _laps(driver_ids: list[str], driver_codes: list[Any]) -> pd.DataFrame:
+    n = len(driver_ids)
+    return pd.DataFrame(
+        {
+            "driver_id": driver_ids,
+            "driver_code": driver_codes,
+            "circuit_name": ["Monza"] * n,
+            "compound": ["MEDIUM"] * n,
+        }
+    )
+
+
+@pytest.mark.unit
+def test_encode_categoricals_codes_drivers_by_driver_code() -> None:
+    encoded = train_models.encode_categoricals(
+        _laps(["uuid-ver", "uuid-alb", "uuid-ver"], ["VER", "ALB", "VER"])
+    )
+
+    assert list(encoded["driver_id_encoded"]) == [1, 0, 1]
+
+
+@pytest.mark.unit
+def test_encode_categoricals_gives_a_driver_one_code_across_uuid_and_fastf1_rows() -> None:
+    """The S3 base corpus has database UUIDs, retrain_incremental's FastF1 laps the code."""
+    encoded = train_models.encode_categoricals(_laps(["uuid-ver", "VER"], ["VER", "VER"]))
+
+    assert encoded["driver_id_encoded"].nunique() == 1
+
+
+@pytest.mark.unit
+def test_encode_categoricals_refuses_a_lap_without_a_driver_code() -> None:
+    with pytest.raises(ValueError, match="driver_code"):
+        train_models.encode_categoricals(_laps(["uuid-ver", "uuid-x"], ["VER", None]))

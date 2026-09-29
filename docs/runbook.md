@@ -212,38 +212,48 @@ curated races are computed once and stored. Refresh them after a new model is
 promoted to S3 `production/`, or after a change to the prediction or alert
 code.
 
-Compute on the **local** database and copy to production. Do not run the
-precompute directly against Supabase yet: the tyre models look drivers up by
-the local database's UUIDs, so predictions computed there would silently use
-stand-in driver codes (tracked as Day 3b in the internal deployment plan).
+Compute directly on Supabase. The scripts write to whatever `DATABASE_URL`
+points at and use `REDIS_URL` for the per-lap gap snapshots, so run them from
+the host with the local Redis up and no Demo Replay running (the precompute
+refuses to start during one).
 
-1. With the local stack up, compute the three races locally (about 20 minutes;
-   `--dry-run` first if you want the counts without writing):
+1. Point this shell at Supabase (session pooler, port 5432, with the
+   `postgresql+asyncpg://` prefix). Keep the URL out of shell history and logs:
+   ```bash
+   export DATABASE_URL="<SUPABASE_DIRECT_URL with postgresql+asyncpg://>"
+   export TIMESCALE_URL="$DATABASE_URL"
+   ```
+2. Compute and write the three races, about 20 minutes from Europe or India
+   (`--dry-run` first for the counts; `--session-id <uuid>` for one race):
    ```bash
    python -m backend.scripts.precompute_replay
    ```
-2. Check the result. Exit code 0 means every hard check passed; read the
+   Each race is replaced in one transaction, so a failure leaves the previous
+   data in place.
+3. Check the result. Exit code 0 means every hard check passed; read the
    reported pit-probability and alert numbers too:
    ```bash
    python -m backend.scripts.validate_replay_precompute
    ```
-3. Copy to Supabase, translating ids (drivers by code, sessions by season and
-   round). The URLs are read from environment variables named on the command
-   line; dry run first:
-   ```bash
-   export SRC_DB_URL="<local DATABASE_URL>" TGT_DB_URL="<SUPABASE_DIRECT_URL>"
-   python -m backend.scripts.copy_replay_precompute \
-       --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL --dry-run
-   python -m backend.scripts.copy_replay_precompute \
-       --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL
-   ```
-   Each race is replaced in one transaction, so a failure leaves the previous
-   copy in place.
-4. Run the check against Supabase and compare with step 2:
-   ```bash
-   DATABASE_URL="<SUPABASE_DIRECT_URL with postgresql+asyncpg://>" \
-       python -m backend.scripts.validate_replay_precompute
-   ```
+
+Computing on Supabase gives the same result as computing on the local
+database: the tyre models look drivers up by their 3-letter code, which both
+databases share, not by database UUID (fixed 2026-09-28; before that
+production had to be computed locally and copied). Verified by running both on
+the same code: every deterministic value (pit probability, tyre life, pit laps
+and window) was identical on all 579 driver-laps.
+
+**Rollback / alternative:** compute on the local database (steps 2-3 with the
+local `DATABASE_URL`), then copy it across, translating ids (drivers by code,
+sessions by season and round). The URLs are read from environment variables
+named on the command line; dry run first:
+```bash
+export SRC_DB_URL="<local DATABASE_URL>" TGT_DB_URL="<SUPABASE_DIRECT_URL>"
+python -m backend.scripts.copy_replay_precompute \
+    --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL --dry-run
+python -m backend.scripts.copy_replay_precompute \
+    --source-url-env SRC_DB_URL --target-url-env TGT_DB_URL
+```
 
 The undercut probabilities come from an unseeded Monte Carlo, so a re-run can
 move a score sitting right on the 50 % alert threshold to the other side; a
