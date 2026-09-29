@@ -52,6 +52,17 @@ def _stub_cache_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cache_service, "cache_lock", lambda client, key: _NoOpLock())
 
 
+# The real driver-code read, kept for the tests that exercise it directly.
+_real_load_driver_codes = strategy_service.load_driver_codes
+
+
+@pytest.fixture(autouse=True)
+def _stub_driver_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No driver codes: tests queue their own db.execute results, and an empty
+    table keeps the old UUID-keyed lookup they were written against."""
+    monkeypatch.setattr(strategy_service, "load_driver_codes", AsyncMock(return_value={}))
+
+
 def _fake_lap(lap_number: int, compound: str, tyre_age_laps: int, position: int) -> SimpleNamespace:
     return SimpleNamespace(
         lap_number=lap_number,
@@ -697,9 +708,14 @@ async def test_cache_miss_triggers_computation_and_writes_cache(
     assert await fakeredis.get(key) is not None
 
 
-def _codes_still_racing(laps: dict[str, SimpleNamespace]) -> list[str]:
+def _codes_still_racing(
+    laps: dict[str, SimpleNamespace], reference: str | None = None
+) -> list[str]:
     # SimpleNamespace rows stand in for LapData, with only the fields used.
-    kept = strategy_service._still_racing(list(laps.values()))  # type: ignore[arg-type]
+    kept = strategy_service.still_racing(
+        list(laps.values()),  # type: ignore[arg-type]
+        reference=laps[reference] if reference else None,  # type: ignore[arg-type]
+    )
     by_id = {lap.driver_id: code for code, lap in laps.items()}
     return [by_id[lap.driver_id] for lap in kept]
 
@@ -759,6 +775,46 @@ def test_still_racing_keeps_everyone_when_there_are_no_lap_times_to_judge_by() -
     laps = {"A": _lap(1, 100.0, lap_time_seconds=None), "B": _lap(1, 10.0, lap_time_seconds=None)}
 
     assert _codes_still_racing(laps) == ["A", "B"]
+
+
+def _canada_as_of_lap_28() -> dict[str, SimpleNamespace]:
+    """Each driver's latest row at or before lap 28 (Canada 2026, real completion times)."""
+    return {
+        "RUS": _lap(28, 2155.8, lap_time_seconds=77.0),
+        "OCO": _lap(28, 2274.7, lap_time_seconds=77.0),
+        "ALO": _lap(24, 1966.3, lap_time_seconds=77.0),  # out after lap 24
+        "PER": _lap(28, 2285.3, lap_time_seconds=77.0),
+        "BOT": _lap(28, 2351.0, lap_time_seconds=77.0),  # lapped, last to finish lap 28
+    }
+
+
+@pytest.mark.unit
+def test_still_racing_without_a_reference_misjudges_a_field_cut_off_at_a_lap() -> None:
+    """Why the reference exists: judged against the latest completion (BOT, at
+    the back) the leader, 195 s earlier on the same lap, looks retired."""
+    assert "RUS" not in _codes_still_racing(_canada_as_of_lap_28())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reference", ["RUS", "PER", "BOT"])
+def test_still_racing_with_a_reference_drops_only_the_retired_car(reference: str) -> None:
+    assert _codes_still_racing(_canada_as_of_lap_28(), reference) == [
+        "RUS",
+        "OCO",
+        "PER",
+        "BOT",
+    ]
+
+
+@pytest.mark.unit
+def test_still_racing_with_a_reference_keeps_a_car_just_behind_on_the_previous_lap() -> None:
+    """Live data mid-lap: a car behind the requester has not finished this lap yet."""
+    laps = {
+        "PER": _lap(28, 2285.3, lap_time_seconds=77.0),
+        "STR": _lap(27, 2236.0, lap_time_seconds=77.0),  # lap 28 still in progress
+    }
+
+    assert _codes_still_racing(laps, "PER") == ["PER", "STR"]
 
 
 @pytest.mark.unit
@@ -2764,3 +2820,79 @@ async def test_a_redis_failure_while_counting_never_breaks_the_calculation() -> 
     await strategy_service._bump_pipeline_stat(
         broken, SEASON, ROUND_NUMBER, "gap_source_live"
     )  # no raise
+
+
+# --- driver id -> code table (demo deployment Day 3b) ---
+
+
+def _driver_rows(*rows: tuple[uuid.UUID, str]) -> MagicMock:
+    result = MagicMock()
+    result.all.return_value = list(rows)
+    return result
+
+
+@pytest.mark.unit
+async def test_load_driver_codes_reads_the_table_once_for_known_drivers(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ver, lin = uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(strategy_service, "_driver_code_cache", {})
+    mock_db_session.execute.return_value = _driver_rows((ver, "VER"), (lin, "LIN"))
+
+    first = await _real_load_driver_codes(mock_db_session, [ver])
+    second = await _real_load_driver_codes(mock_db_session, [ver, str(lin)])
+
+    assert first == second == {str(ver): "VER", str(lin): "LIN"}
+    assert mock_db_session.execute.await_count == 1
+
+
+@pytest.mark.unit
+async def test_load_driver_codes_rereads_for_a_driver_it_has_not_seen(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ver, sub = uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(strategy_service, "_driver_code_cache", {str(ver): "VER"})
+    mock_db_session.execute.return_value = _driver_rows((ver, "VER"), (sub, "DRU"))
+
+    codes = await _real_load_driver_codes(mock_db_session, [sub])
+
+    assert codes[str(sub)] == "DRU"
+    assert mock_db_session.execute.await_count == 1
+
+
+@pytest.mark.unit
+async def test_load_driver_codes_always_reads_without_driver_ids(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ver = uuid.uuid4()
+    monkeypatch.setattr(strategy_service, "_driver_code_cache", {str(ver): "VER"})
+    mock_db_session.execute.return_value = _driver_rows((ver, "VER"))
+
+    await _real_load_driver_codes(mock_db_session)
+
+    assert mock_db_session.execute.await_count == 1
+
+
+@pytest.mark.unit
+async def test_encoding_maps_for_database_resolves_a_driver_from_another_database(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Supabase driver UUID the sidecar's id table has never seen still gets
+    the model's trained code, through its driver code."""
+    local_ver, prod_ver = str(uuid.uuid4()), uuid.uuid4()
+    monkeypatch.setattr(strategy_service, "load_driver_codes", _real_load_driver_codes)
+    monkeypatch.setattr(strategy_service, "_driver_code_cache", {})
+    mock_db_session.execute.return_value = _driver_rows((prod_ver, "VER"))
+    sidecar = CategoricalEncodingMaps(
+        driver_id_to_code={local_ver: 19},
+        circuit_name_to_code={},
+        driver_code_to_code={"VER": 19},
+    )
+
+    maps = await strategy_service.encoding_maps_for_database(
+        mock_db_session, {"tire_deg_medium.pkl": sidecar}, [prod_ver]
+    )
+
+    medium = maps["tire_deg_medium.pkl"]
+    assert medium is not None
+    assert tire_deg_model.resolve_driver_code(medium, str(prod_ver)) == 19

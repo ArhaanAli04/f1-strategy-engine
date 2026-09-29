@@ -126,6 +126,7 @@ async def fetch_all_laps() -> pd.DataFrame:
         select(
             LapData.session_id,
             LapData.driver_id,
+            Driver.code.label("driver_code"),
             LapData.lap_number,
             LapData.lap_time_seconds,
             LapData.compound,
@@ -141,6 +142,7 @@ async def fetch_all_laps() -> pd.DataFrame:
         .join(SessionModel, LapData.session_id == SessionModel.id)
         .join(Race, SessionModel.race_id == Race.id)
         .join(Circuit, Race.circuit_id == Circuit.id)
+        .join(Driver, LapData.driver_id == Driver.id)
         .where(
             Race.season.between(TRAIN_SEASON_START, FETCH_SEASON_END),
             LapData.lap_time_seconds.is_not(None),
@@ -154,6 +156,7 @@ async def fetch_all_laps() -> pd.DataFrame:
         columns=[
             "session_id",
             "driver_id",
+            "driver_code",
             "lap_number",
             "lap_time_seconds",
             "compound",

@@ -68,6 +68,7 @@ SUMMARY_PATH = Path("retrain_summary.json")
 LAP_COLUMNS = [
     "session_id",
     "driver_id",
+    "driver_code",
     "lap_number",
     "lap_time_seconds",
     "compound",
@@ -84,13 +85,24 @@ STINT_COLUMNS = ["session_id", "driver_id", "stint_number", "start_lap"]
 
 
 def _download_base_corpus(client: Any, bucket: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Download the 2018-2025 base laps/stints parquet exported by export_training_data.py."""
+    """Download the 2018-2025 base laps/stints parquet exported by export_training_data.py.
+
+    Raises:
+        ValueError: The laps export predates its driver_code column (added 2026-09-28);
+            re-run export_training_data.py.
+    """
     CACHE_DIR.mkdir(exist_ok=True)
     laps_path = CACHE_DIR / "laps.parquet"
     stints_path = CACHE_DIR / "stints.parquet"
     client.download_file(bucket, f"{BASE_S3_PREFIX}/laps.parquet", str(laps_path))
     client.download_file(bucket, f"{BASE_S3_PREFIX}/stints.parquet", str(stints_path))
-    return pd.read_parquet(laps_path), pd.read_parquet(stints_path)
+    laps = pd.read_parquet(laps_path)
+    if "driver_code" not in laps.columns:
+        raise ValueError(
+            "Base corpus laps.parquet has no driver_code column; "
+            "re-run python -m backend.scripts.export_training_data"
+        )
+    return laps, pd.read_parquet(stints_path)
 
 
 def _fetch_current_season_rounds() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -141,7 +153,9 @@ def _fetch_current_season_rounds() -> tuple[pd.DataFrame, pd.DataFrame]:
             lap_rows.append(
                 {
                     "session_id": session_key,
+                    # No database here, so no UUID: the code stands in as the id.
                     "driver_id": lap["Driver"],
+                    "driver_code": lap["Driver"],
                     "lap_number": int(lap["LapNumber"]),
                     "lap_time_seconds": lap_time_to_seconds(lap["LapTime"]),
                     "compound": or_default(lap["Compound"], "UNKNOWN"),
@@ -238,21 +252,16 @@ def retrain() -> dict[str, dict[str, object]]:
     train_laps, holdout_laps = split_train_holdout(laps, train_seasons=train_seasons)
     logger.info("Train laps: %d, holdout laps: %d", len(train_laps), len(holdout_laps))
 
-    # Recovers this run's real driver_id/circuit_name -> code map, same as
+    # Recovers this run's real driver/circuit -> code map, same as
     # train_models.train_all — see tire_deg_model.py's "Training-time
-    # categorical encoding" section. NOTE (not fixed here, pre-existing and
-    # out of scope): base_laps' driver_id is a DB UUID string (see
-    # export_training_data.py) but current_laps' driver_id is a FastF1
-    # 3-letter code (lap["Driver"], see _fetch_current_season_rounds above) —
-    # encode_categoricals treats these as unrelated categories, so a driver
-    # active in both the base corpus and the current season gets two
-    # different codes, and only the UUID-keyed one is ever reachable at
-    # inference (driver_id there is always a DB UUID). This map faithfully
-    # reflects whichever code pd.Categorical actually assigned; it doesn't
-    # paper over that identity split. Moot in practice today: this script's
-    # CI entrypoint currently fetches zero 2026 laps (see CLAUDE.md's
-    # escalated GitHub-Actions/FastF1 deferred item), so no production model
-    # has been promoted through this path yet.
+    # categorical encoding" section. encode_categoricals categorises drivers by
+    # driver_code, which the base corpus (a database UUID as driver_id) and the
+    # FastF1-fetched current season (the code as driver_id) share, so each
+    # driver is one category across both. Before 2026-09-28 the two were
+    # categorised by driver_id and every current-season driver was split in
+    # two; harmless only because CI fetched zero 2026 laps (see CLAUDE.md's
+    # escalated GitHub-Actions/FastF1 deferred item). This path does promote
+    # to production: tire_deg_medium on 2026-09-28.
     encoding_maps = tire_deg_model.build_categorical_encoding_maps(laps)
 
     pit_laps = raw_laps.drop(columns=["is_valid"]).copy()

@@ -24,12 +24,11 @@ Run via:
     python -m backend.scripts.precompute_replay --session-id <uuid>
 
 Refreshing production (after a model promotion, or a change to the prediction
-code): run this against the LOCAL database, check it with
-validate_replay_precompute.py, then copy it to Supabase with
-copy_replay_precompute.py. Not directly against Supabase for now: the tyre
-models look drivers up by the local database's UUIDs, so predictions computed
-there would use stand-in driver codes (docs/internal/demo-deployment-plan-2026.md,
-Day 3b). docs/runbook.md has the step-by-step.
+code): run this with DATABASE_URL pointed at Supabase, then check it with
+validate_replay_precompute.py. The tyre models look drivers up by driver code,
+so the result matches a run on the local database (verified 2026-09-28,
+docs/internal/demo-deployment-plan-2026.md Day 3b); copy_replay_precompute.py
+stays as the local-then-copy alternative. docs/runbook.md has the step-by-step.
 
 Times are seconds on FastF1's session clock (Lap.LapStartTime / Lap.Time) —
 the same clock driver_positions is anchored to (see replay_pipeline.py's

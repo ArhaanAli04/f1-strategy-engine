@@ -24,7 +24,11 @@ they're used rather than silently papered over:
   below picks the map matching whichever pipeline it's about to call, never
   one map applied across compounds. A missing map (legacy sidecar, or an id
   that debuted after a model's last training run) falls back to the same
-  crc32 formula as before, per id — non-regressive by construction.
+  crc32 formula as before, per id — non-regressive by construction. Drivers
+  are looked up by driver CODE since 2026-09-28 (encoding_maps_for_database
+  attaches this database's id -> code table), because the map's UUID keys
+  only matched the database the models were trained from, not production
+  Supabase.
   compound_encoded uses a hardcoded alphabetical-order mapping instead, since
   {HARD, INTERMEDIATE, MEDIUM, SOFT, WET} is a small, fixed, near-certainly-
   fully-observed set — pd.Categorical's inferred code order for it is far
@@ -61,6 +65,7 @@ import json
 import logging
 import math
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +80,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import get_aws_settings, get_ml_settings
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
+from backend.models.driver import Driver
 from backend.models.race import Circuit, Race
 from backend.models.race import Session as SessionModel
 from backend.models.strategy import StrategyPrediction
@@ -175,6 +181,10 @@ _encoding_maps_cache: dict[str, Any] = {}
 # as a side effect of _load_models(), same reasoning. See _load_holdout_mae()
 # and build_pit_recommendation's confidence computation.
 _holdout_mae_cache: dict[str, float | None] = {}
+# This process's database: str(driver id) -> driver code, for the tyre models'
+# code-keyed driver lookup (tire_deg_model.resolve_driver_code). Filled by
+# load_driver_codes and re-read only when a driver it has not seen is asked for.
+_driver_code_cache: dict[str, str] = {}
 
 
 def _local_model_path(filename: str) -> Path:
@@ -306,6 +316,52 @@ def _load_encoding_maps() -> dict[str, tire_deg_model.CategoricalEncodingMaps | 
     """
     _load_models()
     return _encoding_maps_cache
+
+
+async def load_driver_codes(
+    db: AsyncSession, driver_ids: Iterable[uuid.UUID | str] | None = None
+) -> dict[str, str]:
+    """This database's driver id -> driver code table, cached for the process.
+
+    The drivers table is small (a few dozen rows), so it is read whole: once per
+    process, again whenever one of driver_ids is not in the cache yet (a driver
+    ingested after the first read), and always when driver_ids is None.
+
+    Args:
+        db: Async DB session.
+        driver_ids: The drivers the caller is about to resolve, or None to force a
+            fresh read.
+    Returns:
+        str(driver id) -> driver code, for every driver in this database.
+    """
+    wanted = None if driver_ids is None else {str(driver_id) for driver_id in driver_ids}
+    if wanted is not None and wanted <= _driver_code_cache.keys():
+        return _driver_code_cache
+    rows = (await db.execute(select(Driver.id, Driver.code))).all()
+    _driver_code_cache.update({str(driver_id): code for driver_id, code in rows})
+    return _driver_code_cache
+
+
+async def encoding_maps_for_database(
+    db: AsyncSession,
+    maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
+    driver_ids: Iterable[uuid.UUID | str] | None = None,
+) -> dict[str, tire_deg_model.CategoricalEncodingMaps | None]:
+    """The loaded tyre-model encoding maps, with this database's driver codes attached.
+
+    Without the codes, a driver only resolves on the database the models were
+    trained from (their sidecars were keyed by that database's driver UUIDs).
+
+    Args:
+        db: Async DB session.
+        maps_cache: A process's loaded encoding maps (_load_encoding_maps() here,
+            or prediction_worker's own copy).
+        driver_ids: The drivers about to be resolved, see load_driver_codes.
+    Returns:
+        Model filename -> maps, ready for tire_deg_model.resolve_driver_code.
+    """
+    driver_codes = await load_driver_codes(db, driver_ids)
+    return tire_deg_model.attach_database_driver_codes(maps_cache, driver_codes)
 
 
 def _load_holdout_mae() -> dict[str, float | None]:
@@ -849,7 +905,7 @@ async def build_pit_recommendation(
             entry (nothing to recommend pitting onto).
     """
     models = _load_models()
-    maps_cache = _load_encoding_maps()
+    maps_cache = await encoding_maps_for_database(db, _load_encoding_maps(), [driver_id])
     mae_cache = _load_holdout_mae()
     state = await _current_state(db, session_id, driver_id)
     return compute_pit_recommendation(models, maps_cache, mae_cache, driver_id, state)
@@ -1603,7 +1659,7 @@ async def get_pit_window_with_explanation(
 
     state = await _current_state(db, session_id, driver_id)
     models = _load_models()
-    maps_cache = _load_encoding_maps()
+    maps_cache = await encoding_maps_for_database(db, _load_encoding_maps(), [driver_id])
 
     top = candidates[0]
     top_pit_lap = int(top["pit_lap"])
@@ -1807,7 +1863,9 @@ async def _undercut_overcut_probability(
         over sims; positive = pitting_now_driver_id ends up ahead), n_laps_projected.
     """
     models = _load_models()
-    maps_cache = _load_encoding_maps()
+    maps_cache = await encoding_maps_for_database(
+        db, _load_encoding_maps(), [pitting_now_driver_id, pitting_next_lap_driver_id]
+    )
     now_state = await _current_state(db, session_id, pitting_now_driver_id, as_of_lap)
     next_state = await _current_state(db, session_id, pitting_next_lap_driver_id, as_of_lap)
 
@@ -2190,25 +2248,38 @@ def _first_pit_laps_over_threshold_batch(
 RETIRED_AFTER_LAP_TIMES = 1.5
 
 
-def _still_racing(latest_laps: list[LapData]) -> list[LapData]:
+def still_racing(latest_laps: list[LapData], reference: LapData | None = None) -> list[LapData]:
     """Drop drivers who have stopped racing, from each driver's latest lap row.
 
     Without this the strategy wall kept "predicting" a pit stop for cars that
     had retired (Azerbaijan 2026: STR, out on lap 7, shown pitting on lap 22).
 
     A driver counts as still racing when their latest lap was completed within
-    RETIRED_AFTER_LAP_TIMES lap times of the leader's latest completion. The
-    lap time is the larger of the field's current pace (median of these latest
-    laps) and the leader's own last lap, so the slow laps of a Safety Car
+    RETIRED_AFTER_LAP_TIMES lap times of the reference completion. The lap
+    time is the larger of the field's current pace (median of these latest
+    laps) and the reference's own last lap, so the slow laps of a Safety Car
     raise the limit instead of dropping running cars. Completion times come
     from session_elapsed_seconds for a historically ingested race and from
     the row's created_at for a live one, which records no session clock.
 
+    Without a reference, the reference is the latest completion in the field
+    (the leader's, for each driver's absolute latest row). A field cut off at
+    a lap (lap_number <= n, as prediction_worker's neighbour lookup reads it)
+    needs one: there every running car has a row for lap n and the latest of
+    those is the LAST car on the road, which would make every car more than
+    1.5 lap times ahead of it look retired. With a reference row, a car on the
+    reference's lap or later is always kept (ahead on the road, or a lapped
+    runner behind), and an earlier-lap car is judged against the reference's
+    completion.
+
     Args:
-        latest_laps: Each driver's latest lap_data row in the session.
+        latest_laps: Each driver's latest lap_data row in the session (or at or
+            before one lap).
+        reference: The row to judge against, from latest_laps; None for the
+            field's latest completion.
     Returns:
-        The rows of the drivers still racing (the leader is always kept), in
-        the same order.
+        The rows of the drivers still racing (the reference is always kept),
+        in the same order.
     """
     lap_times = [lap.lap_time_seconds for lap in latest_laps if lap.lap_time_seconds is not None]
     if len(latest_laps) < 2 or not lap_times:
@@ -2221,10 +2292,15 @@ def _still_racing(latest_laps: list[LapData]) -> list[LapData]:
             return lap.session_elapsed_seconds
         return lap.created_at.timestamp()
 
-    leader = max(latest_laps, key=completed_at)
-    lap_time = max(float(np.median(lap_times)), leader.lap_time_seconds or 0.0)
-    cutoff = completed_at(leader) - RETIRED_AFTER_LAP_TIMES * lap_time
-    return [lap for lap in latest_laps if completed_at(lap) >= cutoff]
+    anchor = reference if reference is not None else max(latest_laps, key=completed_at)
+    lap_time = max(float(np.median(lap_times)), anchor.lap_time_seconds or 0.0)
+    cutoff = completed_at(anchor) - RETIRED_AFTER_LAP_TIMES * lap_time
+    return [
+        lap
+        for lap in latest_laps
+        if completed_at(lap) >= cutoff
+        or (reference is not None and lap.lap_number >= reference.lap_number)
+    ]
 
 
 def _key_competitor_strategy(
@@ -2247,7 +2323,7 @@ async def get_competitor_predicted_strategy(
 ) -> list[dict[str, Any]]:
     """For every driver still racing in a session, estimate their most likely upcoming pit lap.
 
-    Retired drivers are left out (see _still_racing).
+    Retired drivers are left out (see still_racing).
 
     Args:
         client: Redis client (cache-aside).
@@ -2258,7 +2334,6 @@ async def get_competitor_predicted_strategy(
         One dict per driver: driver_id, predicted_pit_lap, pit_probability.
     """
     models = _load_models()
-    maps_cache = _load_encoding_maps()
     pit_model = models.get("pit_predictor.pkl")
     if pit_model is None:
         raise ModelNotLoadedError("pit_predictor model not loaded")
@@ -2273,7 +2348,7 @@ async def get_competitor_predicted_strategy(
         LapData.lap_number == subq.c.max_lap
     )
     query = select(LapData).join(subq, join_condition).where(LapData.session_id == session_id)
-    latest_laps = _still_racing(list((await db.execute(query)).scalars().all()))
+    latest_laps = still_racing(list((await db.execute(query)).scalars().all()))
     if not latest_laps:
         return []
 
@@ -2308,6 +2383,7 @@ async def get_competitor_predicted_strategy(
     )
 
     driver_ids = [str(lap.driver_id) for lap in latest_laps]
+    maps_cache = await encoding_maps_for_database(db, _load_encoding_maps(), driver_ids)
     compounds = [lap.compound for lap in latest_laps]
     n = len(latest_laps)
     predicted_laps, probabilities = _first_pit_laps_over_threshold_batch(

@@ -28,6 +28,13 @@ from backend.services.ml import race_simulator, tire_deg_model
 from backend.workers import prediction_worker
 
 
+@pytest.fixture(autouse=True)
+def _stub_driver_codes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No driver codes: tests queue their own db.execute results, and an empty
+    table keeps the old UUID-keyed lookup they were written against."""
+    monkeypatch.setattr(strategy_service, "load_driver_codes", AsyncMock(return_value={}))
+
+
 @pytest.mark.unit
 async def test_build_race_state_batches_cumulative_time_into_one_query(
     mock_db_session: AsyncMock,
@@ -845,6 +852,115 @@ async def test_resolve_position_context_bounds_query_by_current_lap(
     assert len(captured_queries) == 1
     compiled = str(captured_queries[0].compile(compile_kwargs={"literal_binds": True}))
     assert f"lap_number <= {current_lap}" in compiled
+
+
+def _field_row(
+    driver_id: uuid.UUID, lap_number: int, position: int, completed_at: float
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        driver_id=driver_id,
+        lap_number=lap_number,
+        position=position,
+        lap_time_seconds=77.0,
+        session_elapsed_seconds=completed_at,
+    )
+
+
+def _canada_lap_28(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, uuid.UUID]:
+    """Canada 2026 as of lap 28: RUS leads, OCO P16, ALO (out after lap 24,
+    frozen at P17), PER P17, STR P18 — completion times from the real race."""
+    ids = {code: uuid.uuid4() for code in ("RUS", "OCO", "ALO", "PER", "STR")}
+    completed = {
+        ids["RUS"]: 2155.8,
+        ids["OCO"]: 2274.7,
+        ids["ALO"]: 1966.3,
+        ids["PER"]: 2285.3,
+        ids["STR"]: 2313.0,
+    }
+    rows = [
+        _field_row(ids["RUS"], 28, 1, completed[ids["RUS"]]),
+        _field_row(ids["OCO"], 28, 16, completed[ids["OCO"]]),
+        _field_row(ids["ALO"], 24, 17, completed[ids["ALO"]]),
+        _field_row(ids["PER"], 28, 17, completed[ids["PER"]]),
+        _field_row(ids["STR"], 28, 18, completed[ids["STR"]]),
+    ]
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = rows
+    mock_db_session.execute.return_value = result
+
+    async def _race_time(db: Any, session_id: uuid.UUID, driver_id: uuid.UUID, lap: int) -> float:
+        return completed[driver_id]
+
+    monkeypatch.setattr(prediction_worker, "_cumulative_race_time", _race_time)
+    return ids
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_skips_a_retired_car_tied_on_position(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ALO's frozen P17 row ties PER's. He must not become PER's neighbour,
+    whichever order the database returns the tied rows in (local and Supabase
+    differed)."""
+    ids = _canada_lap_28(mock_db_session, monkeypatch)
+
+    context = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, uuid.uuid4(), ids["PER"], 28, 2026, 5
+    )
+
+    assert context["target_ahead_driver_id"] == ids["OCO"]
+    assert context["target_behind_driver_id"] == ids["STR"]
+    assert context["gap_to_car_ahead"] == pytest.approx(10.6)
+    assert context["gap_to_car_behind"] == pytest.approx(27.7)
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_keeps_the_leader_far_ahead_on_the_same_lap(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a field cut off at lap 28 the last car to finish lap 28 is at the
+    back; the leader finished it 157s earlier and is still racing."""
+    ids = _canada_lap_28(mock_db_session, monkeypatch)
+
+    context = await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, uuid.uuid4(), ids["RUS"], 28, 2026, 5
+    )
+
+    assert context["position"] == 1
+    assert context["target_ahead_driver_id"] is None
+    assert context["target_behind_driver_id"] == ids["OCO"]
+
+
+@pytest.mark.unit
+async def test_resolve_position_context_breaks_position_ties_by_completion_time(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    captured: list[Any] = []
+
+    async def _execute(query: Any, *args: Any, **kwargs: Any) -> Any:
+        captured.append(query)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        return result
+
+    mock_db_session.execute.side_effect = _execute
+
+    await prediction_worker._resolve_position_context(
+        mock_db_session, fakeredis, uuid.uuid4(), uuid.uuid4(), 20, 2026, 10
+    )
+
+    compiled = str(captured[0].compile(compile_kwargs={"literal_binds": True}))
+    assert (
+        "ORDER BY lap_data.position, lap_data.session_elapsed_seconds ASC NULLS LAST, "
+        "lap_data.created_at" in compiled
+    )
 
 
 @pytest.mark.unit
@@ -1876,7 +1992,7 @@ def _stub_prediction_pieces(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     seen: dict[str, Any] = {}
     resolved = {"season": 2026, "round_number": 9, "position": 4}
     monkeypatch.setattr(prediction_worker, "_load_models", lambda: {"m": "models"})
-    monkeypatch.setattr(prediction_worker, "_load_encoding_maps", lambda: {"m": "maps"})
+    monkeypatch.setattr(prediction_worker, "_load_encoding_maps", lambda: {"m": None})
     monkeypatch.setattr(prediction_worker, "_load_holdout_mae", lambda: {"m": 0.5})
 
     async def _resolve(
