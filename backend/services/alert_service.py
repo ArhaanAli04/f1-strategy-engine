@@ -606,6 +606,35 @@ async def dispatch_alert(
     return created
 
 
+async def dispatch_stored_alert(
+    db: AsyncSession,
+    redis_client: aioredis.Redis,  # type: ignore[type-arg]
+    alert_type: AlertType,
+    payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Deliver a precomputed alert (a replay_alert_events row) to its subscribers.
+
+    Demo Replay playback (scripts/replay_playback.py) plays back alerts that
+    find_undercut_threats_at_lap already judged, so there is no threshold,
+    suppression or dedup to apply here: only evaluate_threats' subscriber rule
+    (users subscribed to the alert's driver for this alert type), then
+    dispatch_alert.
+
+    Args:
+        db: Async DB session.
+        redis_client: Redis client (pub/sub publish).
+        alert_type: One of AlertType.
+        payload: session_id, driver_id and message, as for dispatch_alert.
+    Returns:
+        The created alert payloads, one per subscribed user; empty when nobody
+        is subscribed (nothing is written).
+    """
+    user_ids = await _subscribed_user_ids(db, uuid.UUID(str(payload["driver_id"])), alert_type)
+    if not user_ids:
+        return []
+    return await dispatch_alert(db, redis_client, user_ids, alert_type, payload)
+
+
 # --- GET/PUT /alerts and /alerts/subscriptions ---
 
 

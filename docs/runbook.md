@@ -31,6 +31,7 @@ below, not a 1:1 mapping of the Kubernetes commands.
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
 - [Refreshing the Demo Replay data in production](#refreshing-the-demo-replay-data-in-production)
+- [Demo Replay modes](#demo-replay-modes)
 - [Fly.io deployment](#flyio-deployment)
 - [App rollback (Helm — local cluster only)](#app-rollback-helm--local-cluster-only)
 - [Database rollback (Alembic)](#database-rollback-alembic)
@@ -258,6 +259,33 @@ python -m backend.scripts.copy_replay_precompute \
 The undercut probabilities come from an unseeded Monte Carlo, so a re-run can
 move a score sitting right on the 50 % alert threshold to the other side; a
 difference of an alert or two between runs is expected.
+
+---
+
+## Demo Replay modes
+
+`DEMO_PLAYBACK_MODE` picks the process `/demo/replay/start` launches:
+
+| Mode | Process | Needs | Used by |
+|---|---|---|---|
+| `false` (default) | `replay_pipeline.py`: every lap goes through the Celery worker, which recomputes predictions and alerts | worker running, FastF1 cache | local development |
+| `true` | `replay_playback.py`: plays back the stored predictions, gaps, positions, lap timings and alerts in real time | the replay data precomputed into this database (see above) | production |
+
+Playback publishes to the same Redis keys and channels, so the race page needs
+no changes. It deletes its gaps key when it finishes or is stopped (SIGTERM
+from `/demo/replay/stop` or the live-race kill-switch).
+
+To try playback locally:
+1. Precompute the local replay data (`python -m backend.scripts.precompute_replay`).
+2. Add `DEMO_PLAYBACK_MODE=true` to `.env`, then:
+   ```bash
+   docker compose -f infra/docker/docker-compose.yml --env-file .env up -d --force-recreate backend
+   docker compose -f infra/docker/docker-compose.yml stop worker beat
+   ```
+3. Start a replay from the web app. Its log lines ("Playing back laps …",
+   "Playback finished: … failures") are in `docker compose logs backend`.
+4. To go back: remove the line from `.env`, recreate the backend the same way,
+   and `docker compose … start worker beat`.
 
 ---
 

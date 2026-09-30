@@ -130,6 +130,13 @@ class AppSettings(BaseSettings):
     # allow_credentials=True and origin "*" is rejected by browsers anyway,
     # so "*" is only ever meaningful in development.
     allowed_origins: str = "*"
+    # Demo Replay engine (docs/internal/demo-deployment-plan-2026.md, Day 4).
+    # False: replay_pipeline.py, which sends every lap through the Celery worker
+    # to recompute predictions (needs the worker running). True:
+    # replay_playback.py, which plays back what precompute_replay.py stored, with
+    # no worker and no ML imports; production sets it. Read once at process
+    # start, like every setting here: changing it needs the backend restarted.
+    demo_playback_mode: bool = False
 
     @property
     def allowed_origins_list(self) -> list[str]:

@@ -1,9 +1,10 @@
 """Demo Replay control: availability, curated-session listing, start/stop (Day 43 Part 4).
 
 Backs the /demo/replay/* endpoints (apis/v1/demo.py). A Demo Replay runs
-backend/scripts/replay_pipeline.py as a detached subprocess and tracks it in
-one Redis key, f1:demo:replay:state (a single global replay — the simplest
-sufficient design for a portfolio demo).
+backend/scripts/replay_playback.py (DEMO_PLAYBACK_MODE on, production) or
+replay_pipeline.py (off) as a detached subprocess and tracks it in one Redis
+key, f1:demo:replay:state (a single global replay — the simplest sufficient
+design for a portfolio demo).
 
 Two distinct gates the caller/UI must not conflate:
 - **availability** (get_replay_availability) reflects ONLY live-race
@@ -33,6 +34,7 @@ import redis.asyncio as aioredis
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.config import get_app_settings
 from backend.core.exceptions import ConflictError, NotFoundError, ValidationError
 from backend.models.race import Race
 from backend.models.race import Session as SessionModel
@@ -339,15 +341,47 @@ async def get_replay_status(
     )
 
 
+def _replay_command(session_id: uuid.UUID, start_lap: int, end_lap: int) -> list[str]:
+    """The replay process to launch, chosen by DEMO_PLAYBACK_MODE.
+
+    Playback mode: replay_playback.py plays back the precomputed window, with no
+    worker (production). Otherwise replay_pipeline.py sends every lap through
+    the worker; --no-alert-worker because prediction_worker's evaluate_threats
+    writes the Alert rows regardless, so the separate FCM-push alert_worker
+    subprocess is unnecessary and would be orphaned on a hard stop, and --rate
+    fast keeps the demo experience predictable.
+
+    Args:
+        session_id: A validated curated session (already checked by start_replay).
+        start_lap, end_lap: The curated window bounds.
+    Returns:
+        The argv to run.
+    """
+    window = [
+        "--session-id",
+        str(session_id),
+        "--start-lap",
+        str(start_lap),
+        "--end-lap",
+        str(end_lap),
+    ]
+    if get_app_settings().demo_playback_mode:
+        return [sys.executable, "-m", "backend.scripts.replay_playback", *window]
+    return [
+        sys.executable,
+        "-m",
+        "backend.scripts.replay_pipeline",
+        *window,
+        "--rate",
+        "fast",
+        "--no-alert-worker",
+    ]
+
+
 def _launch_replay_subprocess(
     session_id: uuid.UUID, start_lap: int, end_lap: int
 ) -> subprocess.Popen[bytes]:
-    """Launch replay_pipeline.py detached, scoped to the curated lap window.
-
-    --no-alert-worker: real Alert DB rows are written by prediction_worker's
-    evaluate_threats wiring (Day 42) regardless, so the separate FCM-push
-    alert_worker subprocess is unnecessary here and would be orphaned on a
-    hard stop. --rate fast keeps the demo experience predictable.
+    """Launch the replay process detached, scoped to the curated lap window.
 
     Args:
         session_id: A validated curated session (already checked by start_replay).
@@ -356,20 +390,7 @@ def _launch_replay_subprocess(
         The Popen handle (its .pid is tracked in Redis).
     """
     return subprocess.Popen(  # noqa: S603 — fixed argv, no shell; session_id is an allowlisted UUID
-        [
-            sys.executable,
-            "-m",
-            "backend.scripts.replay_pipeline",
-            "--session-id",
-            str(session_id),
-            "--start-lap",
-            str(start_lap),
-            "--end-lap",
-            str(end_lap),
-            "--rate",
-            "fast",
-            "--no-alert-worker",
-        ],
+        _replay_command(session_id, start_lap, end_lap),
         start_new_session=True,
     )
 
@@ -443,9 +464,10 @@ async def stop_replay(
 ) -> ReplayStopResponse:
     """Terminate the running Demo Replay subprocess and clear its state key.
 
-    Sends SIGTERM — replay_pipeline.py installs a handler that turns it into
-    its existing graceful KeyboardInterrupt shutdown (position thread stopped,
-    keys left to TTL out). A pid that is already gone is not an error.
+    Sends SIGTERM — both replay scripts install a handler that turns it into
+    their graceful KeyboardInterrupt shutdown (playback stopped, gaps key
+    deleted, position keys left to TTL out). A pid that is already gone is not
+    an error.
 
     Args:
         client: Async Redis client.
