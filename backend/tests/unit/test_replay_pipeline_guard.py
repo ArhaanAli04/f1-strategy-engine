@@ -3,7 +3,8 @@
 - The CLI live-race guard (Day 43 Part 3.2): `python -m
   backend.scripts.replay_pipeline` must refuse to run while a real live race
   is being ingested, since a replay and a live ingestor write the same Redis
-  timing/position keys.
+  timing/position keys. The guard itself lives in _replay_common (tested in
+  test_replay_common.py); this checks main() runs it before replaying.
 - FastF1 cache setup: _load_fastf1_session must create the cache directory
   (FastF1's enable_cache won't), or a fresh container crashes on start.
 """
@@ -17,7 +18,7 @@ import fastf1
 import pytest
 import redis
 
-from backend.scripts import replay_pipeline
+from backend.scripts import _replay_common, replay_pipeline
 from backend.services.live_race_detection import LiveRaceStatus
 
 
@@ -25,26 +26,6 @@ from backend.services.live_race_detection import LiveRaceStatus
 def _stub_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """No real Redis connection — the guard only needs a client to close()."""
     monkeypatch.setattr(redis.Redis, "from_url", lambda *args, **kwargs: MagicMock())
-
-
-@pytest.mark.unit
-def test_guard_exits_when_live_race_detected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        replay_pipeline,
-        "detect_live_race_sync",
-        lambda _client: LiveRaceStatus(True, "live timing feed active for 2026 round 10"),
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        replay_pipeline._guard_against_live_race()
-    assert exc_info.value.code == 1
-
-
-@pytest.mark.unit
-def test_guard_passes_when_no_live_race(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        replay_pipeline, "detect_live_race_sync", lambda _client: LiveRaceStatus(False, None)
-    )
-    replay_pipeline._guard_against_live_race()  # must not raise
 
 
 @pytest.mark.unit
@@ -62,7 +43,7 @@ def test_main_aborts_before_replay_when_live(monkeypatch: pytest.MonkeyPatch) ->
         ),
     )
     monkeypatch.setattr(
-        replay_pipeline,
+        _replay_common,
         "detect_live_race_sync",
         lambda _client: LiveRaceStatus(True, "live timing feed active for 2026 round 5"),
     )

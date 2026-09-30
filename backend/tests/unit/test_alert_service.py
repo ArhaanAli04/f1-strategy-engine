@@ -250,6 +250,51 @@ async def test_alert_published_to_redis_pubsub(
     await pubsub.aclose()  # type: ignore[attr-defined]
 
 
+def _subscriber_rows(*user_ids: uuid.UUID) -> MagicMock:
+    result = MagicMock()
+    result.all.return_value = [MagicMock(user_id=user_id) for user_id in user_ids]
+    return result
+
+
+@pytest.mark.unit
+async def test_stored_alert_is_written_for_each_subscriber_of_its_driver(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    """Demo Replay playback: an alert already judged by the precompute goes to
+    everyone subscribed to its (trailing) driver, with no threshold or dedup."""
+    first, second = uuid.uuid4(), uuid.uuid4()
+    mock_db_session.execute.return_value = _subscriber_rows(first, second)
+    payload = {
+        "session_id": str(uuid.uuid4()),
+        "driver_id": str(uuid.uuid4()),
+        "message": "Undercut threat: COL on GAS (50.5%)",
+    }
+
+    created = await alert_service.dispatch_stored_alert(
+        mock_db_session, fakeredis, AlertType.UNDERCUT_THREAT, payload
+    )
+
+    assert [alert["user_id"] for alert in created] == [str(first), str(second)]
+    assert mock_db_session.add.call_count == 2
+    mock_db_session.commit.assert_awaited_once()
+
+
+@pytest.mark.unit
+async def test_stored_alert_with_no_subscribers_writes_nothing(
+    mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis
+) -> None:
+    mock_db_session.execute.return_value = _subscriber_rows()
+    payload = {"session_id": str(uuid.uuid4()), "driver_id": str(uuid.uuid4()), "message": "x"}
+
+    created = await alert_service.dispatch_stored_alert(
+        mock_db_session, fakeredis, AlertType.UNDERCUT_THREAT, payload
+    )
+
+    assert created == []
+    mock_db_session.add.assert_not_called()
+    mock_db_session.commit.assert_not_awaited()
+
+
 @pytest.mark.unit
 async def test_undercut_threat_second_call_deduped(
     mock_db_session: AsyncMock, fakeredis: fakeredis_lib.FakeAsyncRedis

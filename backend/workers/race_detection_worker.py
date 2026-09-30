@@ -97,7 +97,8 @@ def _force_stop_demo_replay(client: redis.Redis) -> None:  # type: ignore[type-a
 
     A Demo Replay and a live ingestor both write f1:{season}:{round}:gaps and
     f1:{season}:{round}:car:{n}:position — a real race always takes priority.
-    SIGTERM routes into replay_pipeline.py's graceful shutdown handler. A
+    SIGTERM routes into the replay script's graceful shutdown handler
+    (replay_playback.py or replay_pipeline.py, see demo_service). A
     bare NX-claim sentinel (a start still in progress) has no pid to signal;
     clearing the key is enough. See CLAUDE.md's Auto Race Detection section.
 

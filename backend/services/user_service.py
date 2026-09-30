@@ -33,7 +33,9 @@ from backend.core.security import (
     hash_password,
     verify_password,
 )
+from backend.models.driver import Driver
 from backend.models.user import Subscription, User
+from backend.schemas.alert_schema import AlertType
 from backend.schemas.user_schema import (
     LoginResponse,
     SubscriptionCreate,
@@ -83,7 +85,15 @@ async def get_user(db: AsyncSession, user_id: uuid.UUID) -> UserResponse:
 async def register_user(
     db: AsyncSession, email: str, password: str, full_name: str
 ) -> UserResponse:
-    """Create a new user with a bcrypt-hashed password.
+    """Create a new user with a bcrypt-hashed password and a default alert subscription.
+
+    The default subscription is undercut_threat on every driver in the
+    database, so a new visitor sees alerts during a Demo Replay without
+    visiting settings first (docs/internal/demo-deployment-plan-2026.md, Day
+    4). Every driver id is stored rather than "empty means all": alerts match
+    on the list as it is, and the settings page shows each driver ticked. A
+    driver added to the database later is not included. Created in the same
+    transaction as the user, so a user never exists without it.
 
     Args:
         db: Async DB session.
@@ -101,6 +111,16 @@ async def register_user(
 
     user = User(email=email, hashed_password=hash_password(password), full_name=full_name)
     db.add(user)
+    await db.flush()  # assigns user.id for the subscription below
+    driver_ids = (await db.execute(select(Driver.id))).scalars().all()
+    db.add(
+        Subscription(
+            user_id=user.id,
+            driver_ids=[str(driver_id) for driver_id in driver_ids],
+            team_ids=[],
+            alert_types=[AlertType.UNDERCUT_THREAT.value],
+        )
+    )
     await db.commit()
     await db.refresh(user)
     return UserResponse.model_validate(user)

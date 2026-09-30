@@ -7,8 +7,10 @@ not a real replay_pipeline.py process.
 
 import json
 import os
+import subprocess
 import uuid
 from datetime import date
+from unittest.mock import MagicMock
 
 import pytest
 import redis as sync_redis
@@ -182,3 +184,45 @@ def test_start_status_stop_roundtrip(
 
     after = authenticated_client.get("/api/v1/demo/replay/status")
     assert after.json()["running"] is False
+
+
+@pytest.mark.integration
+def test_start_in_playback_mode_launches_the_worker_free_playback(
+    authenticated_client: TestClient,
+    british_gp_session_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEMO_PLAYBACK_MODE on (production): /demo/replay/start runs replay_playback.py
+    over the curated window, not replay_pipeline.py."""
+    launched: list[list[str]] = []
+
+    def _fake_popen(argv: list[str], **kwargs: object) -> _FakeProc:
+        launched.append(argv)
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        demo_service, "get_app_settings", lambda: MagicMock(demo_playback_mode=True)
+    )
+    monkeypatch.setattr(demo_service, "_process_is_alive", lambda _pid: True)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: None)  # the fake pid is not ours to signal
+
+    resp = authenticated_client.post(
+        "/api/v1/demo/replay/start", json={"session_id": british_gp_session_id}
+    )
+
+    assert resp.status_code == 202
+    (argv,) = launched
+    assert argv[1:] == [
+        "-m",
+        "backend.scripts.replay_playback",
+        "--session-id",
+        british_gp_session_id,
+        "--start-lap",
+        "43",
+        "--end-lap",
+        "52",
+    ]
+    status = authenticated_client.get("/api/v1/demo/replay/status").json()
+    assert status["running"] is True
+    assert authenticated_client.post("/api/v1/demo/replay/stop").status_code == 200
