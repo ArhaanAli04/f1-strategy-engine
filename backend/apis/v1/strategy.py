@@ -11,6 +11,10 @@ Every route carries @limiter.limit(rate_limit_value) — see core/rate_limit.py
 for why this must be a per-route decorator rather than one global middleware
 default, and why each handler below needs a `request: Request` parameter.
 
+POST /simulate also takes the caller's daily scenario quota
+(services/simulation_quota_service.py) before queueing, and gives it back if
+queueing fails; GET /simulate/quota reports it.
+
 All routes except GET /simulate/{task_id} require Depends(get_current_user):
 these are the compute-heavy ML inference/simulation endpoints (previously
 public — see CLAUDE.md's Deferred Wiring). GET /simulate/{task_id} stays
@@ -27,6 +31,8 @@ from typing import Annotated, Any
 import redis.asyncio as aioredis
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, Query, Request, status
+from kombu.exceptions import OperationalError as KombuOperationalError
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.database import get_db
@@ -39,6 +45,7 @@ from backend.schemas.simulate_schema import (
     SimulateStrategyResponse,
     SimulateTaskAccepted,
     SimulateTaskStatusResponse,
+    SimulationQuotaResponse,
 )
 from backend.schemas.strategy_schema import (
     LastIngestedSessionResponse,
@@ -47,7 +54,7 @@ from backend.schemas.strategy_schema import (
     StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
-from backend.services import strategy_service
+from backend.services import simulation_quota_service, strategy_service
 from backend.workers.celery_app import app as celery_app
 from backend.workers.prediction_worker import run_race_simulation
 
@@ -66,6 +73,28 @@ router = APIRouter(prefix="/strategy", tags=["strategy"])
 _SIMULATE_ENQUEUE_EXECUTOR = ThreadPoolExecutor(
     max_workers=50, thread_name_prefix="simulate-enqueue"
 )
+
+
+# Must be registered before /simulate/{task_id} below, or "quota" would be
+# matched as a task_id.
+@router.get(
+    "/simulate/quota",
+    response_model=SimulationQuotaResponse,
+    summary="Today's Strategy Simulator scenario quotas",
+    description=(
+        "How many simulation scenarios the caller and the whole site have used "
+        "today (UTC) and how many are left. A single plan uses 1 scenario and a "
+        "comparison uses one per scenario. limit and remaining are null when "
+        "that quota is not configured (unlimited). Resets at 00:00 UTC."
+    ),
+)
+@limiter.limit(rate_limit_value)
+async def get_simulation_quota(
+    request: Request,
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
+    current_user: Annotated[dict[str, Any], Depends(get_current_user)],
+) -> SimulationQuotaResponse:
+    return await simulation_quota_service.get_quota(redis_client, uuid.UUID(current_user["sub"]))
 
 
 # Registered ahead of the /{session_id}/... routes below: session_id is
@@ -281,6 +310,7 @@ async def simulate_strategy(
     session_id: uuid.UUID,
     payload: SimulateStrategyRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    redis_client: Annotated[aioredis.Redis, Depends(get_redis)],  # type: ignore[type-arg]
     current_user: Annotated[dict[str, Any], Depends(get_current_user)],
 ) -> SimulateTaskAccepted:
     # Reject before enqueueing anything — a bad current_lap should never
@@ -294,6 +324,13 @@ async def simulate_strategy(
     # bypassing this route, must not be able to skip it.
     await strategy_service.validate_current_lap(db, session_id, payload.current_lap)
 
+    # Daily scenario quota (429 when over), taken only once the request is
+    # known to be valid so a rejected request never uses any, and given back
+    # if the task can't be queued.
+    reservation = await simulation_quota_service.reserve(
+        redis_client, uuid.UUID(current_user["sub"]), payload.scenario_count
+    )
+
     task_payload = {"session_id": str(session_id), **payload.model_dump(mode="json")}
     # .delay() is a quick synchronous Redis broker call, not the simulation
     # itself (that runs in a separate Celery worker process) — but it's still
@@ -301,9 +338,13 @@ async def simulate_strategy(
     # the event loop. Uses a dedicated executor, not the shared asyncio
     # default — see _SIMULATE_ENQUEUE_EXECUTOR above.
     loop = asyncio.get_running_loop()
-    task = await loop.run_in_executor(
-        _SIMULATE_ENQUEUE_EXECUTOR, run_race_simulation.delay, task_payload
-    )
+    try:
+        task = await loop.run_in_executor(
+            _SIMULATE_ENQUEUE_EXECUTOR, run_race_simulation.delay, task_payload
+        )
+    except (KombuOperationalError, RedisError):
+        await simulation_quota_service.refund(redis_client, reservation)
+        raise
     return SimulateTaskAccepted(task_id=task.id, status=task.status)
 
 

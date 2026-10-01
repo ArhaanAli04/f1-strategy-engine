@@ -175,6 +175,15 @@ DEMO_PLAYBACK_MODE    true | false. Which process a Demo Replay runs (see Notes:
                       true (production): replay_playback.py, which plays back what
                       precompute_replay.py stored, with no worker. docker-compose.yml passes it
                       to the backend from .env; recreate the backend after changing it.
+SIM_DAILY_SCENARIOS_PER_USER, SIM_DAILY_SCENARIOS_GLOBAL
+                      Strategy Simulator scenarios allowed per account / for the whole site per UTC
+                      day (a plan is 1, a comparison its scenario count). Default 0 = unlimited, so
+                      local development is never limited; production sets 5 and 15. Over a limit,
+                      POST /simulate returns 429 QUOTA_EXCEEDED with Retry-After; GET
+                      /strategy/simulate/quota shows what is left.
+FLY_APP_NAME          Set by Fly.io itself on every machine; never set it by hand. When present,
+                      core/rate_limit.py takes a logged-out visitor's IP from Fly's Fly-Client-IP
+                      header (Fly overwrites any client-sent value) instead of the proxy's address.
 ```
 
 ---
@@ -402,6 +411,8 @@ f1:demo:replay:state                                          TTL: 7200s    (Day
 f1:demo:curated_sessions                                      TTL: 86400s   (2026-09-26 — JSON map "{season}:{round}" -> R session_id for demo_service.CURATED_RACES, resolved from THIS database. Curated races are identified by season/round, not a hard-coded session_id, because each database assigns its own UUIDs at ingest (local and production Supabase differ). A race missing from the DB has no entry and is left out of GET /demo/sessions. Ingested races never change, so a day is plenty; a newly ingested curated race appears once this expires or is deleted.)
 f1:strategy:last_ingested_session                            TTL: 86400s   (newest-race_date COMPLETED R session that has lap_data — GET /strategy/last-ingested-session, the Strategy Simulator's session source when no race is live. Race.status == "completed" filter added 2026-08-30 to exclude partially live-ingested sessions, see Deferred Wiring/Notes. Not written by ingestion, so a newer ingest surfaces after this expires or a manual cache_service delete. Constant key — resolved per-environment from that DB.)
 f1:{season}:{round}:ingest_stats                              TTL: 86400s   (V5, 2026-09-19 — not cached data: a JSON string of the live ingestor's session counters — timing_messages, laps_dispatched, rankings_by_f1_position / rankings_by_gaps, cars_flagged_out, connections_opened, subscribe_snapshots, position_first_message_seq (null = F1's Position field never streamed on the live feed), recording path, updated_at. Written by ingest_live_session.py's publish_stats at most every 15s and once when the session ends, so what the live feed actually did can be read after a race; the 24h TTL keeps it that long. See docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c.)
+f1:sim_quota:user:{user_id}:{YYYY-MM-DD}                     TTL: 93600s   (2026-10-01, demo deployment Day 5 — not cached data: simulation scenarios the user has run that UTC day, checked and incremented with the global key below in one WATCH/MULTI transaction by services/simulation_quota_service.py (POST /strategy/{session_id}/simulate; a plan is 1, a comparison its scenario count). Only written when SIM_DAILY_SCENARIOS_PER_USER or _GLOBAL is set. 26 h so a refund just after midnight still finds the day it reserved from.)
+f1:sim_quota:global:{YYYY-MM-DD}                              TTL: 93600s   (2026-10-01 — the whole site's simulation scenarios that UTC day; see the per-user key above.)
 f1:{season}:{round}:pipeline_stats                            TTL: 86400s   (V5, 2026-09-19 — not cached data: a Redis HASH of counters, HINCRBY with the TTL refreshed on every write — gap_source_live / gap_source_summed (strategy_service's undercut/overcut maths), neighbors_source_live / neighbors_source_db (prediction_worker), alert_order_source_live / alert_order_source_db, alerts_suppressed_tyre_age / alerts_suppressed_laps_remaining, alerts_dispatched (alert_service). Best-effort: a Redis error is logged and ignored, never raised. Counts include non-live sessions (replays, historical), so read them in the context of the session.)
 ```
 
@@ -532,6 +543,7 @@ Current endpoints overview:
 - GET    /api/v1/telemetry/{session_id}/{driver_id}/history
 - WS     /api/v1/ws/telemetry/{session_id}
 - GET    /api/v1/telemetry/{session_id}/gaps
+- GET    /api/v1/strategy/simulate/quota
 - GET    /api/v1/strategy/simulate/{task_id}
 - GET    /api/v1/strategy/last-ingested-session
 - GET    /api/v1/strategy/{session_id}/{driver_id}/pit-window

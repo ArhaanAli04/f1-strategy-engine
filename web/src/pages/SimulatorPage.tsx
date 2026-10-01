@@ -6,7 +6,11 @@ import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useLastIngestedSession } from "@/hooks/useLastIngestedSession"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
-import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
+import {
+  useSimulateStrategy,
+  useSimulationQuota,
+  useSimulationResult,
+} from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
 import { PositionDistributionChart } from "@/components/strategy/PositionDistributionChart"
 import { Button } from "@/components/ui/button"
@@ -24,6 +28,7 @@ import type {
   OvertakingDriver,
   SimulatedRaceOutcome,
   SimulateStrategyRequest,
+  SimulationQuotaResponse,
 } from "@/types"
 
 type Step = 1 | 2 | 3 | 4
@@ -58,6 +63,30 @@ const MAX_SCENARIOS = 4
 // Backend validates each compounds[] entry against exactly this set
 // (backend/schemas/simulate_schema.py).
 const COMPOUNDS = ["SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET"]
+
+interface ScenariosLeft {
+  left: number
+  summary: string
+}
+
+// The lower of the visitor's own and the demo-wide remaining scenarios, since
+// a run is refused if it goes over either. null when neither is limited.
+function scenariosLeftToday(quota: SimulationQuotaResponse | undefined): ScenariosLeft | null {
+  if (!quota) return null
+  const { user_quota: user, global_quota: demo } = quota
+  if (user.remaining === null && demo.remaining === null) return null
+  if (demo.remaining !== null && (user.remaining === null || demo.remaining < user.remaining)) {
+    return {
+      left: demo.remaining,
+      summary: `The demo has ${demo.remaining} simulation scenarios left today. Resets at 00:00 UTC.`,
+    }
+  }
+  const left = user.remaining as number
+  return {
+    left,
+    summary: `${left} of ${user.limit} simulation scenarios left today. Resets at 00:00 UTC.`,
+  }
+}
 
 const STEP_LABELS: Record<Step, string> = {
   1: "Driver & Race State",
@@ -352,6 +381,7 @@ export function SimulatorPage() {
 
   const simulateMutation = useSimulateStrategy(sessionId)
   const simulationResult = useSimulationResult(taskId)
+  const quota = scenariosLeftToday(useSimulationQuota().data)
 
   useEffect(() => {
     if (simulationResult.data?.status === "SUCCESS") setStep(4)
@@ -439,6 +469,9 @@ export function SimulatorPage() {
   // mode has no equivalent minimum (empty pit_laps is the valid "let the
   // simulation decide" case).
   const step2Valid = mode === "single" || scenarios.length > 0
+  // What this run costs in daily quota: one per compared scenario.
+  const scenariosNeeded = mode === "compare" ? scenarios.length : 1
+  const overQuota = quota !== null && scenariosNeeded > quota.left
 
   const strategies = simulationResult.data?.result?.strategies ?? []
   const startingPosition = simulationResult.data?.result?.starting_position ?? 0
@@ -719,6 +752,15 @@ export function SimulatorPage() {
               </>
             )}
 
+            {quota && (
+              <p className="text-xs text-muted-foreground">
+                {quota.summary}
+                {overQuota &&
+                  (quota.left === 0
+                    ? " Come back tomorrow to run more."
+                    : ` This run needs ${scenariosNeeded}; remove scenarios to fit.`)}
+              </p>
+            )}
             {simulateMutation.isError && (
               <p role="alert" className="text-sm font-medium text-destructive">
                 {getApiErrorMessage(simulateMutation.error, "Failed to start simulation")}
@@ -728,7 +770,10 @@ export function SimulatorPage() {
               <Button variant="outline" onClick={() => setStep(1)}>
                 Back
               </Button>
-              <Button disabled={!step2Valid} onClick={() => void handleRunSimulation()}>
+              <Button
+                disabled={!step2Valid || overQuota}
+                onClick={() => void handleRunSimulation()}
+              >
                 Run Simulation
               </Button>
             </div>

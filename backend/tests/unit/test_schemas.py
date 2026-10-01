@@ -58,6 +58,15 @@ def _build_request(
 
 
 @pytest.mark.unit
+def test_scenario_count_is_one_per_plan_and_one_per_compared_scenario() -> None:
+    """What a request costs in daily simulator quota (demo deployment Day 5)."""
+    assert _build_request().scenario_count == 1
+    assert _build_request(pit_laps=[20], compounds=["HARD"]).scenario_count == 1
+    compare = [ScenarioPlan(pit_laps=[lap], compounds=["HARD"]) for lap in (20, 23, 26, 29)]
+    assert _build_request(scenarios=compare).scenario_count == 4
+
+
+@pytest.mark.unit
 def test_simulate_request_rejects_current_lap_below_one() -> None:
     with pytest.raises(ValidationError):
         _build_request(current_lap=0)
