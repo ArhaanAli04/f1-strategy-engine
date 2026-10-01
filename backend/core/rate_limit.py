@@ -22,7 +22,7 @@ from __future__ import annotations
 from fastapi import Request
 from slowapi import Limiter
 
-from backend.core.config import get_redis_settings
+from backend.core.config import get_app_settings, get_redis_settings
 from backend.core.exceptions import AuthenticationError
 from backend.core.security import decode_token
 
@@ -31,6 +31,15 @@ UNAUTHENTICATED_LIMIT = "10/minute"
 
 
 def _client_ip(request: Request) -> str:
+    # Behind Fly's proxy request.client is the proxy, so every logged-out
+    # visitor would share one bucket. Fly puts the real address in
+    # Fly-Client-IP and overwrites any value a client sends, so the header is
+    # trusted only when running on Fly (FLY_APP_NAME set); anywhere else a
+    # client could choose its own bucket with it.
+    if get_app_settings().fly_app_name:
+        fly_client_ip = request.headers.get("fly-client-ip")
+        if fly_client_ip:
+            return fly_client_ip
     return request.client.host if request.client is not None else "unknown"
 
 

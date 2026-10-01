@@ -15,7 +15,7 @@ import { CartesianChart, HorizontalBar } from "victory-native"
 import { PlanExplanationCard } from "@/components/strategy/PlanExplanationCard"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
-import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
+import { useSimulateStrategy, useSimulationQuota, useSimulationResult } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
@@ -137,6 +137,15 @@ export default function SimulatorScreen() {
 
   const simulateMutation = useSimulateStrategy(sessionId)
   const simulationResult = useSimulationResult(taskId)
+  // Mobile only submits single plans, which cost one scenario each. A run is
+  // refused if it goes over the visitor's own or the demo-wide daily limit,
+  // so the lower remaining count is what matters; null means unlimited.
+  const quota = useSimulationQuota().data
+  const remainingCounts = [quota?.user_quota.remaining, quota?.global_quota.remaining].filter(
+    (n): n is number => typeof n === "number",
+  )
+  const scenariosLeft = remainingCounts.length > 0 ? Math.min(...remainingCounts) : null
+  const outOfQuota = scenariosLeft === 0
 
   useEffect(() => {
     if (simulationResult.data?.status === "SUCCESS") setStep(4)
@@ -325,6 +334,12 @@ export default function SimulatorScreen() {
           >
             <Text className="text-sm font-medium text-foreground">+ Add Pit Stop</Text>
           </Pressable>
+          {scenariosLeft !== null && (
+            <Text className="text-xs text-muted-foreground">
+              {scenariosLeft} simulation {scenariosLeft === 1 ? "scenario" : "scenarios"} left
+              today. Resets at 00:00 UTC.{outOfQuota ? " Come back tomorrow to run more." : ""}
+            </Text>
+          )}
           {simulateMutation.isError && (
             <Text role="alert" className="text-sm font-medium text-destructive">
               {getApiErrorMessage(simulateMutation.error, "Failed to start simulation")}
@@ -338,8 +353,9 @@ export default function SimulatorScreen() {
               <Text className="text-base font-semibold text-foreground">Back</Text>
             </Pressable>
             <Pressable
+              disabled={outOfQuota}
               onPress={() => void handleRunSimulation()}
-              className="flex-1 items-center rounded-md bg-foreground py-3"
+              className="flex-1 items-center rounded-md bg-foreground py-3 disabled:opacity-40"
             >
               <Text className="text-base font-semibold text-background">Run Simulation</Text>
             </Pressable>

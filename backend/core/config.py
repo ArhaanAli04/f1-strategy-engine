@@ -137,6 +137,17 @@ class AppSettings(BaseSettings):
     # no worker and no ML imports; production sets it. Read once at process
     # start, like every setting here: changing it needs the backend restarted.
     demo_playback_mode: bool = False
+    # Strategy Simulator daily quotas, in scenarios (a single plan is 1, a
+    # comparison counts each of its up to 4 scenarios), reset at 00:00 UTC
+    # (docs/internal/demo-deployment-plan-2026.md, Day 5). 0 means unlimited, the
+    # default, so local development is never limited; production sets them in
+    # fly.toml. See services/simulation_quota_service.py.
+    sim_daily_scenarios_per_user: int = 0
+    sim_daily_scenarios_global: int = 0
+    # Set by Fly.io itself on every machine (FLY_APP_NAME); empty anywhere else.
+    # Tells core/rate_limit.py it is behind Fly's proxy, the only place the
+    # Fly-Client-IP header can be trusted.
+    fly_app_name: str = ""
 
     @property
     def allowed_origins_list(self) -> list[str]:

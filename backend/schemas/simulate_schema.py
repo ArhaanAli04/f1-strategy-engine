@@ -1,6 +1,7 @@
 import uuid
+from datetime import date, datetime
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Matches strategy_service._COMPOUND_ENCODING / prediction_worker._COMPOUND_ENCODING's
 # key set — the only compounds any tire_deg pipeline was ever trained on.
@@ -107,6 +108,11 @@ class SimulateStrategyRequest(BaseModel):
     scenarios: list[ScenarioPlan] | None = Field(
         default=None, min_length=1, max_length=_MAX_SCENARIOS
     )
+
+    @property
+    def scenario_count(self) -> int:
+        """How many simulations this request runs: what it costs in daily quota."""
+        return len(self.scenarios) if self.scenarios else 1
 
     @model_validator(mode="after")
     def _validate_pit_plan(self) -> "SimulateStrategyRequest":
@@ -282,3 +288,26 @@ class SimulateTaskStatusResponse(BaseModel):
     # for the F1StrategyError-only safe-message policy this mirrors from
     # core/exceptions.py's unhandled_error_handler.
     error: str | None = None
+
+
+class QuotaCounter(BaseModel):
+    """One daily scenario quota: the caller's own, or the whole site's."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # None when this quota is not configured (unlimited).
+    limit: int | None
+    used: int
+    remaining: int | None
+
+
+class SimulationQuotaResponse(BaseModel):
+    """Response for GET /strategy/simulate/quota: today's Strategy Simulator quotas."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    # The UTC day being counted, and when the next one starts (00:00 UTC).
+    day: date
+    resets_at: datetime
+    user_quota: QuotaCounter
+    global_quota: QuotaCounter
