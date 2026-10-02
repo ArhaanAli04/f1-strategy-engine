@@ -122,3 +122,20 @@ export interface SimulateTaskStatusResponse {
   // backend/apis/v1/strategy.py's get_simulation_result).
   error: string | null
 }
+
+// One daily scenario counter. limit and remaining are null when no limit is
+// configured (local development), and used then stays 0.
+export interface QuotaCounter {
+  limit: number | null
+  used: number
+  remaining: number | null
+}
+
+// Response for GET /strategy/simulate/quota. A single plan costs 1 scenario,
+// a comparison costs one per scenario; both counters reset at 00:00 UTC.
+export interface SimulationQuotaResponse {
+  day: string
+  resets_at: string
+  user_quota: QuotaCounter
+  global_quota: QuotaCounter
+}

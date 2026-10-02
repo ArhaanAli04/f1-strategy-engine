@@ -31,6 +31,7 @@ below, not a 1:1 mapping of the Kubernetes commands.
 - [Common issues and fixes](#common-issues-and-fixes)
 - [How to replay a historical session for testing](#how-to-replay-a-historical-session-for-testing)
 - [Refreshing the Demo Replay data in production](#refreshing-the-demo-replay-data-in-production)
+- [Demo Replay modes](#demo-replay-modes)
 - [Fly.io deployment](#flyio-deployment)
 - [App rollback (Helm — local cluster only)](#app-rollback-helm--local-cluster-only)
 - [Database rollback (Alembic)](#database-rollback-alembic)
@@ -160,6 +161,7 @@ for rows that still need it:
 | **Redis connection refused (production/Upstash only)** — works locally but not against the cloud Redis. | Confirm `REDIS_URL`/`UPSTASH_REDIS_URL` uses the **`rediss://`** (TLS) scheme, not `redis://` — Upstash requires TLS. Celery specifically needs this stated explicitly (`ssl_cert_reqs`) or it crashes at worker boot; see `CLAUDE.md`'s "Celery + Upstash's `rediss://`" note — already fixed in `workers/celery_app.py`, but a hand-edited `.env` that drops the `s` in `rediss://` will reproduce this. |
 | **ML models not loading** — worker/backend errors on first prediction request. | Two independent causes to check: (1) AWS credentials — `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` must be set in the container's environment (boto3's default credential chain does not read pydantic-settings `.env` values — see `CLAUDE.md`'s AWS Credentials note); (2) `libgomp1` — LightGBM `dlopen()`s it at import time, and `python:3.11-slim` strips it by default. Both `Dockerfile.backend`/`Dockerfile.worker` install it in their final stage; if you're running outside those images (e.g. a bare venv on a minimal Linux box), install it manually. |
 | **FastF1 403 error fetching a session.** | For **current-season (2026) data specifically, this is a known, not-yet-fully-fixed gap** — see `CLAUDE.md`'s "retrain_incremental.py FastF1 403→mirror fallback for 2026 data" entry. FastF1 automatically falls back to `livetiming-mirror.fastf1.dev` on a 403 from `livetiming.formula1.com`, but that mirror has no 2026 data (it only patches a couple of corrupted 2021-2022 sessions), so the fallback itself fails with `SessionNotAvailableError`. Rounds are currently skipped gracefully rather than crashing the run. On race day, if this hits live ingestion: try `fastf1.Cache.clear_cache()` and retry once — a stale/corrupted cache entry is the most common transient cause — and fall back to `replay_publisher.py` (see the race day checklist above) if it doesn't clear. For **historical (2018-2025) data**, a 403 here is unexpected — retry, and if it persists, check whether FastF1's upstream source has changed. |
+| **Strategy Simulator refuses runs with "simulation scenarios left today"** (HTTP 429 `QUOTA_EXCEEDED`). | Working as intended: production allows `SIM_DAILY_SCENARIOS_PER_USER` (5) scenarios per account and `SIM_DAILY_SCENARIOS_GLOBAL` (15) site-wide per UTC day; a comparison costs one per scenario. Counts reset at 00:00 UTC. `GET /api/v1/strategy/simulate/quota` (signed in) shows what is left. To raise a limit, change the setting and restart the app. To clear today's count early (for example after testing), delete the `f1:sim_quota:*` keys for today's date in Redis. Locally both default to 0 (unlimited); to try them, set both in `.env` and recreate the backend (`docker compose -f infra/docker/docker-compose.yml --env-file .env up -d --force-recreate backend`). |
 | **Supabase connection string changed** (e.g. after a password rotation or a Supabase-side pooler change). | Get the new session-mode pooler URL from the Supabase dashboard (Project Settings → Database → Connection string, "Session mode") and update the `SUPABASE_DIRECT_URL` GitHub Secret with it — this is what `cd.yml`'s migration job uses (see `.env.example`'s comment on why session mode specifically: the transaction-mode pooler used for app runtime doesn't support the advisory locks/prepared statements a migration needs). Update `SUPABASE_DATABASE_URL` too if the transaction-mode pooler URL also changed, and re-run `infra/k8s/create-secrets.sh` if a local Kubernetes Secret needs to pick up the change (see [Secret rotation procedure](#secret-rotation-procedure)). |
 
 ---
@@ -258,6 +260,33 @@ python -m backend.scripts.copy_replay_precompute \
 The undercut probabilities come from an unseeded Monte Carlo, so a re-run can
 move a score sitting right on the 50 % alert threshold to the other side; a
 difference of an alert or two between runs is expected.
+
+---
+
+## Demo Replay modes
+
+`DEMO_PLAYBACK_MODE` picks the process `/demo/replay/start` launches:
+
+| Mode | Process | Needs | Used by |
+|---|---|---|---|
+| `false` (default) | `replay_pipeline.py`: every lap goes through the Celery worker, which recomputes predictions and alerts | worker running, FastF1 cache | local development |
+| `true` | `replay_playback.py`: plays back the stored predictions, gaps, positions, lap timings and alerts in real time | the replay data precomputed into this database (see above) | production |
+
+Playback publishes to the same Redis keys and channels, so the race page needs
+no changes. It deletes its gaps key when it finishes or is stopped (SIGTERM
+from `/demo/replay/stop` or the live-race kill-switch).
+
+To try playback locally:
+1. Precompute the local replay data (`python -m backend.scripts.precompute_replay`).
+2. Add `DEMO_PLAYBACK_MODE=true` to `.env`, then:
+   ```bash
+   docker compose -f infra/docker/docker-compose.yml --env-file .env up -d --force-recreate backend
+   docker compose -f infra/docker/docker-compose.yml stop worker beat
+   ```
+3. Start a replay from the web app. Its log lines ("Playing back laps …",
+   "Playback finished: … failures") are in `docker compose logs backend`.
+4. To go back: remove the line from `.env`, recreate the backend the same way,
+   and `docker compose … start worker beat`.
 
 ---
 

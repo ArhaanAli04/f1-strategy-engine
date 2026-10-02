@@ -44,6 +44,19 @@ services:
       AWS_REGION: "${AWS_REGION:-ap-south-1}"
       DB_POOL_SIZE: "20"
       DB_MAX_OVERFLOW: "40"
+      # Demo Replay engine, off by default: replay_pipeline.py through the
+      # worker. To try production's worker-free playback (replay_playback.py,
+      # stored predictions): set DEMO_PLAYBACK_MODE=true in .env, then
+      #   docker compose -f infra/docker/docker-compose.yml --env-file .env up -d --force-recreate backend
+      #   docker compose -f infra/docker/docker-compose.yml stop worker beat
+      # and start a replay from the web app. Needs the replay data precomputed
+      # into the local database first (python -m backend.scripts.precompute_replay).
+      DEMO_PLAYBACK_MODE: "${DEMO_PLAYBACK_MODE:-false}"
+      # Strategy Simulator daily scenario limits, unlimited (0) by default so
+      # local development is never refused. Production sets 5 and 15. To try
+      # them here, set both in .env and recreate the backend as above.
+      SIM_DAILY_SCENARIOS_PER_USER: "${SIM_DAILY_SCENARIOS_PER_USER:-0}"
+      SIM_DAILY_SCENARIOS_GLOBAL: "${SIM_DAILY_SCENARIOS_GLOBAL:-0}"
     volumes:
       - ../../backend:/app/backend
       # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the

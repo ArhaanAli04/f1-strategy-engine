@@ -5,6 +5,7 @@ import type {
   SimulateStrategyRequest,
   SimulateTaskAccepted,
   SimulateTaskStatusResponse,
+  SimulationQuotaResponse,
   StrategyOverviewResponse,
   StrategyPredictionHistoryResponse,
   UndercutThreatResponse,
@@ -63,6 +64,11 @@ export async function simulateStrategy(
 // Unauthenticated on the backend — task_id is an unguessable Celery UUID.
 export async function getSimulationResult(taskId: string): Promise<SimulateTaskStatusResponse> {
   const { data } = await apiClient.get<SimulateTaskStatusResponse>(`/strategy/simulate/${taskId}`)
+  return data
+}
+
+export async function getSimulationQuota(): Promise<SimulationQuotaResponse> {
+  const { data } = await apiClient.get<SimulationQuotaResponse>("/strategy/simulate/quota")
   return data
 }
 

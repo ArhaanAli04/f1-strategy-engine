@@ -59,6 +59,17 @@ class ValidationError(F1StrategyError):
     error_code = "VALIDATION_ERROR"
 
 
+class QuotaExceededError(F1StrategyError):
+    """A daily usage quota would be exceeded (the simulator's scenario quota)."""
+
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    error_code = "QUOTA_EXCEEDED"
+
+    def __init__(self, message: str, detail: Any = None, retry_after_seconds: int = 0) -> None:
+        super().__init__(message, detail)
+        self.retry_after_seconds = retry_after_seconds
+
+
 async def f1_strategy_error_handler(request: Request, exc: F1StrategyError) -> JSONResponse:
     logger.error(
         "F1StrategyError [%s] on %s: %s",
@@ -69,6 +80,9 @@ async def f1_strategy_error_handler(request: Request, exc: F1StrategyError) -> J
     # RFC 6750: a 401 on a bearer-token-protected resource must carry
     # WWW-Authenticate so a client knows which auth scheme to retry with.
     headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthenticationError) else None
+    if isinstance(exc, QuotaExceededError):
+        # RFC 9110: tells a client how long until the quota resets.
+        headers = {"Retry-After": str(exc.retry_after_seconds)}
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.error_code, "message": exc.message, "detail": exc.detail},

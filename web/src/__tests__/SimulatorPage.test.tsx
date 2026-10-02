@@ -6,10 +6,15 @@ import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useLastIngestedSession } from "@/hooks/useLastIngestedSession"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
-import { useSimulateStrategy, useSimulationResult } from "@/hooks/useStrategy"
+import { useSimulateStrategy, useSimulationQuota, useSimulationResult } from "@/hooks/useStrategy"
 import { SimulatorPage } from "@/pages/SimulatorPage"
 import { useSessionStore } from "@/stores/sessionStore"
-import type { DriverResponse, SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
+import type {
+  DriverResponse,
+  QuotaCounter,
+  SimulateStrategyRequest,
+  SimulateTaskStatusResponse,
+} from "@/types"
 
 // Item 12 (docs/internal/day-deferred-fixes-session2-handoff.md): the initial
 // POST /simulate rejection (validate_current_lap's 404/422) and the async
@@ -24,6 +29,7 @@ vi.mock("@/hooks/useLastIngestedSession", () => ({ useLastIngestedSession: vi.fn
 vi.mock("@/hooks/useSessionGaps", () => ({ useSessionGaps: vi.fn() }))
 vi.mock("@/hooks/useStrategy", () => ({
   useSimulateStrategy: vi.fn(),
+  useSimulationQuota: vi.fn(),
   useSimulationResult: vi.fn(),
 }))
 vi.mock("@/stores/sessionStore", () => ({ useSessionStore: vi.fn() }))
@@ -77,6 +83,18 @@ function baseSetup() {
   vi.mocked(useDriverLaps).mockReturnValue({
     data: { items: [] },
   } as unknown as ReturnType<typeof useDriverLaps>)
+  mockQuota({ limit: null, used: 0, remaining: null }, { limit: null, used: 0, remaining: null })
+}
+
+function mockQuota(user: QuotaCounter, demo: QuotaCounter) {
+  vi.mocked(useSimulationQuota).mockReturnValue({
+    data: {
+      day: "2026-10-01",
+      resets_at: "2026-10-02T00:00:00Z",
+      user_quota: user,
+      global_quota: demo,
+    },
+  } as unknown as ReturnType<typeof useSimulationQuota>)
 }
 
 // A minimal, real-React-state stand-in for useMutation's shape — reactive
@@ -281,5 +299,94 @@ describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
     fireEvent.click(screen.getByLabelText("Remove scenario 1"))
 
     expect(screen.getByRole("button", { name: "Run Simulation" })).toBeDisabled()
+  })
+})
+
+// Daily simulation quota (demo deployment Day 5): a single plan costs one
+// scenario, a comparison one per scenario, and a run is refused if it goes
+// over the visitor's own or the demo-wide limit.
+describe("SimulatorPage — daily scenario quota", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    baseSetup()
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+  })
+
+  it("shows nothing about a quota when no limit is configured", async () => {
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+
+    await goToDesignStrategyStep()
+
+    expect(screen.queryByText(/scenarios left today/)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeEnabled()
+  })
+
+  it("shows the visitor's own remaining scenarios when theirs is the lower limit", async () => {
+    mockQuota({ limit: 5, used: 2, remaining: 3 }, { limit: 15, used: 9, remaining: 6 })
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+
+    await goToDesignStrategyStep()
+
+    expect(
+      screen.getByText("3 of 5 simulation scenarios left today. Resets at 00:00 UTC."),
+    ).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeEnabled()
+  })
+
+  it("shows the demo-wide remaining scenarios when that is the lower limit", async () => {
+    mockQuota({ limit: 5, used: 0, remaining: 5 }, { limit: 15, used: 13, remaining: 2 })
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+
+    await goToDesignStrategyStep()
+
+    expect(
+      screen.getByText(/The demo has 2 simulation scenarios left today/),
+    ).toBeInTheDocument()
+  })
+
+  it("disables a comparison that needs more scenarios than are left", async () => {
+    mockQuota({ limit: 5, used: 4, remaining: 1 }, { limit: 15, used: 4, remaining: 11 })
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+
+    await goToDesignStrategyStep()
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeEnabled()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+
+    expect(screen.getByText(/This run needs 2; remove scenarios to fit\./)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeDisabled()
+    fireEvent.click(screen.getByLabelText("Remove scenario 2"))
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeEnabled()
+  })
+
+  it("disables Run once nothing is left today", async () => {
+    mockQuota({ limit: 5, used: 5, remaining: 0 }, { limit: 15, used: 5, remaining: 10 })
+    vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
+
+    await goToDesignStrategyStep()
+
+    expect(screen.getByText(/Come back tomorrow to run more\./)).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Run Simulation" })).toBeDisabled()
+  })
+
+  it("shows the server's refusal message when a run is refused with 429", async () => {
+    mockQuota({ limit: 5, used: 0, remaining: 5 }, { limit: 15, used: 0, remaining: 15 })
+    const message =
+      "The demo's daily limit of 15 simulation scenarios has 0 left and this request needs 1. It resets at 00:00 UTC."
+    const refusal = Object.assign(new Error("Request failed with status code 429"), {
+      isAxiosError: true,
+      response: { status: 429, data: { error: "QUOTA_EXCEEDED", message, detail: null } },
+    })
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(vi.fn().mockRejectedValue(refusal)),
+    )
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Run Simulation" }))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message)
+    expect(screen.getByRole("heading", { name: "Design Strategy" })).toBeInTheDocument()
   })
 })

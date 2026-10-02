@@ -22,7 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from backend.core.config import get_auth_settings
 from backend.core.security import verify_password
-from backend.models.user import User
+from backend.models.driver import Driver
+from backend.models.user import Subscription, User
+from backend.tests.integration.conftest import seed_via_test_client
 
 TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
 # Distinct values are required (not aliases of TEST_PASSWORD) where a test's
@@ -60,6 +62,47 @@ def test_register_creates_user_in_db(
     user = test_client.portal.call(_fetch_user_by_email, db_session_factory, email)  # type: ignore[union-attr]
     assert user.hashed_password != password
     assert verify_password(password, user.hashed_password)
+
+
+async def _subscription_and_drivers(
+    db_session_factory: async_sessionmaker[AsyncSession], email: str
+) -> tuple[Subscription, set[str]]:
+    async with db_session_factory() as db:
+        user = (await db.execute(select(User).where(User.email == email))).scalar_one()
+        subscription = (
+            await db.execute(select(Subscription).where(Subscription.user_id == user.id))
+        ).scalar_one()
+        driver_ids = {
+            str(driver_id) for driver_id in (await db.execute(select(Driver.id))).scalars()
+        }
+        return subscription, driver_ids
+
+
+@pytest.mark.integration
+def test_register_subscribes_to_undercut_alerts_on_every_driver(
+    test_client: TestClient, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Demo deployment Day 4: a new visitor gets replay alerts without visiting settings."""
+    seed_via_test_client(
+        test_client,
+        db_session_factory,
+        Driver(id=uuid.uuid4(), code="ZZA", full_name="Driver A", nationality="GBR"),
+        Driver(id=uuid.uuid4(), code="ZZB", full_name="Driver B", nationality="ITA"),
+    )
+    email = f"subscribe-{uuid.uuid4()}@example.com"
+
+    response = test_client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": TEST_PASSWORD, "full_name": "Subscribe Test"},
+    )
+
+    assert response.status_code == 201
+    subscription, driver_ids = test_client.portal.call(  # type: ignore[union-attr]
+        _subscription_and_drivers, db_session_factory, email
+    )
+    assert set(subscription.driver_ids) == driver_ids
+    assert len(driver_ids) >= 2
+    assert subscription.alert_types == ["UNDERCUT_THREAT"]
 
 
 @pytest.mark.integration

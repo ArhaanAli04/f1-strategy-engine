@@ -386,3 +386,57 @@ def test_process_is_alive_true_when_running(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(os, "kill", lambda _pid, _sig: None)
     monkeypatch.setattr(demo_service, "_proc_is_zombie", lambda _pid: False)
     assert demo_service._process_is_alive(4242) is True
+
+
+# --- which replay process start_replay launches (DEMO_PLAYBACK_MODE, Day 4) ---
+
+
+def _command(monkeypatch: pytest.MonkeyPatch, playback: bool) -> list[str]:
+    monkeypatch.setattr(
+        demo_service, "get_app_settings", lambda: MagicMock(demo_playback_mode=playback)
+    )
+    return demo_service._replay_command(_BRITISH_GP, 43, 52)
+
+
+@pytest.mark.unit
+def test_playback_mode_launches_the_worker_free_playback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _command(monkeypatch, playback=True) == [
+        sys.executable,
+        "-m",
+        "backend.scripts.replay_playback",
+        "--session-id",
+        str(_BRITISH_GP),
+        "--start-lap",
+        "43",
+        "--end-lap",
+        "52",
+    ]
+
+
+@pytest.mark.unit
+def test_without_playback_mode_the_worker_pipeline_is_launched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = _command(monkeypatch, playback=False)
+
+    assert command[2] == "backend.scripts.replay_pipeline"
+    assert command[3:] == [
+        "--session-id",
+        str(_BRITISH_GP),
+        "--start-lap",
+        "43",
+        "--end-lap",
+        "52",
+        "--rate",
+        "fast",
+        "--no-alert-worker",
+    ]
+
+
+@pytest.mark.unit
+def test_playback_mode_is_off_unless_configured() -> None:
+    from backend.core.config import AppSettings
+
+    assert AppSettings.model_fields["demo_playback_mode"].default is False

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, type Query } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/react-query"
 import * as strategyApi from "@/api/strategy"
 import type { SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
 
@@ -25,10 +25,23 @@ export function useStrategyOverview(sessionId: string | null) {
   })
 }
 
+const SIMULATION_QUOTA_KEY = ["strategy", "simulation-quota"] as const
+
+export function useSimulationQuota() {
+  return useQuery({
+    queryKey: SIMULATION_QUOTA_KEY,
+    queryFn: strategyApi.getSimulationQuota,
+  })
+}
+
 export function useSimulateStrategy(sessionId: string) {
+  const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: SimulateStrategyRequest) =>
       strategyApi.simulateStrategy(sessionId, payload),
+    // On a refusal too: the daily limit is shared across the demo, so other
+    // visitors may have used scenarios since the count was last fetched.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: SIMULATION_QUOTA_KEY }),
   })
 }
 

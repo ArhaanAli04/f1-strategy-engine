@@ -170,6 +170,20 @@ RECORD_RAW_FEED       true | false. Raw live-feed recorder (see Auto Race Detect
 RAW_FEED_RECORD_DIR   Where recordings are written. Code default: recordings (relative to the
                       working directory). The worker container uses /recordings, which is the
                       host's ./recordings folder (gitignored).
+DEMO_PLAYBACK_MODE    true | false. Which process a Demo Replay runs (see Notes: "Demo Replay
+                      playback"). Default false: replay_pipeline.py, through the Celery worker.
+                      true (production): replay_playback.py, which plays back what
+                      precompute_replay.py stored, with no worker. docker-compose.yml passes it
+                      to the backend from .env; recreate the backend after changing it.
+SIM_DAILY_SCENARIOS_PER_USER, SIM_DAILY_SCENARIOS_GLOBAL
+                      Strategy Simulator scenarios allowed per account / for the whole site per UTC
+                      day (a plan is 1, a comparison its scenario count). Default 0 = unlimited, so
+                      local development is never limited; production sets 5 and 15. Over a limit,
+                      POST /simulate returns 429 QUOTA_EXCEEDED with Retry-After; GET
+                      /strategy/simulate/quota shows what is left.
+FLY_APP_NAME          Set by Fly.io itself on every machine; never set it by hand. When present,
+                      core/rate_limit.py takes a logged-out visitor's IP from Fly's Fly-Client-IP
+                      header (Fly overwrites any client-sent value) instead of the proxy's address.
 ```
 
 ---
@@ -393,10 +407,12 @@ f1:circuit:{circuit_id}:detail                               TTL: infinity (stat
 f1:alerts:{session_id}                                       pub/sub       (no TTL — alert delivery channel)
 f1:telemetry:{session_id}:laps    pub/sub    (lap completion broadcast channel, Checkpoint E Day 11)
 f1:{season}:{round}:R:auto_ingestion_triggered                TTL: 14400s   (Day 39B dedup lock, not cached data — SETNX guard so a re-poll of check_for_live_session doesn't double-launch the live ingestor for the same race; see Auto Race Detection below)
-f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. TTL is a safety net well above a curated window's ~20-min playout.)
+f1:demo:replay:state                                          TTL: 7200s    (Day 43 Part 4 — single global Demo Replay state, not cached data. JSON: replay_id/session_id/race_name/start_lap/end_lap/pid/started_at. Written by demo_service.start_replay (NX claim then full payload), read by GET /demo/replay/status, deleted by stop_replay / the race_detection_worker kill-switch. pid is replay_playback.py's with DEMO_PLAYBACK_MODE on, replay_pipeline.py's otherwise. TTL is a safety net well above a curated window's ~20-min playout.)
 f1:demo:curated_sessions                                      TTL: 86400s   (2026-09-26 — JSON map "{season}:{round}" -> R session_id for demo_service.CURATED_RACES, resolved from THIS database. Curated races are identified by season/round, not a hard-coded session_id, because each database assigns its own UUIDs at ingest (local and production Supabase differ). A race missing from the DB has no entry and is left out of GET /demo/sessions. Ingested races never change, so a day is plenty; a newly ingested curated race appears once this expires or is deleted.)
 f1:strategy:last_ingested_session                            TTL: 86400s   (newest-race_date COMPLETED R session that has lap_data — GET /strategy/last-ingested-session, the Strategy Simulator's session source when no race is live. Race.status == "completed" filter added 2026-08-30 to exclude partially live-ingested sessions, see Deferred Wiring/Notes. Not written by ingestion, so a newer ingest surfaces after this expires or a manual cache_service delete. Constant key — resolved per-environment from that DB.)
 f1:{season}:{round}:ingest_stats                              TTL: 86400s   (V5, 2026-09-19 — not cached data: a JSON string of the live ingestor's session counters — timing_messages, laps_dispatched, rankings_by_f1_position / rankings_by_gaps, cars_flagged_out, connections_opened, subscribe_snapshots, position_first_message_seq (null = F1's Position field never streamed on the live feed), recording path, updated_at. Written by ingest_live_session.py's publish_stats at most every 15s and once when the session ends, so what the live feed actually did can be read after a race; the 24h TTL keeps it that long. See docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md section 7c.)
+f1:sim_quota:user:{user_id}:{YYYY-MM-DD}                     TTL: 93600s   (2026-10-01, demo deployment Day 5 — not cached data: simulation scenarios the user has run that UTC day, checked and incremented with the global key below in one WATCH/MULTI transaction by services/simulation_quota_service.py (POST /strategy/{session_id}/simulate; a plan is 1, a comparison its scenario count). Only written when SIM_DAILY_SCENARIOS_PER_USER or _GLOBAL is set. 26 h so a refund just after midnight still finds the day it reserved from.)
+f1:sim_quota:global:{YYYY-MM-DD}                              TTL: 93600s   (2026-10-01 — the whole site's simulation scenarios that UTC day; see the per-user key above.)
 f1:{season}:{round}:pipeline_stats                            TTL: 86400s   (V5, 2026-09-19 — not cached data: a Redis HASH of counters, HINCRBY with the TTL refreshed on every write — gap_source_live / gap_source_summed (strategy_service's undercut/overcut maths), neighbors_source_live / neighbors_source_db (prediction_worker), alert_order_source_live / alert_order_source_db, alerts_suppressed_tyre_age / alerts_suppressed_laps_remaining, alerts_dispatched (alert_service). Best-effort: a Redis error is logged and ignored, never raised. Counts include non-live sessions (replays, historical), so read them in the context of the session.)
 ```
 
@@ -450,10 +466,10 @@ project.
 succeeds (a real race is definitely launching), `check_for_live_session`
 calls `_force_stop_demo_replay(client)` before `_launch_ingestion_
 subprocess`. It reads `f1:demo:replay:state` (see Redis Cache Key Schema),
-`os.kill(pid, SIGTERM)`s the replay subprocess (`replay_pipeline.py`'s
-`_reraise_sigterm_as_interrupt` handler turns that into its graceful
-KeyboardInterrupt shutdown — position thread stopped, keys left to TTL
-out), and deletes the state key. A real live race always wins: a replay
+`os.kill(pid, SIGTERM)`s the replay subprocess (`replay_playback.py` or
+`replay_pipeline.py`; `_replay_common.reraise_sigterm_as_interrupt` turns
+that into their graceful KeyboardInterrupt shutdown — playback stopped,
+gaps key deleted, position keys left to TTL out), and deletes the state key. A real live race always wins: a replay
 and a live ingestor both write `f1:{season}:{round}:gaps` /
 `:car:{n}:position`. A dead/exited pid (`ProcessLookupError`/
 `PermissionError`) or a bare NX-claim sentinel with no pid is tolerated —
@@ -527,6 +543,7 @@ Current endpoints overview:
 - GET    /api/v1/telemetry/{session_id}/{driver_id}/history
 - WS     /api/v1/ws/telemetry/{session_id}
 - GET    /api/v1/telemetry/{session_id}/gaps
+- GET    /api/v1/strategy/simulate/quota
 - GET    /api/v1/strategy/simulate/{task_id}
 - GET    /api/v1/strategy/last-ingested-session
 - GET    /api/v1/strategy/{session_id}/{driver_id}/pit-window
@@ -1697,6 +1714,41 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Demo Replay playback without a worker (✅ built 2026-09-30, demo deployment
+Day 4 — `docs/internal/demo-deployment-plan-2026.md`):**
+- **Two replay engines.** `replay_pipeline.py` sends every lap through the
+  Celery worker to recompute predictions. `backend/scripts/replay_playback.py`
+  plays back what `precompute_replay.py` stored, needs no worker, and imports
+  no FastF1, pandas or ML libraries (~90 MB, against ~390 MB plus a worker).
+  `DEMO_PLAYBACK_MODE` (`AppSettings.demo_playback_mode`, default off; see
+  Environment Variables) picks which one `demo_service` launches; production
+  turns it on.
+- **What playback publishes,** to the same keys and channels as the pipeline,
+  on one real-time clock:
+  - car numbers once (`replay_car_numbers`);
+  - positions at 1 Hz (`driver_positions`, placed on the session clock by
+    `replay_lap_timings.lap_start_seconds`);
+  - gap snapshot N (`replay_gap_snapshots`) when the first car finishes lap N,
+    and the lap-before snapshot at the first moment;
+  - each driver's `process_lap`-shaped lap event (from `lap_data`) when they
+    really finished the lap, plus every driver's lap-before event at the first
+    moment, so the race page switches to stored predictions at once instead of
+    computing ML on the web machine;
+  - alerts (`replay_alert_events`) when the trailing driver finishes that lap,
+    via `alert_service.dispatch_stored_alert`.
+- **Shared pieces.** The live-race guard, the SIGTERM handler and the replay key
+  TTLs live in `backend/scripts/_replay_common.py`, shared by both scripts.
+  Registration (`user_service.register_user`) creates an `UNDERCUT_THREAT`
+  subscription on every driver id in the same transaction, so a new visitor
+  sees replay alerts.
+- **Verified locally** with the worker and beat stopped: Belgian window, 221 of
+  221 lap events within +1.7 s of plan over 21 minutes, all 26 alerts written;
+  a stop through the API (SIGTERM) deletes the gaps key and clears the state.
+- **Still open:** the web and desktop visual check, deferred until the
+  playback-related UI changes land.
+- **Carried to Day 6:** the strategy wall still runs ML on the web machine
+  during a replay.
 
 **Tyre models look drivers up by code; retired cars are no longer
 neighbours (✅ fixed 2026-09-28, demo deployment Day 3b —
