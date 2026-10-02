@@ -17,7 +17,9 @@ import backend.models  # noqa: F401 — registers all tables on Base.metadata
 from backend.core.config import get_db_settings, get_redis_settings
 from backend.core.database import Base
 
-TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
+# Generated per run so no password literal is committed (secret scanners flag
+# one). Every test user lives only in this run's throwaway database.
+TEST_PASSWORD = f"T3st-{uuid.uuid4().hex[:12]}!"
 
 
 @pytest.fixture(scope="session")

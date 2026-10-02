@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import redis as sync_redis
@@ -19,11 +19,13 @@ from kombu.exceptions import OperationalError as KombuOperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from testcontainers.redis import RedisContainer
 
+from backend.core import fly_machines
 from backend.services import simulation_quota_service
 from backend.tests.integration.test_strategy_endpoint import _seed_session_with_lap
 from backend.workers import prediction_worker
 
-PASSWORD = "Qu0ta-fixture-only!"  # noqa: S105
+# Generated per run so no password literal is committed (secret scanners flag one).
+PASSWORD = f"Qu0ta-{uuid.uuid4().hex[:12]}!"
 
 
 @pytest.fixture
@@ -240,3 +242,59 @@ def test_without_limits_configured_the_quota_is_unlimited(
 @pytest.mark.integration
 def test_quota_endpoint_requires_sign_in(test_client: TestClient) -> None:
     assert test_client.get("/api/v1/strategy/simulate/quota").status_code == 401
+
+
+# --- Starting the worker machine on demand (Day 6, core/fly_machines.py) ---
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_fresh_quota_keys")
+def test_only_a_queued_run_asks_fly_to_start_the_worker(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _limits(monkeypatch, 1, 15)
+    _stub_enqueue(monkeypatch)
+    start = AsyncMock(return_value=fly_machines.WorkerStart.STARTED)
+    monkeypatch.setattr(fly_machines, "ensure_worker_started", start)
+    session_id, driver_id = _seed_session_with_lap(
+        authenticated_client, db_session_factory, "MEDIUM"
+    )
+
+    invalid = _simulate(authenticated_client, session_id, _plan(driver_id, current_lap=68))
+    accepted = _simulate(authenticated_client, session_id, _plan(driver_id))
+    refused = _simulate(authenticated_client, session_id, _plan(driver_id))
+
+    assert (invalid.status_code, accepted.status_code, refused.status_code) == (422, 202, 429)
+    start.assert_awaited_once()
+
+
+@pytest.mark.integration
+@pytest.mark.usefixtures("_fresh_quota_keys")
+def test_a_failed_worker_start_still_queues_the_run_and_keeps_its_quota(
+    authenticated_client: TestClient,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _limits(monkeypatch, 5, 15)
+    delay = _stub_enqueue(monkeypatch)
+    # The real helper, switched on, pointed at a port nothing listens on.
+    fly_settings = MagicMock(
+        fly_worker_autostart=True,
+        fly_api_token="fly-token-for-tests",  # noqa: S106 — sent nowhere reachable
+        fly_app_name="f1-strategy",
+        fly_api_hostname="http://127.0.0.1:9",
+        fly_worker_process_group="worker",
+    )
+    monkeypatch.setattr(fly_machines, "get_app_settings", lambda: fly_settings)
+    session_id, driver_id = _seed_session_with_lap(
+        authenticated_client, db_session_factory, "MEDIUM"
+    )
+
+    response = _simulate(authenticated_client, session_id, _plan(driver_id))
+
+    assert response.status_code == 202
+    delay.assert_called_once()
+    quota = authenticated_client.get("/api/v1/strategy/simulate/quota").json()
+    assert quota["user_quota"]["used"] == 1  # not refunded: the task is queued

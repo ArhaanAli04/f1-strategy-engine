@@ -735,15 +735,14 @@ export function SimulatorPage() {
       {step === 3 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12">
-            {/* worker offline outside race weekends (Day 40 hybrid
-                deployment, see fly.toml) — a task enqueued then never
-                resolves, so useSimulationResult's timedOut swaps this in
-                after 60s instead of spinning forever. Mirrors
+            {/* The worker starts on demand in production (about a minute
+                from cold), so a slow first result is normal; slowStart says
+                so after a few seconds. timedOut (3 min) means it never
+                started: stop waiting rather than spin forever. Mirrors
                 web/src/pages/SimulatorPage.tsx. */}
             {simulationResult.data?.status !== "FAILURE" && simulationResult.timedOut ? (
               <p className="max-w-sm text-center text-sm text-muted-foreground">
-                Strategy simulation requires an active race weekend. The worker is currently
-                offline — scale up before the next race to enable this feature.
+                The simulation engine didn&apos;t respond in time. Please try again in a minute.
               </p>
             ) : (
               <>
@@ -751,8 +750,13 @@ export function SimulatorPage() {
                 <p className="text-sm text-muted-foreground">
                   {simulationResult.data?.status === "FAILURE"
                     ? (simulationResult.data.error ?? "Simulation failed.")
-                    : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
+                    : "Running Monte Carlo simulation…"}
                 </p>
+                {simulationResult.data?.status !== "FAILURE" && simulationResult.slowStart && (
+                  <p className="max-w-sm text-center text-xs text-muted-foreground">
+                    If the simulation engine was asleep, it takes about a minute to start.
+                  </p>
+                )}
               </>
             )}
             {(simulationResult.data?.status === "FAILURE" || simulationResult.timedOut) && (

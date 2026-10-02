@@ -26,12 +26,13 @@ from backend.models.driver import Driver
 from backend.models.user import Subscription, User
 from backend.tests.integration.conftest import seed_via_test_client
 
-TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
-# Distinct values are required (not aliases of TEST_PASSWORD) where a test's
-# assertions depend on the values actually differing — e.g. asserting the
-# old password stops working and a wrong current password is rejected.
-TEST_NEW_PASSWORD = "N3w-fixture-only!"  # noqa: S105
-TEST_WRONG_PASSWORD = "Wr0ng-fixture-only!"  # noqa: S105
+# Generated per run so no password literal is committed (secret scanners flag
+# one). Distinct prefixes keep the three values different, which the tests
+# rely on: the old password must stop working and a wrong current password
+# must be rejected.
+TEST_PASSWORD = f"T3st-{uuid.uuid4().hex[:12]}!"
+TEST_NEW_PASSWORD = f"N3w-{uuid.uuid4().hex[:12]}!"
+TEST_WRONG_PASSWORD = f"Wr0ng-{uuid.uuid4().hex[:12]}!"
 
 
 async def _fetch_user_by_email(

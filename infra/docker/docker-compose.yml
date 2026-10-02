@@ -57,6 +57,10 @@ services:
       # them here, set both in .env and recreate the backend as above.
       SIM_DAILY_SCENARIOS_PER_USER: "${SIM_DAILY_SCENARIOS_PER_USER:-0}"
       SIM_DAILY_SCENARIOS_GLOBAL: "${SIM_DAILY_SCENARIOS_GLOBAL:-0}"
+      # Cache the race page's strategy answers this many seconds for a
+      # completed race (0 = 30 s for every race, the default). Production
+      # sets a day. Same way to try it as the limits above.
+      COMPLETED_SESSION_STRATEGY_TTL_SECONDS: "${COMPLETED_SESSION_STRATEGY_TTL_SECONDS:-0}"
     volumes:
       - ../../backend:/app/backend
       # Shared FastF1 session cache. FastF1's Cache.enable_cache needs the

@@ -13,7 +13,8 @@ default, and why each handler below needs a `request: Request` parameter.
 
 POST /simulate also takes the caller's daily scenario quota
 (services/simulation_quota_service.py) before queueing, and gives it back if
-queueing fails; GET /simulate/quota reports it.
+queueing fails; GET /simulate/quota reports it. Once queued, it asks Fly to
+start the worker machine when FLY_WORKER_AUTOSTART is on (core/fly_machines.py).
 
 All routes except GET /simulate/{task_id} require Depends(get_current_user):
 these are the compute-heavy ML inference/simulation endpoints (previously
@@ -35,6 +36,7 @@ from kombu.exceptions import OperationalError as KombuOperationalError
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core import fly_machines
 from backend.core.database import get_db
 from backend.core.exceptions import F1StrategyError
 from backend.core.rate_limit import limiter, rate_limit_value
@@ -345,6 +347,10 @@ async def simulate_strategy(
     except (KombuOperationalError, RedisError):
         await simulation_quota_service.refund(redis_client, reservation)
         raise
+    # Production keeps the worker machine stopped until needed. A no-op
+    # locally; never raises (a failed start leaves the task queued for the
+    # next worker start).
+    await fly_machines.ensure_worker_started()
     return SimulateTaskAccepted(task_id=task.id, status=task.status)
 
 

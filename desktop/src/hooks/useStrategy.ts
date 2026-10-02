@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient, type Query } from "@tanstack/rea
 import * as strategyApi from "@/api/strategy"
 import type { SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
 
-// Worker is scaled to 0 outside race weekends (Day 40 hybrid deployment,
-// see fly.toml) — nothing ever consumes prediction_queue, so a task
-// enqueued then would poll PENDING/STARTED forever with no signal. After
-// this long in that state, useSimulationResult flags timedOut so the UI
-// can swap the spinner for an explanation instead of hanging silently.
+// In production the worker machine is stopped until a simulation is queued,
+// then started on demand (demo deployment Day 6): a cold start takes about a
+// minute before the simulation itself runs. Past SLOW_START_MS
+// useSimulationResult flags slowStart so the page can say so; past
+// PENDING_TIMEOUT_MS it flags timedOut, and the page stops waiting.
 // Mirrors web/src/hooks/useStrategy.ts per the Desktop Sync Protocol.
-const PENDING_TIMEOUT_MS = 60_000
+const SLOW_START_MS = 10_000
+const PENDING_TIMEOUT_MS = 180_000
 
 export function usePitWindow(sessionId: string | null, driverId: string | null) {
   return useQuery({
@@ -76,6 +77,7 @@ export function useSimulationResult(taskId: string | null) {
     },
   })
 
+  const [slowStart, setSlowStart] = useState(false)
   const [timedOut, setTimedOut] = useState(false)
   const pendingSinceRef = useRef<number | null>(null)
   const status = query.data?.status
@@ -83,18 +85,20 @@ export function useSimulationResult(taskId: string | null) {
   useEffect(() => {
     if (!taskId || status === "SUCCESS" || status === "FAILURE") {
       pendingSinceRef.current = null
+      setSlowStart(false)
       setTimedOut(false)
       return
     }
     pendingSinceRef.current ??= Date.now()
     const elapsed = Date.now() - pendingSinceRef.current
-    if (elapsed >= PENDING_TIMEOUT_MS) {
-      setTimedOut(true)
-      return
-    }
-    const timer = window.setTimeout(() => setTimedOut(true), PENDING_TIMEOUT_MS - elapsed)
-    return () => window.clearTimeout(timer)
+    setSlowStart(elapsed >= SLOW_START_MS)
+    setTimedOut(elapsed >= PENDING_TIMEOUT_MS)
+    const timers = [
+      window.setTimeout(() => setSlowStart(true), Math.max(0, SLOW_START_MS - elapsed)),
+      window.setTimeout(() => setTimedOut(true), Math.max(0, PENDING_TIMEOUT_MS - elapsed)),
+    ]
+    return () => timers.forEach((timer) => window.clearTimeout(timer))
   }, [taskId, status])
 
-  return { ...query, timedOut }
+  return { ...query, slowStart, timedOut }
 }

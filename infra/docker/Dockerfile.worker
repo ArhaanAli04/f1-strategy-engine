@@ -39,7 +39,17 @@ COPY backend/ ./backend/
 # to open database file" on a root-owned volume mount.
 RUN mkdir -p /tmp/fastf1_cache && chown f1:f1 /tmp/fastf1_cache
 
+# Numba's compiled code ships in the image instead of being rebuilt on every
+# boot (see backend/scripts/warm_numba_cache.py; same setup as
+# Dockerfile.backend). NUMBA_CPU_NAME=generic makes the cache valid on any
+# x86-64 CPU, not just the build machine's.
+ENV NUMBA_CACHE_DIR=/app/numba_cache \
+    NUMBA_CPU_NAME=generic
+RUN mkdir -p /app/numba_cache && chown f1:f1 /app/numba_cache
+
 USER f1
+
+RUN python -m backend.scripts.warm_numba_cache
 
 # --pool=solo: no forked child processes, so the single in-process Prometheus
 # registry (metrics server started in celery_app.py) stays consistent — see

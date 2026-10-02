@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import statistics
 import time
 import uuid
@@ -60,7 +61,18 @@ _RECV_TIMEOUT_SECONDS = 5.0
 _DRAIN_SECONDS = 3.0
 
 _TEST_USER_EMAIL = "ws_load_test@example.com"
-_TEST_USER_PASSWORD = "LoadTest123!"  # noqa: S105 — throwaway local test account, not a secret
+
+
+def _test_user_password() -> str:
+    # From the environment, not the source, so no password literal is
+    # committed (secret scanners flag one). The account is reused across runs,
+    # so it must match what it was registered with.
+    password = os.environ.get("LOAD_TEST_PASSWORD")
+    if not password:
+        raise RuntimeError(
+            "LOAD_TEST_PASSWORD env var is required (the ws_load_test@example.com password)"
+        )
+    return password
 
 
 def _parse_args() -> argparse.Namespace:
@@ -88,11 +100,12 @@ def _login(host: str) -> str:
     Returns:
         A JWT access token, shared by every simulated WS connection.
     """
+    password = _test_user_password()
     register_resp = requests.post(
         f"{host}/api/v1/auth/register",
         json={
             "email": _TEST_USER_EMAIL,
-            "password": _TEST_USER_PASSWORD,
+            "password": password,
             "full_name": "WS Load Test User",
         },
         timeout=10,
@@ -102,7 +115,7 @@ def _login(host: str) -> str:
 
     login_resp = requests.post(
         f"{host}/api/v1/auth/login",
-        json={"email": _TEST_USER_EMAIL, "password": _TEST_USER_PASSWORD},
+        json={"email": _TEST_USER_EMAIL, "password": password},
         timeout=10,
     )
     login_resp.raise_for_status()
