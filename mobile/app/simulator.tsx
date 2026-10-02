@@ -365,13 +365,29 @@ export default function SimulatorScreen() {
 
       {step === 3 && (
         <View className="items-center gap-4 py-16">
-          <ActivityIndicator size="large" color="#fafafa" />
-          <Text className="text-sm text-muted">
-            {simulationResult.data?.status === "FAILURE"
-              ? (simulationResult.data.error ?? "Simulation failed.")
-              : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
-          </Text>
-          {simulationResult.data?.status === "FAILURE" && (
+          {/* The worker starts on demand in production (about a minute from
+              cold): slowStart explains a slow first result, timedOut (3 min)
+              stops waiting. Same as web/desktop. */}
+          {simulationResult.data?.status !== "FAILURE" && simulationResult.timedOut ? (
+            <Text className="text-center text-sm text-muted">
+              The simulation engine didn&apos;t respond in time. Please try again in a minute.
+            </Text>
+          ) : (
+            <>
+              <ActivityIndicator size="large" color="#fafafa" />
+              <Text className="text-sm text-muted">
+                {simulationResult.data?.status === "FAILURE"
+                  ? (simulationResult.data.error ?? "Simulation failed.")
+                  : "Running Monte Carlo simulation…"}
+              </Text>
+              {simulationResult.data?.status !== "FAILURE" && simulationResult.slowStart && (
+                <Text className="text-center text-xs text-muted">
+                  If the simulation engine was asleep, it takes about a minute to start.
+                </Text>
+              )}
+            </>
+          )}
+          {(simulationResult.data?.status === "FAILURE" || simulationResult.timedOut) && (
             <Pressable onPress={handleReset} className="rounded-md border border-white/10 px-4 py-2">
               <Text className="text-sm font-medium text-foreground">Try Again</Text>
             </Pressable>

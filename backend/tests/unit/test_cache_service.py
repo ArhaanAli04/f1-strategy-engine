@@ -134,3 +134,26 @@ async def test_cacheable_expires_the_last_good_copy_when_asked(
     await _compute(fakeredis)
 
     assert 0 < await fakeredis.ttl("f1:test:bounded:last_good") <= 600
+
+
+@pytest.mark.unit
+async def test_cacheable_ttl_fn_picks_the_ttl_from_the_call_and_runs_only_on_a_miss(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+) -> None:
+    ttl_calls: list[tuple[Any, ...]] = []
+
+    async def _ttl(client: Any, arg: str) -> int:
+        ttl_calls.append((client, arg))
+        return 86400 if arg == "finished" else 30
+
+    @cache_service.cacheable(ttl=30, key_fn=lambda client, arg: f"f1:test:{arg}", ttl_fn=_ttl)
+    async def _compute(client: Any, arg: str) -> dict[str, str]:
+        return {"value": arg}
+
+    await _compute(fakeredis, "finished")
+    await _compute(fakeredis, "live")
+    await _compute(fakeredis, "finished")  # a hit
+
+    assert 30 < await fakeredis.ttl("f1:test:finished") <= 86400
+    assert 0 < await fakeredis.ttl("f1:test:live") <= 30
+    assert ttl_calls == [(fakeredis, "finished"), (fakeredis, "live")]

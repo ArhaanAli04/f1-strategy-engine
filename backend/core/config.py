@@ -148,6 +148,32 @@ class AppSettings(BaseSettings):
     # Tells core/rate_limit.py it is behind Fly's proxy, the only place the
     # Fly-Client-IP header can be trusted.
     fly_app_name: str = ""
+    # Minutes the Celery worker may sit with no task before it exits itself,
+    # so an on-demand worker machine stops when simulations stop
+    # (docs/internal/demo-deployment-plan-2026.md, Day 6). 0, the default, turns
+    # it off, so the local worker never stops; production sets 10. See
+    # workers/idle_shutdown.py.
+    worker_idle_exit_minutes: int = 0
+    # Start the stopped worker machine through Fly's Machines API whenever a
+    # simulation is queued (docs/internal/demo-deployment-plan-2026.md, Day 6;
+    # see core/fly_machines.py). Off by default, so nothing is called locally;
+    # production turns it on and sets FLY_API_TOKEN as a Fly secret. The
+    # hostname is Fly's private-network API address, reachable only from a Fly
+    # machine.
+    fly_worker_autostart: bool = False
+    fly_api_token: str = ""
+    fly_api_hostname: str = "http://_api.internal:4280"
+    fly_worker_process_group: str = "worker"
+    # Web-machine ML caching (docs/internal/demo-deployment-plan-2026.md, Day 6).
+    # Seconds to cache the race page's strategy answers (pit window, undercut,
+    # overcut, strategy wall) for a session whose race is completed and not
+    # being replayed or raced live; those can no longer change, but are
+    # otherwise recomputed every 30 s. 0, the default, keeps 30 s for every
+    # session; production sets a day. See strategy_service._strategy_cache_ttl.
+    completed_session_strategy_ttl_seconds: int = 0
+    # Seconds to cache a season's driver-style fit (a full UMAP fit on the web
+    # machine). A season's data only changes when a race is ingested.
+    driver_style_fit_ttl_seconds: int = 3600
 
     @property
     def allowed_origins_list(self) -> list[str]:

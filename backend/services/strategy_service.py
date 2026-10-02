@@ -76,9 +76,10 @@ import redis.asyncio as aioredis
 from botocore.exceptions import ClientError
 from redis.exceptions import RedisError
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.config import get_aws_settings, get_ml_settings
+from backend.core.config import get_app_settings, get_aws_settings, get_ml_settings
 from backend.core.exceptions import ModelNotLoadedError, NotFoundError, ValidationError
 from backend.models.driver import Driver
 from backend.models.race import Circuit, Race
@@ -97,7 +98,7 @@ from backend.schemas.strategy_schema import (
     StrategyPredictionHistoryResponse,
     UndercutThreatResponse,
 )
-from backend.services.cache_service import cacheable
+from backend.services.cache_service import cache_get, cacheable
 
 # explainability/pit_predictor use the redundant "as X" alias, not a plain
 # import — tests reach them via strategy_service.explainability/
@@ -760,6 +761,67 @@ def _sampled_noise(rng: np.random.Generator, n_laps: int, n_samples: int) -> np.
 # --- build_pit_recommendation ---
 
 
+# The race page's strategy answers are cached this long while they could still
+# change (a live race, a replay, or a race not yet marked completed).
+STRATEGY_TTL_SECONDS = 30
+
+
+async def _strategy_cache_ttl(
+    client: aioredis.Redis,  # type: ignore[type-arg]
+    db: AsyncSession,
+    season: int,
+    round_number: int,
+    *args: Any,
+    **kwargs: Any,
+) -> int:
+    """TTL for a computed strategy answer: long only once its race can no longer change.
+
+    Production serves only finished races, and these answers (pit window,
+    undercut, overcut, strategy wall) are ML computed on the web machine, so
+    recomputing them every 30 s is pure waste there. The long TTL applies only
+    when all of these hold:
+    - COMPLETED_SESSION_STRATEGY_TTL_SECONDS is set (0, the default, keeps
+      30 s everywhere, so local development is unchanged);
+    - no live gaps key exists for the race (no live ingestion or Demo Replay
+      is writing it; same signal driver_service._is_session_live uses);
+    - the race's status is "completed". A live-ingested race stays
+      "scheduled", so a lapsed gaps key mid-race can't earn the long TTL.
+
+    Used as @cacheable's ttl_fn, so it receives the cached function's own
+    arguments; only the first four are read.
+
+    Args:
+        client: Redis client.
+        db: Async DB session.
+        season, round_number: The race the answer belongs to.
+        *args, **kwargs: The rest of the cached function's arguments, unused.
+    Returns:
+        COMPLETED_SESSION_STRATEGY_TTL_SECONDS or STRATEGY_TTL_SECONDS. Falls
+        back to STRATEGY_TTL_SECONDS if Redis or the database can't be read.
+    """
+    long_ttl = get_app_settings().completed_session_strategy_ttl_seconds
+    if long_ttl <= 0:
+        return STRATEGY_TTL_SECONDS
+    try:
+        if await cache_get(client, f"f1:{season}:{round_number}:gaps") is not None:
+            return STRATEGY_TTL_SECONDS
+        status = (
+            await db.execute(
+                select(Race.status).where(Race.season == season, Race.round_number == round_number)
+            )
+        ).scalar_one_or_none()
+    except (RedisError, SQLAlchemyError):
+        logger.warning(
+            "Could not tell whether %d round %d is completed; caching for %ds",
+            season,
+            round_number,
+            STRATEGY_TTL_SECONDS,
+            exc_info=True,
+        )
+        return STRATEGY_TTL_SECONDS
+    return long_ttl if status == "completed" else STRATEGY_TTL_SECONDS
+
+
 def _key_pit_window(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -837,7 +899,7 @@ def _stint2_batch_deltas(
     return result
 
 
-@cacheable(ttl=30, key_fn=_key_pit_window)
+@cacheable(ttl=STRATEGY_TTL_SECONDS, key_fn=_key_pit_window, ttl_fn=_strategy_cache_ttl)
 async def build_pit_recommendation(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2012,7 +2074,12 @@ def _key_undercut(
     )
 
 
-@cacheable(ttl=30, key_fn=_key_undercut, last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS)
+@cacheable(
+    ttl=STRATEGY_TTL_SECONDS,
+    key_fn=_key_undercut,
+    last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS,
+    ttl_fn=_strategy_cache_ttl,
+)
 async def get_undercut_score(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2068,7 +2135,12 @@ def _key_overcut(
     )
 
 
-@cacheable(ttl=30, key_fn=_key_overcut, last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS)
+@cacheable(
+    ttl=STRATEGY_TTL_SECONDS,
+    key_fn=_key_overcut,
+    last_good_ttl=UNDERCUT_OVERCUT_LAST_GOOD_TTL_SECONDS,
+    ttl_fn=_strategy_cache_ttl,
+)
 async def get_overcut_score(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2313,7 +2385,7 @@ def _key_competitor_strategy(
     return f"f1:{season}:{round_number}:strategy:competitors"
 
 
-@cacheable(ttl=30, key_fn=_key_competitor_strategy)
+@cacheable(ttl=STRATEGY_TTL_SECONDS, key_fn=_key_competitor_strategy, ttl_fn=_strategy_cache_ttl)
 async def get_competitor_predicted_strategy(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,

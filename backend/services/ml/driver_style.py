@@ -51,7 +51,6 @@ from dataclasses import dataclass
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-import umap
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -301,6 +300,11 @@ def fit_driver_style_clusters(
 
     centroids = np.array([scaled[cluster_ids == c].mean(axis=0) for c in range(k)])
     cluster_labels = _label_clusters(centroids)
+
+    # Imported here, not at module level: importing umap JIT-compiles
+    # pynndescent with Numba, about 50 CPU-seconds on a cold start, and every
+    # web and worker process imported this module at boot only to reach it.
+    import umap
 
     reducer = umap.UMAP(n_components=2, random_state=random_state)
     embedding = reducer.fit_transform(scaled)
