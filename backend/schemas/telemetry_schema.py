@@ -180,6 +180,12 @@ class DriverGap(BaseModel):
     # equivalent authoritative source and would have the same lap-1-missing
     # unreliability documented on gap_to_ahead_seconds above.
     gap_to_leader_seconds: float | None = None
+    # The tyre the car is on now (2026-10-04, demo deployment Day 6b): set by
+    # the live ingestor from TimingAppData's current stint and by Demo Replay
+    # playback from the lap the car is on, so the timing tower shows a new
+    # tyre from the pit stop instead of a lap later. None from the DB
+    # reconstruction path; clients then fall back to the last completed lap.
+    compound: str | None = None
 
 
 class SessionGapsResponse(BaseModel):

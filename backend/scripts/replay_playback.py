@@ -9,9 +9,11 @@ today, to the same Redis keys and channels:
 - car numbers, once, from replay_car_numbers;
 - car positions every second, from driver_positions placed on the session clock
   by replay_lap_timings.lap_start_seconds;
-- gaps, from replay_gap_snapshots: the snapshot for the lap before the window at
-  the first moment, then each lap's snapshot when the first car finishes that
-  lap, so the timing tower matches the cars on the map;
+- gaps (the timing tower), every second, ranked by how far round the lap each
+  car is, worked out from its stored line crossings (replay_lap_timings), so
+  the tower moves with the cars on the map instead of once per lap. See the
+  "timing tower" section below. replay_gap_snapshots gives the starting order
+  and which cars are still running;
 - each driver's lap-completion event (the payload telemetry_worker.process_lap
   publishes) when that driver really finished the lap, from lap_data and
   replay_lap_timings.lap_end_seconds. At the first moment every driver's event
@@ -35,6 +37,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import signal
 import time
 import uuid
@@ -250,11 +253,220 @@ async def load_playback_data(
     return data
 
 
+# --- The timing tower: each car's progress round the lap --------------------
+#
+# The tower used to change only when the leader finished a lap, so a car that
+# pitted kept its old place for up to two minutes while the map already showed
+# it behind (Day 6 visual check, Belgian GP: VER's lap-17 stop). Ranking at
+# every line crossing does not help a pit stop either: the cars that pass a
+# car in the pits only reach a line about a lap later.
+#
+# Instead the tower is recomputed every second from each car's progress in
+# laps: between two line crossings a car is assumed to cover the lap at an
+# even pace, so its progress is interpolated from the stored crossing times. A
+# car on a slow lap (a pit stop, a spin) falls behind as soon as that lap is
+# slower than the cars around it, not a lap later. Its known limit: a pit
+# stop's lost time is spread evenly over the lap, so a pass can show a few
+# seconds before or after the map shows it.
+
+# (seconds from the window's first moment, laps completed at that crossing),
+# in time order.
+LapLine = list[tuple[float, int]]
+
+
+def _interpolate(start: tuple[float, float], end: tuple[float, float], x: float) -> float:
+    (x0, y0), (x1, y1) = start, end
+    if x1 == x0:
+        return y0
+    return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+
+@dataclass(frozen=True)
+class CarProgress:
+    """One car's line crossings, to tell how far round the lap it is at any moment."""
+
+    crossings: LapLine
+    # True when the car finished the window's last lap: after that it keeps
+    # going at its last lap's pace. False when it stopped short (retired, or
+    # no stored end time): it stays where it last crossed and the field passes.
+    keeps_going: bool
+
+    def laps_at(self, t: float) -> float | None:
+        """Laps completed at moment t, as a fraction (20.5 = halfway round lap 21).
+
+        Args:
+            t: Seconds from the window's first moment.
+        Returns:
+            The interpolated progress, or None with no crossings at all.
+        """
+        points = [(time, float(laps)) for time, laps in self.crossings]
+        if not points:
+            return None
+        if len(points) == 1:
+            return points[0][1]
+        if t <= points[0][0]:
+            return _interpolate(points[0], points[1], t)
+        for before, after in zip(points, points[1:], strict=False):
+            if t <= after[0]:
+                return _interpolate(before, after, t)
+        return _interpolate(points[-2], points[-1], t) if self.keeps_going else points[-1][1]
+
+    def time_at(self, laps: float) -> float | None:
+        """When this car reaches the given progress, at its own pace.
+
+        Extrapolates past its crossings at the nearest lap's pace, so a gap
+        can always be given while the car has two crossings.
+
+        Args:
+            laps: Progress in laps, as laps_at returns.
+        Returns:
+            Seconds from the window's first moment, or None with fewer than
+            two crossings.
+        """
+        points = [(float(lap), time) for time, lap in self.crossings]
+        if len(points) < 2:
+            return None
+        if laps <= points[0][0]:
+            return _interpolate(points[0], points[1], laps)
+        for before, after in zip(points, points[1:], strict=False):
+            if laps <= after[0]:
+                return _interpolate(before, after, laps)
+        return _interpolate(points[-2], points[-1], laps)
+
+
+@dataclass(frozen=True)
+class Tower:
+    """What the timing tower is computed from, for one window."""
+
+    session_id: str
+    cars: dict[str, CarProgress]
+    # Stored snapshot lap -> the cars in it. A car is shown only while it is in
+    # the snapshot for the lap the leader is on, so a retired car drops out of
+    # the tower once the leader completes a lap it never finished, as before.
+    members_by_lap: dict[int, frozenset[str]]
+    # Order in the lap-before snapshot: breaks exact ties.
+    starting_order: dict[str, int]
+    # (driver, lap) -> the tyre that lap was driven on (lap_data.compound).
+    compounds: dict[tuple[str, int], str]
+
+
+def build_tower(data: PlaybackData, origin: float) -> Tower:
+    """Each car's line crossings in the window, starting from the lap before.
+
+    The lap before the window ends when the car starts the window's first lap,
+    so that start time is its first crossing; every stored lap end after it is
+    another.
+
+    Args:
+        data: The loaded window.
+        origin: window_origin(data).
+    Returns:
+        The Tower.
+    """
+    lap_before = data.start_lap - 1
+    crossings: dict[str, set[tuple[float, int]]] = {}
+    finished_window: set[str] = set()
+    for t in data.lap_timings:
+        if t.lap_number == data.start_lap and t.lap_start_seconds is not None:
+            crossings.setdefault(t.driver_id, set()).add((t.lap_start_seconds - origin, lap_before))
+        if t.lap_end_seconds is not None:
+            crossings.setdefault(t.driver_id, set()).add((t.lap_end_seconds - origin, t.lap_number))
+            if t.lap_number == data.end_lap:
+                finished_window.add(t.driver_id)
+    cars = {
+        driver_id: CarProgress(sorted(points), driver_id in finished_window)
+        for driver_id, points in crossings.items()
+    }
+    members_by_lap = {
+        lap_number: frozenset(str(gap["driver_id"]) for gap in payload.get("gaps", []))
+        for lap_number, payload in data.gap_snapshots.items()
+    }
+    starting_order = {
+        str(gap["driver_id"]): int(gap["position"])
+        for gap in data.gap_snapshots.get(lap_before, {}).get("gaps", [])
+    }
+    compounds = {
+        (str(lap["driver_id"]), int(lap["lap_number"])): str(lap["compound"])
+        for lap in data.lap_events
+        if lap.get("compound")
+    }
+    return Tower(str(data.session_id), cars, members_by_lap, starting_order, compounds)
+
+
+def _current_compound(tower: Tower, driver_id: str, laps: float) -> str | None:
+    # The lap being driven is the one after the last completed. Its compound
+    # is the new tyre from the line where the pit lap starts, a few seconds
+    # before the stop itself. A car with no such lap stored (stopped, or past
+    # the window's last lap) keeps the tyre of its latest stored lap.
+    driving = math.floor(laps) + 1
+    stored = [lap for (d, lap) in tower.compounds if d == driver_id and lap <= driving]
+    return tower.compounds[(driver_id, max(stored))] if stored else None
+
+
+def _members(tower: Tower, leader_laps: int) -> frozenset[str] | None:
+    if not tower.members_by_lap:
+        return None
+    known = [lap for lap in tower.members_by_lap if lap <= leader_laps]
+    return tower.members_by_lap[max(known) if known else min(tower.members_by_lap)]
+
+
+def tower_gaps(tower: Tower, t: float) -> dict[str, Any] | None:
+    """The timing tower at moment t, in the shape the gaps key holds.
+
+    Cars are ranked by progress. A car's gap to the one ahead is how long it
+    takes, at its own pace, to reach where that car is now; a car a whole lap
+    or more behind gets laps_behind instead, as the tower expects.
+
+    Args:
+        tower: build_tower's result.
+        t: Seconds from the window's first moment.
+    Returns:
+        A SessionGapsResponse-shaped payload with "source": "replay", or None
+        when no car has a crossing yet.
+    """
+    progress = {d: p for d, car in tower.cars.items() if (p := car.laps_at(t)) is not None}
+    if not progress:
+        return None
+    members = _members(tower, math.floor(max(progress.values())))
+    if members is not None:
+        progress = {d: p for d, p in progress.items() if d in members}
+    order = sorted(
+        progress, key=lambda d: (-progress[d], tower.starting_order.get(d, len(tower.cars)), d)
+    )
+
+    def interval(ahead: str, behind: str) -> tuple[float | None, int]:
+        laps_down = progress[ahead] - progress[behind]
+        if laps_down >= 1:
+            return None, math.floor(laps_down)
+        reaches = tower.cars[behind].time_at(progress[ahead])
+        return (None if reaches is None else round(max(0.0, reaches - t), 3)), 0
+
+    gaps = []
+    for i, driver_id in enumerate(order):
+        gap_ahead, laps_behind = (0.0, 0) if i == 0 else interval(order[i - 1], driver_id)
+        gap_behind = 0.0 if i == len(order) - 1 else interval(driver_id, order[i + 1])[0]
+        gaps.append(
+            {
+                "driver_id": driver_id,
+                "lap_number": math.floor(progress[driver_id]),
+                "position": i + 1,
+                "gap_to_ahead_seconds": gap_ahead,
+                "gap_to_behind_seconds": gap_behind,
+                "laps_behind": laps_behind,
+                "compound": _current_compound(tower, driver_id, progress[driver_id]),
+            }
+        )
+    # "source": "replay": live_race_detection treats a gaps key as a live race
+    # only when it says "live" (see replay_pipeline._compute_lap_gaps).
+    return {"session_id": tower.session_id, "gaps": gaps, "source": "replay"}
+
+
 # --- The timeline ----------------------------------------------------------
 
-# Order of events that fall on the same moment: the field's gaps first, then
-# the lap events they belong to, then the alerts those laps raise.
-GAPS, LAP, ALERT = 0, 1, 2
+# Order of events that fall on the same moment: lap events first, then the
+# alerts those laps raise. (The tower is not an event: it is published every
+# tick, before the events that come due on it.)
+LAP, ALERT = 1, 2
 
 
 @dataclass(frozen=True)
@@ -262,7 +474,7 @@ class PlaybackEvent:
     """One thing to publish, at `at` seconds after the window's first moment."""
 
     at: float
-    kind: int  # GAPS, LAP or ALERT
+    kind: int  # LAP or ALERT
     lap_number: int
     payload: dict[str, Any]
     alert: AlertRow | None = None
@@ -278,14 +490,15 @@ class Timeline:
 
     events: list[PlaybackEvent]
     positions: PositionTimeline
+    tower: Tower
     duration: float
 
 
 def window_origin(data: PlaybackData) -> float:
     """The window's first moment: when the first car started the window's first lap.
 
-    That is also when it finished the lap before, so the lap-before gap snapshot
-    and lap events are current at that instant.
+    That is also when it finished the lap before, so the lap-before lap events
+    are current at that instant.
 
     Args:
         data: The loaded window.
@@ -337,10 +550,8 @@ def build_position_timeline(data: PlaybackData, origin: float) -> PositionTimeli
 
 
 def build_events(data: PlaybackData, origin: float) -> list[PlaybackEvent]:
-    """Every gap snapshot, lap event and alert, in the order to publish them.
+    """Every lap event and alert, in the order to publish them.
 
-    - Gaps: the lap-before snapshot at 0; lap N's snapshot when the first car
-      finishes lap N.
     - Lap events: the lap before the window at 0; each lap in the window when
       that driver finished it. A lap with no stored end time is skipped.
     - Alerts: when the trailing driver finished that lap (their prediction for
@@ -351,8 +562,8 @@ def build_events(data: PlaybackData, origin: float) -> list[PlaybackEvent]:
         data: The loaded window.
         origin: window_origin(data).
     Returns:
-        Events sorted by time, then GAPS before LAP before ALERT, then lap and
-        driver, so the order is the same on every run.
+        Events sorted by time, then LAP before ALERT, then lap and driver, so
+        the order is the same on every run.
     """
     lap_end = {
         (t.driver_id, t.lap_number): t.lap_end_seconds - origin
@@ -365,11 +576,6 @@ def build_events(data: PlaybackData, origin: float) -> list[PlaybackEvent]:
 
     events: list[PlaybackEvent] = []
     lap_before = data.start_lap - 1
-    for lap_number, payload in data.gap_snapshots.items():
-        at = 0.0 if lap_number == lap_before else first_finish.get(lap_number)
-        if at is not None:
-            events.append(PlaybackEvent(at, GAPS, lap_number, payload))
-
     for payload in data.lap_events:
         lap_number = payload["lap_number"]
         at = 0.0 if lap_number == lap_before else lap_end.get((payload["driver_id"], lap_number))
@@ -405,7 +611,7 @@ def build_timeline(data: PlaybackData) -> Timeline:
     positions = build_position_timeline(data, origin)
     last_position = max((samples[-1][0] for samples in positions.values()), default=0.0)
     last_event = events[-1].at if events else 0.0
-    return Timeline(events, positions, max(last_position, last_event))
+    return Timeline(events, positions, build_tower(data, origin), max(last_position, last_event))
 
 
 # --- The real-time runner --------------------------------------------------
@@ -500,14 +706,7 @@ async def _publish_event(
 ) -> None:
     """Publish one event; a failure is logged and counted, never fatal."""
     try:
-        if event.kind == GAPS:
-            await client.setex(
-                gaps_key(data.season, data.round_number),
-                GAPS_KEY_TTL_SECONDS,
-                json.dumps(event.payload),
-            )
-            stats.gaps += 1
-        elif event.kind == LAP:
+        if event.kind == LAP:
             await client.publish(f"f1:telemetry:{data.session_id}:laps", json.dumps(event.payload))
             stats.laps += 1
         else:
@@ -529,8 +728,9 @@ async def play(
     """Play the timeline in real time, then delete the replay's gaps key.
 
     One clock, ticking every POSITION_TICK_SECONDS from 0 to the timeline's
-    duration. Each tick publishes the events that have come due (so an event is
-    at most a tick late), then every driver's latest position. Ticks are
+    duration. Each tick publishes the timing tower, then the events that have
+    come due (so an event is at most a tick late), then every driver's latest
+    position. Ticks are
     scheduled from the start time, not from the previous tick, so a slow tick
     does not push the rest of the window later.
 
@@ -555,6 +755,18 @@ async def play(
         started = clock()
         tick = 0.0
         while True:
+            gaps = tower_gaps(timeline.tower, tick)
+            if gaps is not None:
+                try:
+                    await client.setex(
+                        gaps_key(data.season, data.round_number),
+                        GAPS_KEY_TTL_SECONDS,
+                        json.dumps(gaps),
+                    )
+                    stats.gaps += 1
+                except RedisError:
+                    stats.failures += 1
+                    logger.exception("Could not publish the timing tower at %.0fs", tick)
             while next_event < len(timeline.events) and timeline.events[next_event].at <= tick:
                 await _publish_event(client, data, timeline.events[next_event], alert_sink, stats)
                 next_event += 1
@@ -673,7 +885,7 @@ def main() -> None:
         logger.exception("Nothing to play back")
         raise SystemExit(1) from None
     logger.info(
-        "Playback finished: %d gap snapshots, %d lap events, %d alerts (%d rows), %d failures",
+        "Playback finished: %d tower updates, %d lap events, %d alerts (%d rows), %d failures",
         stats.gaps,
         stats.laps,
         stats.alerts,

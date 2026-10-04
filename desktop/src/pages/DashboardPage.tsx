@@ -2,8 +2,8 @@ import { CircuitMapPanel } from "@/components/circuit/CircuitMapPanel"
 import { DriverRosterGrid } from "@/components/dashboard/DriverRosterGrid"
 import { QuickAccessCards } from "@/components/dashboard/QuickAccessCards"
 import { RaceContextPanel } from "@/components/dashboard/RaceContextPanel"
-import { broadcastRaceContext } from "@/hooks/useRaceContextBridge"
-import { useRaceContextStore } from "@/stores/raceContextStore"
+import { setContextDriver } from "@/hooks/useRaceContextBridge"
+import { useRaceSession } from "@/hooks/useRaceSession"
 import type { DesktopPage } from "@/App"
 
 interface DashboardPageProps {
@@ -11,10 +11,10 @@ interface DashboardPageProps {
 }
 
 export function DashboardPage({ onNavigate }: DashboardPageProps) {
-  const sessionId = useRaceContextStore((state) => state.sessionId)
+  const { sessionId, isOverride, isReplay } = useRaceSession()
 
   function handleSelectDriver(driverId: string) {
-    broadcastRaceContext(sessionId, driverId)
+    setContextDriver(driverId)
     onNavigate("driverAnalytics")
   }
 
@@ -28,7 +28,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
             LIVE mode's position polling needs a real one, and
             useDriverPositions/useDriverCarNumbers are already no-ops
             (enabled: Boolean(sessionId)) against "". */}
-        <CircuitMapPanel sessionId={sessionId ?? ""} />
+        <CircuitMapPanel sessionId={sessionId ?? ""} isExplicitSession={isOverride || isReplay} />
         <QuickAccessCards onNavigate={onNavigate} />
 
         <div>

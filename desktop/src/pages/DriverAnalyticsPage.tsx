@@ -10,8 +10,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useDriverSeasonStats } from "@/hooks/useDriverSeasonStats"
-import { broadcastRaceContext } from "@/hooks/useRaceContextBridge"
-import { useSessionGaps } from "@/hooks/useSessionGaps"
+import { setContextDriver } from "@/hooks/useRaceContextBridge"
+import { useRaceSession } from "@/hooks/useRaceSession"
 import { useRaceContextStore } from "@/stores/raceContextStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 
@@ -34,18 +34,18 @@ function StatTile({ value, label }: StatTileProps) {
 // card sets raceContextStore.driverId and this page switches straight to
 // the detail view. "Back to all drivers" clears driverId back to null
 // rather than navigating away — Dashboard's own grid/context panel are
-// untouched by either. Session comes from raceContextStore too, replacing
-// useCurrentRace's live-detection (same swap as SimulatorPage).
+// untouched by either. The session comes from useRaceSession, like web's
+// DriverPage uses useResolvedSession.
 export function DriverAnalyticsPage() {
   const contextDriverId = useRaceContextStore((state) => state.driverId)
-  const sessionId = useRaceContextStore((state) => state.sessionId)
+  const { sessionId, isLive, isOverride, isReplay, raceName, raceDate } = useRaceSession()
 
   function handleSelectDriver(driverId: string) {
-    broadcastRaceContext(sessionId, driverId)
+    setContextDriver(driverId)
   }
 
   function handleBackToRoster() {
-    broadcastRaceContext(sessionId, null)
+    setContextDriver(null)
   }
 
   const { data: drivers, isLoading: driversLoading } = useDrivers()
@@ -58,11 +58,9 @@ export function DriverAnalyticsPage() {
     new Date().getFullYear(),
   )
 
-  // Same Redis-liveness signal as LiveRacePage/CircuitMapPanel — no session
-  // date is available to compare against for a manually-typed sessionId, so
-  // "no live positions" stands in for "this is historical data" here too.
-  const { data: gapsResponse } = useSessionGaps(sessionId)
-  const showHistoricalBanner = Boolean(sessionId) && (gapsResponse?.gaps.length ?? 0) === 0
+  // Same rule as LiveRacePage: only for the automatic fallback to a
+  // completed race, not for a Dashboard override or a running replay.
+  const showHistoricalBanner = Boolean(sessionId) && !isLive && !isOverride && !isReplay
 
   if (driversLoading) {
     return (
@@ -88,7 +86,9 @@ export function DriverAnalyticsPage() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {showHistoricalBanner && sessionId && <HistoricalDataBanner sessionId={sessionId} />}
+      {showHistoricalBanner && sessionId && (
+        <HistoricalDataBanner sessionId={sessionId} raceName={raceName} raceDate={raceDate} />
+      )}
       <div className="flex-1 overflow-y-auto p-6">
       <div className="mx-auto max-w-6xl space-y-4">
         <Button variant="outline" size="sm" onClick={handleBackToRoster}>
