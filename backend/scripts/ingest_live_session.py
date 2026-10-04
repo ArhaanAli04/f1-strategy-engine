@@ -1099,6 +1099,10 @@ class F1SignalRIngestor:
                     "gap_to_ahead_seconds": state.get("gap_to_ahead"),
                     "gap_to_behind_seconds": None,
                     "laps_behind": state.get("laps_behind", 0),
+                    # The current stint's tyre, updated from TimingAppData as
+                    # soon as a new stint appears (at the stop), so the tower
+                    # shows it before the out-lap is completed.
+                    "compound": self._car_current_compound.get(car_number),
                 }
             )
         if not entries:

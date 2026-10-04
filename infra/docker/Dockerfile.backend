@@ -39,7 +39,19 @@ COPY backend/ ./backend/
 # database file" on a root-owned volume mount.
 RUN mkdir -p /tmp/fastf1_cache && chown f1:f1 /tmp/fastf1_cache
 
+# Numba's compiled code ships in the image instead of being rebuilt on every
+# boot (umap's pynndescent alone is ~50 CPU-seconds cold; see
+# backend/scripts/warm_numba_cache.py). NUMBA_CPU_NAME=generic makes the cache
+# valid on any x86-64 CPU, not just the build machine's. Owned by f1 so Numba
+# can still add entries at run time (e.g. when docker-compose mounts newer
+# source over /app/backend).
+ENV NUMBA_CACHE_DIR=/app/numba_cache \
+    NUMBA_CPU_NAME=generic
+RUN mkdir -p /app/numba_cache && chown f1:f1 /app/numba_cache
+
 USER f1
+
+RUN python -m backend.scripts.warm_numba_cache
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"

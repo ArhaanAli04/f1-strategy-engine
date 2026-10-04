@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react"
+import { render, screen, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { LiveTimingTower } from "@/components/telemetry/LiveTimingTower"
 import { useDrivers } from "@/hooks/useDrivers"
@@ -74,6 +74,40 @@ describe("LiveTimingTower", () => {
     render(<LiveTimingTower sessionId="session-1" />)
 
     expect(screen.getByText("Leader")).toBeInTheDocument()
+  })
+
+  it("shows the tower's current tyre over the last completed lap's, falling back to it", () => {
+    // D1 has pitted onto HARD: its last completed lap (the in-lap) was on
+    // MEDIUM. D2's tower entry carries no tyre, so its last lap's is used.
+    const gaps = buildGaps(2)
+    gaps[0] = { ...gaps[0], compound: "HARD" }
+    mockGaps(gaps)
+    const lap = (driverId: string) => ({
+      driver_id: driverId,
+      session_id: "session-1",
+      lap_number: 17,
+      lap_time_seconds: 115.7,
+      compound: "MEDIUM",
+      sector1_seconds: null,
+      sector2_seconds: null,
+      sector3_seconds: null,
+      speed_kmh: null,
+      throttle_pct: null,
+      brake: null,
+      gear: null,
+      drs: null,
+    })
+    vi.mocked(useLiveTelemetry).mockReturnValue({
+      lapsByDriver: { "driver-1": lap("driver-1"), "driver-2": lap("driver-2") },
+      readyState: "open",
+      staleConnection: false,
+    })
+
+    render(<LiveTimingTower sessionId="session-1" />)
+
+    const rows = screen.getAllByRole("button")
+    expect(within(rows[0]).getByLabelText("HARD")).toBeInTheDocument()
+    expect(within(rows[1]).getByLabelText("MEDIUM")).toBeInTheDocument()
   })
 
   it("shows the empty state when gaps array is empty", () => {

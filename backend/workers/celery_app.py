@@ -9,13 +9,14 @@ import redis
 from celery import Celery
 from celery.signals import task_postrun, task_prerun, worker_init
 
-from backend.core.config import get_redis_settings
+from backend.core.config import get_app_settings, get_redis_settings
 from backend.core.metrics import (
     f1_celery_queue_depth,
     f1_celery_task_duration_seconds,
     f1_celery_tasks_failed_total,
     f1_celery_tasks_succeeded_total,
 )
+from backend.workers.idle_shutdown import IdleWatchdog, start_idle_watchdog
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,10 @@ _MONITORED_QUEUES = ("telemetry_queue", "prediction_queue", "alert_queue")
 
 _task_start_times: dict[str, float] = {}
 
+# Set at worker boot when WORKER_IDLE_EXIT_MINUTES is above 0; the task
+# signals below report to it (see workers/idle_shutdown.py).
+_idle_watchdog: IdleWatchdog | None = None
+
 
 def _poll_queue_depth() -> None:
     """Background loop: set f1_celery_queue_depth from each monitored queue's Redis LLEN."""
@@ -137,22 +142,28 @@ def _poll_queue_depth() -> None:
 
 @worker_init.connect  # type: ignore[untyped-decorator]
 def _on_worker_init(**kwargs: Any) -> None:
-    """Start the metrics HTTP server and queue-depth poller once, at worker boot."""
+    """Start the metrics server, queue-depth poller and idle watchdog once, at worker boot."""
+    global _idle_watchdog
     from prometheus_client import start_http_server
 
     start_http_server(_METRICS_PORT)
     logger.info("Celery metrics server listening on :%d", _METRICS_PORT)
 
     threading.Thread(target=_poll_queue_depth, daemon=True).start()
+    _idle_watchdog = start_idle_watchdog(get_app_settings().worker_idle_exit_minutes)
 
 
 @task_prerun.connect  # type: ignore[untyped-decorator]
 def _on_task_prerun(task_id: str, **kwargs: Any) -> None:
     _task_start_times[task_id] = time.perf_counter()
+    if _idle_watchdog is not None:
+        _idle_watchdog.task_started()
 
 
 @task_postrun.connect  # type: ignore[untyped-decorator]
 def _on_task_postrun(task_id: str, task: Any, state: str, **kwargs: Any) -> None:
+    if _idle_watchdog is not None:
+        _idle_watchdog.task_finished()
     task_name = task.name if task is not None else "unknown"
     start = _task_start_times.pop(task_id, None)
     if start is not None:

@@ -12,6 +12,8 @@ across the population — a constant-feature population would collapse cluster
 std to zero and get z-score/PCA steps producing NaNs.
 """
 
+import subprocess
+import sys
 import uuid
 from typing import Any
 
@@ -29,6 +31,23 @@ _ARCHETYPES = {"aggressive", "conservative", "technical", "balanced", "inconsist
 _SEASON = 2026
 _N_DRIVERS = 8
 _N_LAPS = 12
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module",
+    ["backend.main", "backend.workers.prediction_worker", "backend.services.driver_service"],
+)
+def test_startup_imports_do_not_load_umap(module: str) -> None:
+    """umap is imported only when a fit runs: importing it costs ~50 CPU-seconds cold.
+
+    A fresh interpreter, because this test process may already have umap loaded.
+    """
+    probe = f"import sys, {module}; print('umap' in sys.modules, 'pynndescent' in sys.modules)"
+    result = subprocess.run(  # noqa: S603 — fixed argv
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True
+    )
+    assert result.stdout.strip() == "False False"
 
 
 def _synthetic_laps_and_stints(n_drivers: int = _N_DRIVERS, n_laps: int = _N_LAPS) -> Any:

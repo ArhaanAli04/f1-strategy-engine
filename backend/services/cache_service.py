@@ -199,7 +199,10 @@ def cache_lock(client: aioredis.Redis, key: str) -> Lock:  # type: ignore[type-a
 
 
 def cacheable(
-    ttl: int | None, key_fn: Callable[..., str], last_good_ttl: int | None = None
+    ttl: int | None,
+    key_fn: Callable[..., str],
+    last_good_ttl: int | None = None,
+    ttl_fn: Callable[..., Awaitable[int | None]] | None = None,
 ) -> Callable[[F], F]:
     """Cache-aside decorator for async service methods, with single-flight locking.
 
@@ -230,6 +233,13 @@ def cacheable(
             a no-expiry copy of each would otherwise accumulate forever — the
             per-lap undercut/overcut keys left 1,860 of them from a single
             race (Azerbaijan GP 2026).
+        ttl_fn: Optional async function that picks the TTL when a computed
+            result is written, called with the decorated function's own
+            arguments; it replaces ttl for that write. For an answer whose
+            lifetime depends on runtime state, not on the arguments alone
+            (e.g. strategy answers for a race that has finished never change).
+            Called only on a miss, so it costs nothing on a hit. It must not
+            raise: fall back to a short TTL itself.
     Returns:
         Decorator that wraps an async function with cache-get-or-compute-and-set.
     """
@@ -258,7 +268,8 @@ def cacheable(
                     )
                     return last_good
                 raise
-            await cache_set(client, key, result, ttl)
+            entry_ttl = ttl if ttl_fn is None else await ttl_fn(*args, **kwargs)
+            await cache_set(client, key, result, entry_ttl)
             await cache_set(client, last_good_key, result, last_good_ttl)
             return result
 

@@ -1,7 +1,13 @@
 import type { CSSProperties } from "react"
 
 export const API_URL = import.meta.env.VITE_API_URL
-export const WS_URL = import.meta.env.VITE_WS_URL
+// The WebSocket lives on the same host as the API, so without its own
+// VITE_WS_URL it is derived from API_URL (http -> ws, https -> wss). The
+// production builds set only VITE_API_URL (cd-web.yml, desktop's
+// .env.production), which left WS_URL undefined there (found demo
+// deployment Day 6b).
+export const WS_URL: string =
+  import.meta.env.VITE_WS_URL ?? String(API_URL ?? "").replace(/^http/, "ws")
 
 // Recharts' <Tooltip> renders with a hardcoded light-mode background by
 // default — no dark-mode awareness at all. This app is permanently dark

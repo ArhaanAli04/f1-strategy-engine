@@ -34,8 +34,12 @@ requests mid-run. Tokens are cached to backend/tests/load/.token_cache.json
 again after a fix lands) reuses valid tokens instantly instead of
 re-paying setup cost.
 
-Required env var:
+Required env vars:
     LOAD_TEST_SESSION_ID     Real session UUID with ingested lap_data.
+    LOAD_TEST_PASSWORD       Password for the loadtest{i}@example.com accounts.
+                             They are reused across runs, so use the same value
+                             every time; the accounts already in a database keep
+                             the password they were first registered with.
 Required for StrategyUser:
     LOAD_TEST_DRIVER_IDS     Comma-separated real driver UUIDs from that session.
 Optional:
@@ -102,7 +106,6 @@ _TOKEN_REUSE_SAFETY_MARGIN_SECONDS = 120
 # (via email-validator) rejects outright at the syntax level — example.com is
 # a real public TLD, so it passes validation despite being RFC 2606-reserved.
 _TEST_USER_EMAIL_DOMAIN = "example.com"
-_TEST_USER_PASSWORD = "LoadTest123!"  # noqa: S105 — throwaway local test account, not a secret
 
 _WS_RECV_TIMEOUT_SECONDS = 10.0
 
@@ -120,6 +123,13 @@ def _env_or_raise(name: str) -> str:
 
 def _session_id() -> str:
     return _env_or_raise("LOAD_TEST_SESSION_ID")
+
+
+def _test_user_password() -> str:
+    # From the environment, not the source, so no password literal is
+    # committed (secret scanners flag one). The loadtest{i} accounts are
+    # reused across runs, so it must match what they were registered with.
+    return _env_or_raise("LOAD_TEST_PASSWORD")
 
 
 def _driver_ids() -> list[str]:
@@ -237,7 +247,7 @@ def _provision_test_users(environment: Any, **kwargs: Any) -> None:
             continue
 
         try:
-            entry = _register_and_login(host, email, _TEST_USER_PASSWORD)
+            entry = _register_and_login(host, email, _test_user_password())
         except requests.RequestException as exc:
             # Locust fires test_start listeners without blocking user spawn on
             # a raised exception — it just logs "Uncaught exception in event

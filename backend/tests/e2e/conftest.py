@@ -19,7 +19,9 @@ import pytest
 import requests
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
-TEST_PASSWORD = "T3st-fixture-only!"  # noqa: S105
+# Generated per run so no password literal is committed (secret scanners flag
+# one). Each run registers fresh users, so nothing needs a known password.
+TEST_PASSWORD = f"T3st-{uuid.uuid4().hex[:12]}!"
 
 
 @pytest.fixture(scope="session")

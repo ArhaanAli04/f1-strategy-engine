@@ -10,6 +10,7 @@ import json
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -38,10 +39,21 @@ def _lap_event(driver: str, lap: int) -> dict[str, Any]:
     return {"driver_id": driver, "session_id": str(SESSION), "lap_number": lap}
 
 
+def _snapshot(*order: str) -> dict[str, Any]:
+    """A stored gap snapshot; the tower reads only who is in it and their order."""
+    return {"gaps": [{"driver_id": d, "position": i + 1} for i, d in enumerate(order)]}
+
+
+def _timings(
+    times: Mapping[tuple[str, int], tuple[float | None, float | None]],
+) -> list[pb.LapTimingRow]:
+    return [pb.LapTimingRow(d, lap, s, e) for (d, lap), (s, e) in times.items()]
+
+
 def _data(**overrides: Any) -> pb.PlaybackData:
     data = pb.PlaybackData(SESSION, 2026, 9, 20, 21)
-    data.lap_timings = [pb.LapTimingRow(d, lap, s, e) for (d, lap), (s, e) in TIMES.items()]
-    data.gap_snapshots = {19: {"lap": 19}, 20: {"lap": 20}, 21: {"lap": 21}}
+    data.lap_timings = _timings(TIMES)
+    data.gap_snapshots = {lap: _snapshot(A, B, C) for lap in (19, 20, 21)}
     data.lap_events = [_lap_event(d, lap) for d in (A, B, C) for lap in (19, 20, 21)]
     data.alerts = [pb.AlertRow(21, "UNDERCUT_THREAT", C, B, "Undercut threat: C on B (60.0%)")]
     for key, value in overrides.items():
@@ -68,22 +80,115 @@ def test_origin_without_any_first_lap_start_is_refused() -> None:
         pb.window_origin(_data(lap_timings=timings))
 
 
-# --- gaps ---
+# --- the timing tower (progress round the lap) ---
+
+
+def _tower_at(data: pb.PlaybackData, t: float) -> list[tuple[str, Any, int]]:
+    """(driver, gap to the car ahead, laps behind) in tower order at t."""
+    payload = pb.tower_gaps(pb.build_tower(data, 1000.0), t)
+    assert payload is not None
+    assert payload["source"] == "replay"
+    return [(g["driver_id"], g["gap_to_ahead_seconds"], g["laps_behind"]) for g in payload["gaps"]]
 
 
 @pytest.mark.unit
-def test_lap_before_snapshot_at_zero_then_each_lap_when_the_first_car_finishes() -> None:
-    events = pb.build_events(_data(), 1000.0)
+def test_progress_is_interpolated_between_line_crossings() -> None:
+    car = pb.CarProgress([(0.0, 19), (90.0, 20), (181.0, 21)], keeps_going=True)
 
-    # Lap 21: B crosses first (1180), before A (1181).
-    assert _at(events, pb.GAPS) == [(0.0, 19, None), (90.0, 20, None), (180.0, 21, None)]
+    assert car.laps_at(45.0) == pytest.approx(19.5)
+    assert car.laps_at(90.0) == pytest.approx(20.0)
+    assert car.laps_at(272.0) == pytest.approx(22.0)  # past the window, at its last pace
+    assert car.time_at(20.5) == pytest.approx(135.5)
 
 
 @pytest.mark.unit
-def test_a_snapshot_for_a_lap_nobody_finished_is_left_out() -> None:
-    timings = [t for t in _data().lap_timings if t.lap_number != 21]
-    events = pb.build_events(_data(lap_timings=timings), 1000.0)
-    assert [e.lap_number for e in events if e.kind == pb.GAPS] == [19, 20]
+def test_a_car_that_stopped_stays_where_it_last_crossed() -> None:
+    car = pb.CarProgress([(0.0, 19), (90.0, 20)], keeps_going=False)
+    assert car.laps_at(500.0) == pytest.approx(20.0)
+
+
+@pytest.mark.unit
+def test_tower_at_the_first_moment_and_gaps_are_time_to_reach_the_car_ahead() -> None:
+    """B is 2 s from the line, so 2.0 behind A. C needs 27.978 s, not 28, to
+    reach where B is now: it covers B's last 2 s of lap at its own, slower pace
+    (91 s laps against B's 90 s)."""
+    assert _tower_at(_data(), 0.0) == [(A, 0.0, 0), (B, 2.0, 0), (C, 27.978, 0)]
+
+
+@pytest.mark.unit
+def test_tower_follows_a_pass_at_the_line() -> None:
+    """B finishes lap 21 at 1180, before A at 1181."""
+    assert [d for d, _, _ in _tower_at(_data(), 180.5)] == [B, A, C]
+
+
+@pytest.mark.unit
+def test_a_slow_lap_drops_a_car_back_before_either_car_reaches_the_line() -> None:
+    """B pits on lap 20 (a 120 s lap): C, 28 s behind on a 91 s lap, passes it
+    at about 117.9 s, before B (122 s) or C (121 s) finishes lap 20."""
+    times = dict(TIMES)
+    times[(B, 20)] = (1002.0, 1122.0)
+    times[(B, 21)] = (1122.0, 1210.0)
+    data = _data(lap_timings=_timings(times))
+
+    assert [d for d, _, _ in _tower_at(data, 117.0)] == [A, B, C]
+    assert [d for d, _, _ in _tower_at(data, 119.0)] == [A, C, B]
+
+
+@pytest.mark.unit
+def test_a_retired_car_leaves_the_tower_once_the_leader_completes_a_lap_it_never_did() -> None:
+    times: dict[tuple[str, int], tuple[float | None, float | None]] = {
+        k: v for k, v in TIMES.items() if k[0] != C
+    }
+    times[(C, 20)] = (1030.0, None)  # stopped on track during lap 20
+    snapshots = {19: _snapshot(A, B, C), 20: _snapshot(A, B), 21: _snapshot(B, A)}
+    data = _data(lap_timings=_timings(times), gap_snapshots=snapshots)
+
+    assert [d for d, _, _ in _tower_at(data, 50.0)] == [A, B, C]
+    assert [d for d, _, _ in _tower_at(data, 95.0)] == [A, B]
+
+
+@pytest.mark.unit
+def test_a_car_a_lap_or_more_down_gets_laps_behind_instead_of_a_gap() -> None:
+    times = dict(TIMES)
+    times[(C, 20)] = (1030.0, 1300.0)  # a 270 s lap
+    times[(C, 21)] = (1300.0, 1391.0)
+    data = _data(lap_timings=_timings(times))
+
+    *_, (driver, gap, laps_behind) = _tower_at(data, 200.0)
+    assert (driver, gap, laps_behind) == (C, None, 1)
+
+
+@pytest.mark.unit
+def test_the_tower_shows_the_tyre_of_the_lap_each_car_is_on() -> None:
+    """B pits at the end of lap 20 (crosses at 92 s) and drives lap 21 on HARD:
+    the tower shows HARD from that line, not when lap 21 is completed (180 s)."""
+    laps = [
+        {**_lap_event(d, lap), "compound": "HARD" if (d, lap) == (B, 21) else "MEDIUM"}
+        for d in (A, B, C)
+        for lap in (19, 20, 21)
+    ]
+    tower = pb.build_tower(_data(lap_events=laps), 1000.0)
+
+    def tyres(t: float) -> dict[str, Any]:
+        payload = pb.tower_gaps(tower, t)
+        assert payload is not None
+        return {g["driver_id"]: g["compound"] for g in payload["gaps"]}
+
+    assert tyres(50.0) == {A: "MEDIUM", B: "MEDIUM", C: "MEDIUM"}
+    assert tyres(95.0) == {A: "MEDIUM", B: "HARD", C: "MEDIUM"}
+    assert tyres(300.0)[B] == "HARD"  # past the window: the last lap's tyre
+
+
+@pytest.mark.unit
+def test_no_tyre_is_shown_when_no_lap_carries_one() -> None:
+    payload = pb.tower_gaps(pb.build_tower(_data(), 1000.0), 50.0)
+    assert payload is not None
+    assert {g["compound"] for g in payload["gaps"]} == {None}
+
+
+@pytest.mark.unit
+def test_no_tower_before_any_car_has_crossed() -> None:
+    assert pb.tower_gaps(pb.build_tower(_data(lap_timings=[]), 1000.0), 0.0) is None
 
 
 # --- lap events ---
@@ -149,11 +254,10 @@ def test_an_alert_whose_driver_has_no_end_time_fires_when_the_first_car_finishes
 
 
 @pytest.mark.unit
-def test_same_moment_order_is_gaps_then_laps_then_alerts() -> None:
-    """At 0: the lap-before snapshot, then the lap-before lap events."""
+def test_at_the_first_moment_only_the_lap_before_lap_events_are_due() -> None:
     events = pb.build_events(_data(), 1000.0)
     at_zero = [e.kind for e in events if e.at == 0.0]
-    assert at_zero == [pb.GAPS, pb.LAP, pb.LAP, pb.LAP]
+    assert at_zero == [pb.LAP, pb.LAP, pb.LAP]
 
 
 @pytest.mark.unit
@@ -319,13 +423,15 @@ async def test_play_publishes_every_event_when_it_comes_due(fake: Any) -> None:
     assert (90.0, A, 20) in laps
     assert (212.0, C, 21) in laps
     assert all(ch == f"f1:telemetry:{SESSION}:laps" for _, ch, _ in client.published)
-    assert [(at, gaps["lap"]) for at, gaps in client.gaps_set] == [
-        (0.0, 19),
-        (90.0, 20),
-        (180.0, 21),
-    ]
+    # The tower every tick, 0 s to 212 s; B passes A on the line at 180 s.
+    assert [at for at, _ in client.gaps_set] == [float(s) for s in range(213)]
+    order = {at: [g["driver_id"] for g in gaps["gaps"]] for at, gaps in client.gaps_set}
+    assert order[0.0] == [A, B, C]
+    assert order[181.0] == [B, A, C]
     assert delivered == [(212.0, C)]
-    assert stats == pb.PlaybackStats(ticks=213, gaps=3, laps=9, alerts=1, alert_rows=3, failures=0)
+    assert stats == pb.PlaybackStats(
+        ticks=213, gaps=213, laps=9, alerts=1, alert_rows=3, failures=0
+    )
 
 
 @pytest.mark.unit

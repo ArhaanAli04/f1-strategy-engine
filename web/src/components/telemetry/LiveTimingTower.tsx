@@ -196,7 +196,9 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
           teamColor: driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR,
           lastLapSeconds: liveLap?.lap_time_seconds ?? latestRestLap?.lap_time_seconds ?? null,
           gapLabel: gapLabels[gap.driver_id] ?? "—",
-          compound: liveLap?.compound ?? latestRestLap?.compound ?? null,
+          // The tower's own current tyre first: it changes at the stop, while
+          // a lap's compound only arrives once the out-lap is completed.
+          compound: gap.compound ?? liveLap?.compound ?? latestRestLap?.compound ?? null,
         }
       })
   }, [gaps, driversById, lapsByDriver, latestLapByDriver, gapLabels])

@@ -4,8 +4,8 @@ get_driver_analysis uses a two-tier Redis cache, since services/ml/driver_style.
 PCA(4)->KMeans(5)->UMAP(2D) pipeline fits over an entire season's driver population,
 not one driver at a time:
 
-- f1:driver_style:fit:{season} (new key, TTL 3600s — not yet in CLAUDE.md's Redis
-  schema table, added here per Day 10 discussion) holds every driver's cluster
+- f1:driver_style:fit:{season} (TTL DRIVER_STYLE_FIT_TTL_SECONDS, default 3600s)
+  holds every driver's cluster
   assignment for that season. The first request for any driver in a season pays
   the fit cost once; every other driver that season hits this cache instead of
   triggering a refit.
@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.core.config import get_app_settings
 from backend.core.exceptions import NotFoundError
 from backend.models.driver import Driver, DriverContract
 from backend.models.race import Race
@@ -47,8 +48,6 @@ from backend.schemas.telemetry_schema import LapDataResponse
 from backend.services.cache_service import cache_get, cache_set, cacheable
 from backend.services.ml.driver_style import build_driver_style_features, fit_driver_style_clusters
 
-DRIVER_STYLE_FIT_TTL_SECONDS = 3600
-DRIVER_FINGERPRINT_TTL_SECONDS = 3600
 DEFAULT_PAGE_SIZE = 20
 # Static roster data (per CLAUDE.md's cache key schema "static data" bucket) —
 # no expiry, only invalidated by a manual cache_service delete if the roster
@@ -313,16 +312,12 @@ async def get_driver_analysis(
         population = await cache_get(redis_client, population_key)
         if population is None:
             population = await _fit_population(db, season)
-            await cache_set(
-                redis_client, population_key, population, ttl=DRIVER_STYLE_FIT_TTL_SECONDS
-            )
+            # A full UMAP fit on the web machine; production caches it far
+            # longer than the 3600 s default (DRIVER_STYLE_FIT_TTL_SECONDS).
+            fit_ttl = get_app_settings().driver_style_fit_ttl_seconds
+            await cache_set(redis_client, population_key, population, ttl=fit_ttl)
             for row in population:
-                await cache_set(
-                    redis_client,
-                    _fingerprint_key(row["driver_id"]),
-                    row,
-                    ttl=DRIVER_FINGERPRINT_TTL_SECONDS,
-                )
+                await cache_set(redis_client, _fingerprint_key(row["driver_id"]), row, ttl=fit_ttl)
 
         style = next((row for row in population if row["driver_id"] == str(driver_id)), None)
         if style is None:

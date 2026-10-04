@@ -1,7 +1,9 @@
 import { useLayoutEffect, useMemo, useRef } from "react"
 import { useQueries } from "@tanstack/react-query"
+import { Info } from "lucide-react"
 import { driverLapsQueryOptions } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { cn } from "@/lib/utils"
 import { useLiveRaceSelectionStore } from "@/stores/liveRaceSelectionStore"
@@ -141,21 +143,19 @@ function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
   return labels
 }
 
-// Desktop has no WebSocket telemetry wiring (see CLAUDE.md's Day 30 Desktop
-// Sync Protocol / CircuitMapPanel's same "needs live ingestor" note) — this
-// is REST-fallback-only, unlike web's version which prefers a live
-// useLiveTelemetry sample and falls back to REST. Gaps still poll every 8s
-// and driver laps every 10s, so this stays reasonably current without a WS
-// connection.
 export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
   const { data: drivers } = useDrivers()
   const { data: gapsResponse, isLoading: gapsLoading } = useSessionGaps(sessionId)
+  const { lapsByDriver, staleConnection } = useLiveTelemetry(sessionId)
   const selectedDriverId = useLiveRaceSelectionStore((state) => state.selectedDriverId)
   const setSelectedDriver = useLiveRaceSelectionStore((state) => state.setSelectedDriver)
 
   const gaps = useMemo(() => gapsResponse?.gaps ?? [], [gapsResponse])
   const driverIds = useMemo(() => gaps.map((gap) => gap.driver_id), [gaps])
 
+  // REST fallback for compound/lap time before the WS has delivered a live
+  // event for this driver yet. Shares its react-query cache entry with
+  // SectorHeatmap's per-driver queries via the same query key.
   const lapsQueries = useQueries({
     queries: driverIds.map((driverId) => driverLapsQueryOptions(sessionId, driverId)),
   })
@@ -187,18 +187,21 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
       .sort((a, b) => a.position - b.position)
       .map((gap) => {
         const driver = driversById.get(gap.driver_id)
-        const latestLap = latestLapByDriver.get(gap.driver_id)
+        const liveLap = lapsByDriver[gap.driver_id]
+        const latestRestLap = latestLapByDriver.get(gap.driver_id)
         return {
           driverId: gap.driver_id,
           position: gap.position,
           code: driver?.code ?? "???",
           teamColor: driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR,
-          lastLapSeconds: latestLap?.lap_time_seconds ?? null,
+          lastLapSeconds: liveLap?.lap_time_seconds ?? latestRestLap?.lap_time_seconds ?? null,
           gapLabel: gapLabels[gap.driver_id] ?? "—",
-          compound: latestLap?.compound ?? null,
+          // The tower's own current tyre first: it changes at the stop, while
+          // a lap's compound only arrives once the out-lap is completed.
+          compound: gap.compound ?? liveLap?.compound ?? latestRestLap?.compound ?? null,
         }
       })
-  }, [gaps, driversById, latestLapByDriver, gapLabels])
+  }, [gaps, driversById, lapsByDriver, latestLapByDriver, gapLabels])
 
   // FLIP-style reorder animation (adapted from sab-f1-ui's timing-tower CSS
   // approach): DOM rows stay keyed by driver_id across re-sorts, so on
@@ -216,6 +219,9 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
       newTops.set(driverId, el.getBoundingClientRect().top)
     })
 
+    // Reduced motion: still reorder (rows are already in their new DOM
+    // position by this point), just skip the animated glide between old
+    // and new spots.
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
     if (!prefersReducedMotion) {
       rowRefs.current.forEach((el, driverId) => {
@@ -260,6 +266,20 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
 
   return (
     <div className="flex h-full flex-col overflow-y-auto">
+      {/* Connected but quiet for 30s+ — worker/beat are likely scaled to 0
+          between race weekends (Day 40 hybrid deployment, see fly.toml).
+          Informational, not an error — same blue-toned treatment as
+          HistoricalDataBanner. Note: if `sessionId` resolves to a
+          completed/historical session rather than a genuinely live one,
+          this can show alongside that page-level banner; left as-is since
+          both are accurate for that case, not worth extra plumbing to
+          suppress one. */}
+      {staleConnection && (
+        <div className="flex items-center gap-2 border-b border-blue-900/40 bg-blue-950/40 px-4 py-2 text-sm text-blue-200">
+          <Info className="h-4 w-4 flex-shrink-0" />
+          <span>No live race data. Showing last completed race. Live timing is active during race weekends.</span>
+        </div>
+      )}
       {rows.map((row) => (
         <div
           key={row.driverId}
@@ -274,6 +294,13 @@ export function LiveTimingTower({ sessionId }: LiveTimingTowerProps) {
             if (event.key === "Enter" || event.key === " ") setSelectedDriver(row.driverId)
           }}
           className={cn(
+            // flex + justify-between with every field fixed-width: each
+            // field claims exactly its own space and justify-between
+            // distributes the leftover evenly between them, so there's no
+            // single large gap anywhere and the tyre icon (last field)
+            // lands flush against the row's right edge. Row height
+            // (py-1.5) is unchanged. Lap time was dropped — already shown
+            // in SectorHeatmap, redundant here.
             "flex cursor-pointer items-center justify-between border-b px-1.5 py-1.5 text-xs",
             row.driverId === selectedDriverId ? "bg-accent" : "hover:bg-muted/50",
           )}

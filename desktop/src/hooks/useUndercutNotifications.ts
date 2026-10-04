@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useNeighborDrivers } from "@/hooks/useNeighborDrivers"
-import { useUndercut } from "@/hooks/useStrategy"
+import { useRaceSession } from "@/hooks/useRaceSession"
+import { useCurrentLapHistoryEntry, useUndercut } from "@/hooks/useStrategy"
 import { useRaceContextStore } from "@/stores/raceContextStore"
 
 const THREAT_THRESHOLD = 0.7
@@ -16,7 +17,7 @@ const THREAT_THRESHOLD = 0.7
 //   (sessionId, carBehind, thisDriver) — driver/target swapped, since the
 //   probability has to be computed from the behind car's perspective.
 export function useUndercutNotifications(): void {
-  const sessionId = useRaceContextStore((state) => state.sessionId)
+  const { sessionId } = useRaceSession()
   const driverId = useRaceContextStore((state) => state.driverId)
 
   const { data: drivers } = useDrivers()
@@ -29,8 +30,23 @@ export function useUndercutNotifications(): void {
 
   const { aheadId, behindId } = useNeighborDrivers(sessionId, driverId)
 
-  const opportunity = useUndercut(sessionId, driverId, aheadId)
-  const threat = useUndercut(sessionId, behindId, driverId)
+  // During a Demo Replay (lap events arriving on the WebSocket) the stored
+  // prediction for the current lap is used, as UndercutThreatPanel does:
+  // undercut_score is the opportunity against the car ahead, and the car
+  // behind's chance of jumping this driver is 1 - overcut_score. The live
+  // endpoint is then not called, so a replay runs no ML on the web machine.
+  const { entry: historyEntry, isReplayActive } = useCurrentLapHistoryEntry(sessionId, driverId)
+  const opportunity = useUndercut(sessionId, driverId, aheadId, !isReplayActive)
+  const threat = useUndercut(sessionId, behindId, driverId, !isReplayActive)
+
+  const opportunityProbability = isReplayActive
+    ? (historyEntry?.undercut_score ?? null)
+    : (opportunity.data?.probability_pit_now_gains_position ?? null)
+  const threatProbability = isReplayActive
+    ? historyEntry
+      ? 1 - historyEntry.overcut_score
+      : null
+    : (threat.data?.probability_pit_now_gains_position ?? null)
 
   // Tracks which threat/opportunity pairings have already fired a
   // notification while their probability stays above THREAT_THRESHOLD —
@@ -39,9 +55,9 @@ export function useUndercutNotifications(): void {
   const firedRef = useRef<Set<string>>(new Set())
 
   useEffect(() => {
-    if (!opportunity.data || !aheadId || !driverId) return
+    if (opportunityProbability === null || !aheadId || !driverId) return
     const key = `opportunity:${sessionId}:${driverId}:${aheadId}`
-    const probability = opportunity.data.probability_pit_now_gains_position
+    const probability = opportunityProbability
     if (probability > THREAT_THRESHOLD) {
       if (firedRef.current.has(key)) return
       firedRef.current.add(key)
@@ -54,12 +70,12 @@ export function useUndercutNotifications(): void {
     } else {
       firedRef.current.delete(key)
     }
-  }, [opportunity.data, aheadId, sessionId, driverId, codeById])
+  }, [opportunityProbability, aheadId, sessionId, driverId, codeById])
 
   useEffect(() => {
-    if (!threat.data || !behindId || !driverId) return
+    if (threatProbability === null || !behindId || !driverId) return
     const key = `threat:${sessionId}:${driverId}:${behindId}`
-    const probability = threat.data.probability_pit_now_gains_position
+    const probability = threatProbability
     if (probability > THREAT_THRESHOLD) {
       if (firedRef.current.has(key)) return
       firedRef.current.add(key)
@@ -72,5 +88,5 @@ export function useUndercutNotifications(): void {
     } else {
       firedRef.current.delete(key)
     }
-  }, [threat.data, behindId, sessionId, driverId, codeById])
+  }, [threatProbability, behindId, sessionId, driverId, codeById])
 }

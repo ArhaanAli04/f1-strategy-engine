@@ -2896,3 +2896,115 @@ async def test_encoding_maps_for_database_resolves_a_driver_from_another_databas
     medium = maps["tire_deg_medium.pkl"]
     assert medium is not None
     assert tire_deg_model.resolve_driver_code(medium, str(prod_ver)) == 19
+
+
+# --- _strategy_cache_ttl: long TTL only for a finished race (demo deployment Day 6) ---
+
+_LONG_TTL = 86400
+
+
+def _with_long_ttl(monkeypatch: pytest.MonkeyPatch, seconds: int = _LONG_TTL) -> None:
+    monkeypatch.setattr(
+        strategy_service,
+        "get_app_settings",
+        lambda: MagicMock(completed_session_strategy_ttl_seconds=seconds),
+    )
+
+
+def _race_status(db: AsyncMock, status: str | None) -> None:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = status
+    db.execute.return_value = result
+
+
+@pytest.mark.unit
+async def test_strategy_ttl_is_long_for_a_completed_race(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_long_ttl(monkeypatch)
+    _race_status(mock_db_session, "completed")
+
+    ttl = await strategy_service._strategy_cache_ttl(
+        fakeredis, mock_db_session, 2026, 10, uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert ttl == _LONG_TTL
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", ["scheduled", None])
+async def test_strategy_ttl_stays_short_for_a_race_not_completed(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str | None,
+) -> None:
+    _with_long_ttl(monkeypatch)
+    _race_status(mock_db_session, status)
+
+    ttl = await strategy_service._strategy_cache_ttl(fakeredis, mock_db_session, 2026, 12)
+
+    assert ttl == strategy_service.STRATEGY_TTL_SECONDS
+
+
+@pytest.mark.unit
+async def test_strategy_ttl_stays_short_while_gaps_are_live_even_if_completed(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Demo Replay of a finished race writes the live gaps key.
+    _with_long_ttl(monkeypatch)
+    _race_status(mock_db_session, "completed")
+    await fakeredis.set("f1:2026:10:gaps", json.dumps({"gaps": []}))
+
+    ttl = await strategy_service._strategy_cache_ttl(fakeredis, mock_db_session, 2026, 10)
+
+    assert ttl == strategy_service.STRATEGY_TTL_SECONDS
+    mock_db_session.execute.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_strategy_ttl_stays_short_when_not_configured(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _with_long_ttl(monkeypatch, 0)
+    _race_status(mock_db_session, "completed")
+
+    ttl = await strategy_service._strategy_cache_ttl(fakeredis, mock_db_session, 2026, 10)
+
+    assert ttl == strategy_service.STRATEGY_TTL_SECONDS
+    mock_db_session.execute.assert_not_called()
+
+
+@pytest.mark.unit
+async def test_strategy_ttl_falls_back_to_short_if_the_database_fails(
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    mock_db_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    _with_long_ttl(monkeypatch)
+    mock_db_session.execute.side_effect = OperationalError("SELECT", {}, Exception("db down"))
+
+    ttl = await strategy_service._strategy_cache_ttl(fakeredis, mock_db_session, 2026, 10)
+
+    assert ttl == strategy_service.STRATEGY_TTL_SECONDS
+
+
+@pytest.mark.unit
+async def test_strategy_ttl_falls_back_to_short_if_redis_fails(
+    mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _with_long_ttl(monkeypatch)
+    broken = MagicMock()
+    broken.get = AsyncMock(side_effect=RedisError("down"))
+
+    ttl = await strategy_service._strategy_cache_ttl(broken, mock_db_session, 2026, 10)
+
+    assert ttl == strategy_service.STRATEGY_TTL_SECONDS

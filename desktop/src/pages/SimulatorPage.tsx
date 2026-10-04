@@ -2,8 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Check, Download, Trash2 } from "lucide-react"
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import { toast } from "sonner"
+import { useCurrentRace } from "@/hooks/useCurrentRace"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
+import { useLastIngestedSession } from "@/hooks/useLastIngestedSession"
+import { useSessionGaps } from "@/hooks/useSessionGaps"
 import {
   useSimulateStrategy,
   useSimulationQuota,
@@ -285,12 +288,20 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
 }
 
 export function SimulatorPage() {
-  // Pre-filled from the race context set in the main app shell (App.tsx) —
-  // desktop has no RacePage/route to carry a sessionId of its own, and no
-  // useCurrentRace live-mode detection (that's web-only), so this is the
-  // single source of truth, still editable rather than assumed.
-  const contextSessionId = useRaceContextStore((state) => state.sessionId)
+  // Session, as on web's SimulatorPage: the live race when one is running
+  // and has data, otherwise the most recently ingested race — both resolved
+  // by the backend, shown read-only, nothing to type. Desktop adds one
+  // thing: the Dashboard's session override, when set, wins (the same
+  // override every desktop page follows, see useRaceSession).
+  const sessionOverride = useRaceContextStore((state) => state.sessionOverride)
   const contextDriverId = useRaceContextStore((state) => state.driverId)
+  const { data: currentRace } = useCurrentRace()
+  const liveRaceSession = currentRace?.sessions.find((s) => s.session_type === "R")
+  const liveSessionGaps = useSessionGaps(liveRaceSession?.id ?? null)
+  const isLiveSessionMode =
+    !sessionOverride && Boolean(liveRaceSession) && (liveSessionGaps.data?.gaps.length ?? 0) > 0
+  const lastIngestedQuery = useLastIngestedSession(!sessionOverride && !isLiveSessionMode)
+  const lastIngestedSession = lastIngestedQuery.data
   const { data: drivers } = useDrivers()
   // GET /drivers returns every driver ever ingested, including retired
   // historical ones with no current-season contract — same filter as
@@ -307,7 +318,10 @@ export function SimulatorPage() {
   }, [drivers])
 
   const [step, setStep] = useState<Step>(1)
-  const [sessionId, setSessionId] = useState(contextSessionId ?? "")
+  const resolvedSessionId =
+    sessionOverride ??
+    (isLiveSessionMode ? (liveRaceSession?.id ?? null) : (lastIngestedSession?.session_id ?? null))
+  const sessionId = resolvedSessionId ?? ""
   const [driverId, setDriverId] = useState(contextDriverId ?? "")
   const [currentLap, setCurrentLap] = useState(1)
   const [currentCompound, setCurrentCompound] = useState("MEDIUM")
@@ -472,12 +486,39 @@ export function SimulatorPage() {
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="sessionId">Session</Label>
-              <Input
+              <div
                 id="sessionId"
-                value={sessionId}
-                onChange={(e) => setSessionId(e.target.value)}
-                placeholder="Session UUID"
-              />
+                className="flex h-9 items-center gap-2 rounded-md border bg-muted/30 px-3 text-sm"
+              >
+                {sessionOverride ? (
+                  <>
+                    <span className="truncate font-mono text-xs text-foreground">
+                      {sessionOverride}
+                    </span>
+                    <span className="flex-shrink-0 text-xs text-muted-foreground">
+                      (override set on the Dashboard)
+                    </span>
+                  </>
+                ) : isLiveSessionMode ? (
+                  <span className="text-foreground">
+                    {currentRace?.event_name ?? currentRace?.circuit?.name ?? "Current race"} — Race
+                  </span>
+                ) : lastIngestedSession ? (
+                  <>
+                    <span className="text-foreground">
+                      {lastIngestedSession.event_name ?? lastIngestedSession.circuit_name} —{" "}
+                      {lastIngestedSession.season} Round {lastIngestedSession.round_number}
+                    </span>
+                    <span className="text-xs text-muted-foreground">(last ingested race)</span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground">
+                    {lastIngestedQuery.isLoading
+                      ? "Resolving last ingested race…"
+                      : "No ingested race available"}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="driverId">Driver</Label>
@@ -735,15 +776,14 @@ export function SimulatorPage() {
       {step === 3 && (
         <Card>
           <CardContent className="flex flex-col items-center gap-4 py-12">
-            {/* worker offline outside race weekends (Day 40 hybrid
-                deployment, see fly.toml) — a task enqueued then never
-                resolves, so useSimulationResult's timedOut swaps this in
-                after 60s instead of spinning forever. Mirrors
+            {/* The worker starts on demand in production (about a minute
+                from cold), so a slow first result is normal; slowStart says
+                so after a few seconds. timedOut (3 min) means it never
+                started: stop waiting rather than spin forever. Mirrors
                 web/src/pages/SimulatorPage.tsx. */}
             {simulationResult.data?.status !== "FAILURE" && simulationResult.timedOut ? (
               <p className="max-w-sm text-center text-sm text-muted-foreground">
-                Strategy simulation requires an active race weekend. The worker is currently
-                offline — scale up before the next race to enable this feature.
+                The simulation engine didn&apos;t respond in time. Please try again in a minute.
               </p>
             ) : (
               <>
@@ -751,8 +791,13 @@ export function SimulatorPage() {
                 <p className="text-sm text-muted-foreground">
                   {simulationResult.data?.status === "FAILURE"
                     ? (simulationResult.data.error ?? "Simulation failed.")
-                    : `Running Monte Carlo simulation… (${simulationResult.data?.status ?? "PENDING"})`}
+                    : "Running Monte Carlo simulation…"}
                 </p>
+                {simulationResult.data?.status !== "FAILURE" && simulationResult.slowStart && (
+                  <p className="max-w-sm text-center text-xs text-muted-foreground">
+                    If the simulation engine was asleep, it takes about a minute to start.
+                  </p>
+                )}
               </>
             )}
             {(simulationResult.data?.status === "FAILURE" || simulationResult.timedOut) && (

@@ -369,6 +369,43 @@ def test_retired_car_is_left_out_of_the_published_standings() -> None:
     assert [(e["driver_id"], e["position"]) for e in payload["gaps"]] == [("d1", 1), ("d3", 2)]
 
 
+@pytest.mark.unit
+def test_published_standings_carry_each_cars_current_tyre(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tyre comes from TimingAppData's current stint, so a new tyre shows
+    from the stop instead of when the out-lap is completed (Day 6b)."""
+    # A new stint is also recorded through Celery; stubbed so the test never
+    # reaches a broker (CI has no Redis: the real .delay retried and failed).
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        ingest_live_session.record_tire_stint, "delay", lambda payload: dispatched.append(payload)
+    )
+    redis_mock = MagicMock()
+    ingestor = ingest_live_session.F1SignalRIngestor(
+        season=2026,
+        round_number=13,
+        session_id="s",
+        car_number_to_driver_id={"1": "d1", "2": "d2"},
+        driver_code_to_id={},
+        redis_client=redis_mock,
+        no_auth=True,
+    )
+    ingestor._car_live_gap_state = {"1": _gap_state(1, None), "2": _gap_state(2, 5.0)}
+    ingestor._handle_timing_app_data(
+        {"Lines": {"1": {"Stints": [{"Compound": "MEDIUM"}, {"Compound": "hard"}]}}}
+    )
+
+    ingestor._publish_live_gaps()
+
+    payload = json.loads(redis_mock.setex.call_args.args[2])
+    assert [(e["driver_id"], e["compound"]) for e in payload["gaps"]] == [
+        ("d1", "HARD"),
+        ("d2", None),  # no stint seen yet for car 2
+    ]
+    assert [(p["driver_id"], p["compound"]) for p in dispatched] == [("d1", "HARD")]
+
+
 # --- final standings (gaps:final), written once the leader has finished ---
 
 

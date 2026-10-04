@@ -181,6 +181,33 @@ SIM_DAILY_SCENARIOS_PER_USER, SIM_DAILY_SCENARIOS_GLOBAL
                       local development is never limited; production sets 5 and 15. Over a limit,
                       POST /simulate returns 429 QUOTA_EXCEEDED with Retry-After; GET
                       /strategy/simulate/quota shows what is left.
+WORKER_IDLE_EXIT_MINUTES
+                      Minutes the Celery worker may run with no task before it stops itself
+                      (SIGTERM to itself: Celery's warm shutdown, exit code 0, so Fly's on-failure
+                      policy leaves the machine stopped). Default 0 = off, so the local worker never
+                      stops; production sets 10. Never exits mid-task. Any task restarts the clock,
+                      including beat's 5-minute check_for_live_session, so it only works with no
+                      beat process running (production has none). See workers/idle_shutdown.py.
+COMPLETED_SESSION_STRATEGY_TTL_SECONDS
+                      Seconds the race page's strategy answers (pit window, undercut, overcut,
+                      strategy wall) stay cached for a race whose status is "completed" and with no
+                      live gaps key (no live ingestion or Demo Replay writing it). Default 0 = 30 s for
+                      every race, as before; production sets a day. They are ML computed on the web
+                      machine. strategy_service._strategy_cache_ttl decides, on each cache miss. Run
+                      warm_strategy_cache.py --session-id <race page session> after a deploy.
+DRIVER_STYLE_FIT_TTL_SECONDS
+                      Seconds a season's driver-style fit (a full UMAP fit on the web machine) and
+                      every driver's fingerprint stay cached. Default 3600; production sets longer, as
+                      a season only changes when a race is ingested.
+FLY_WORKER_AUTOSTART  true | false. Default false (nothing is called locally). When true, POST
+                      /strategy/{session_id}/simulate asks Fly's Machines API to start the stopped
+                      worker machine after queueing (core/fly_machines.py): found by its
+                      fly_process_group metadata (FLY_WORKER_PROCESS_GROUP, default "worker"), skipped
+                      if one is already started/starting. Never fails the request: a failed start is
+                      logged and the queued task runs on the next worker start; the quota is not
+                      refunded. Needs FLY_API_TOKEN (a Fly secret) and FLY_APP_NAME.
+                      FLY_API_HOSTNAME defaults to http://_api.internal:4280, Fly's private-network
+                      API, reachable only from a Fly machine.
 FLY_APP_NAME          Set by Fly.io itself on every machine; never set it by hand. When present,
                       core/rate_limit.py takes a logged-out visitor's IP from Fly's Fly-Client-IP
                       header (Fly overwrites any client-sent value) instead of the proxy's address.
@@ -212,6 +239,21 @@ endpoint, `failureThreshold: 30, periodSeconds: 10`) gates liveness/
 readiness until the app is actually up — the standard Kubernetes pattern
 for slow-starting containers, rather than inflating livenessProbe's own
 initialDelaySeconds.
+
+**Update (2026-10-02, demo deployment Day 6): cold start is now ~15-20 s
+locally.** Most of the 88 s was `umap` being imported at boot (via
+`driver_style.py`), which makes Numba compile `pynndescent`: ~50 CPU-seconds
+on an empty cache. `umap` is now imported only inside the driver-style fit,
+and both Dockerfiles bake Numba's compiled code into the image
+(`NUMBA_CACHE_DIR=/app/numba_cache`, `NUMBA_CPU_NAME=generic`, built by
+`backend/scripts/warm_numba_cache.py`). Measured in fresh containers: import
+of `backend.main` 64-68 s → 14.7 s CPU; container recreate to healthy
+`/health` 14-19 s. The first driver-style fit now pays the `umap` import
+(~25 s, all compiled code loaded from the image). The startupProbe above is
+left at 300 s: it only matters for the local Kubernetes deployment, and
+production (Fly) timing is measured on Day 7. A unit test
+(`test_startup_imports_do_not_load_umap`) fails if `umap` creeps back into
+startup.
 
 **Monte Carlo simulator fixes (feature/monte-carlo-fix):**
 1. cumulative_race_time_seconds anchored to current_lap 
@@ -385,9 +427,9 @@ wired as of Day 11 via the run_race_simulation Celery task
 
 ```
 f1:{season}:{round}:car:{driver_num}:latest                  TTL: 8s       (live telemetry per car)
-f1:{season}:{round}:gaps                                     TTL: 8s       (all driver gaps)
+f1:{season}:{round}:gaps                                     TTL: 8s       (all driver gaps — the timing tower. Each entry may carry "compound", the car's current tyre, since 2026-10-04: live ingestor and Demo Replay playback set it; DB-reconstructed gaps don't)
 f1:{season}:{round}:gaps:final                               TTL: 30 days  (2026-09-26 — the finishing order on the road, "source": "final". Written by ingest_live_session.py's _publish_live_gaps only once the leader has completed TotalLaps, then kept current as the rest of the field finishes. get_session_gaps serves it after the live gaps key lapses; race_service reads its existence as "race concluded", so it must never be written mid-race. Not matched by live_race_detection.)
-f1:{season}:{round}:strategy:{driver_id}:pit_window          TTL: 30s      (optimal pit window prediction)
+f1:{season}:{round}:strategy:{driver_id}:pit_window          TTL: 30s      (optimal pit window prediction. This key, undercut, overcut and competitors: COMPLETED_SESSION_STRATEGY_TTL_SECONDS instead of 30 s for a completed race with no live gaps key, when set; 2026-10-02, demo deployment Day 6)
 f1:{season}:{round}:strategy:{driver_id}:undercut:{target}   TTL: 30s      (undercut score vs target driver; + ":lap:{n}" when scored as of lap n — per-lap predictions pass their own lap so a replay of an ingested race is not scored from the race's end, 2026-09-26. Its ":last_good" copy expires after 86400s, unlike other @cacheable keys, because the per-lap keys are unbounded: without it one live race left 1,860 permanent keys)
 f1:{season}:{round}:strategy:{driver_id}:overcut:{target}    TTL: 30s      (overcut score vs target driver; + ":lap:{n}" as for undercut)
 f1:{season}:{round}:strategy:competitors                     TTL: 30s      (all drivers predicted pit windows)
@@ -395,7 +437,7 @@ f1:{season}:{round}:telemetry:{driver_id}:history:{last_n}   TTL: 15s      (lap 
 f1:{season}:{round}:driver:{driver_id}:car_number            TTL: session  (driver_id → car_number mapping)
 f1:{season}:{round}:weather:latest                            TTL: 60s      (live track_temp/air_temp, written by ingest_live_session.py's WeatherData handler)
 f1:driver:{driver_id}:fingerprint                            TTL: 3600s    (driver style profile — season-level archetype/cluster/UMAP; written as a side effect of the population fit below, see driver_service.get_driver_analysis)
-f1:driver_style:fit:{season}                                  TTL: 3600s    (cached population-level PCA(4)->KMeans(5)->UMAP(2D) fit for driver_service.py's driver-style analysis endpoint — avoids refitting for every driver requested in the same season, see services/driver_service.py)
+f1:driver_style:fit:{season}                                  TTL: DRIVER_STYLE_FIT_TTL_SECONDS, default 3600s, as is the fingerprint key above    (cached population-level PCA(4)->KMeans(5)->UMAP(2D) fit for driver_service.py's driver-style analysis endpoint — avoids refitting for every driver requested in the same season, see services/driver_service.py)
 f1:race:{race_id}:detail                                          TTL: 86400s   (race + circuit + sessions, now wired Day 13)
 f1:race:{race_id}:session:{session_id}:detail                     TTL: 86400s   (single session lookup)
 f1:race:by_session:{session_id}:detail                            TTL: 86400s   (Day 43: resolves a session_id to its own race+circuit, for Circuit Map Panel — see race_service.get_race_by_session)
@@ -1430,8 +1472,19 @@ happen), or was found already fixed and moved into ### Notes below instead.
   StyleRadar}.tsx` onto `app/driver/[id].tsx`. Post-v1.0.0 polish, not
   blocking.
 
-- **[deferred — desktop sync] Strategy Simulator "last ingested race"
-  session source is web-only.** `web/` now replaces the manual "Session
+- **[✅ done 2026-10-04, Day 6b CP3 + CP5] Strategy Simulator "last ingested race"
+  session source is web-only.** Day 6b CP5 added web's Demo Replay selector
+  to desktop's race page; `useRaceSession` follows a running replay's
+  session (override → replay → automatic). Day 6b CP3: every desktop page now uses
+  `hooks/useRaceSession.ts` (a typed Dashboard override, else web's
+  `useResolvedSession`, copied), and the Simulator shows the live or last
+  ingested race read-only, like web. Override and "your driver" are saved
+  across restarts (`raceContextStore`, zustand `persist`). Original entry:
+  Owner decision 2026-10-02: desktop should
+  pick its session by itself like web on every page (not only the
+  Simulator), get web's Demo Replay selector, and save the choice; today its
+  pages are empty until a session UUID is typed on the Dashboard. See
+  `docs/internal/demo-deployment-plan-2026.md`'s Day 6b. `web/` now replaces the manual "Session
   UUID" text input on `SimulatorPage` with a read-only display sourced from
   `GET /strategy/last-ingested-session` (`useLastIngestedSession`) when no
   race is live — auto-selecting the newest-race_date R session with lap
@@ -1691,6 +1744,55 @@ happen), or was found already fixed and moved into ### Notes below instead.
   or genuine live message timing/interleaving quirks, all only exercisable
   against F1's real feed. Re-run against a genuine live race once one occurs.
 
+- **[deferred — scheduled as demo deployment Day 6c, before Day 7] The
+  pit-window recommendation engine gives recommendations that contradict
+  real strategy and the F1 rules.** Found 2026-10-04 in the Day 6b visual
+  check (Belgian GP replay). Over 200 stored recommendations:
+  - it never offers "no further stop" (ANT told to stop again although he
+    one-stopped; 15 of 22 drivers one-stopped);
+  - HARD is never recommended (0 of 200 vs 12 of 15 real stops; likely the
+    known `tire_deg_hard.pkl` fresh-tyre error);
+  - it ignores the two-compound rule (45 of 200 recommend the fitted
+    compound);
+  - SOFT is recommended for 27-lap stints;
+  - 149 of 200 windows are one lap, and some sit on the 15-lap search
+    limit;
+  - the "close call" wording and the "lagging indicator" caption are
+    misleading;
+  - undercut shows 100% right after a stop.
+
+  Full write-up, evidence, causes and proposed work:
+  `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". After the fix,
+  replay data must be recomputed (`precompute_replay`, local then Supabase).
+- **[partly fixed Day 6b; pit-lap remainder scheduled for Day 6c] The timing tower lags
+  the circuit map around pit stops.** Remainder (2026-10-04): the
+  progress interpolation spreads a pit lap's pit-lane loss over the whole
+  lap, so VER dropped behind LEC ~90 s before his real pit entry; the fix
+  (in-lap/out-lap handling) is item 8 of the plan doc's "Day 6c". Found 2026-10-02 in the Day 6 visual
+  check (Belgian GP replay, VER's lap-17 pit).
+  - **Order and gaps (✅ fixed in playback 2026-10-04, Day 6b CP1):** in a
+    Demo Replay they changed once per lap, when the leader crossed the line,
+    while the map moves every second. VER showed P4 in the tower for ~2
+    minutes after the map showed him around P6. `replay_playback.py` now
+    ranks by progress round the lap every second: PIA and NOR go ahead of VER
+    31 s and 43 s after his pit entry instead of 120 s. `replay_pipeline.py`
+    (local, worker-based replays) is unchanged.
+  - **Tyre icon (✅ fixed 2026-10-04, Day 6b CP2):** `LiveTimingTower` used
+    the compound of each driver's latest *completed* lap, so a new tyre
+    appeared only when the out-lap completed, ~1 lap after the stop, live
+    races included.
+    - **The fix:** each tower entry (`DriverGap`) gained an optional
+      `compound`, the tyre the car is on now. It is additive, so older
+      clients ignore it.
+    - **Who sets it:** the live ingestor from TimingAppData's current stint,
+      and playback from the lap the car is on.
+    - **Who uses it:** web's and desktop's towers and desktop's overlay use
+      it first. Mobile is unchanged.
+    - **Result, Belgian window:** all 15 tyre changes now show at pit entry,
+      124-145 s earlier.
+  - **Plan and data:** `docs/internal/demo-deployment-plan-2026.md`,
+    "Follow-up before Day 7": re-rank at every line crossing during playback,
+    and send a compound change at pit exit.
 - **[deferred — model limitation, low priority] `_current_tyre_age`'s
   live-path derivation always resets a new stint to `tyre_age_laps=1`, but
   a real stint can start on an already-used tyre set.** Confirmed via
@@ -1729,8 +1831,15 @@ Day 4 — `docs/internal/demo-deployment-plan-2026.md`):**
   - car numbers once (`replay_car_numbers`);
   - positions at 1 Hz (`driver_positions`, placed on the session clock by
     `replay_lap_timings.lap_start_seconds`);
-  - gap snapshot N (`replay_gap_snapshots`) when the first car finishes lap N,
-    and the lap-before snapshot at the first moment;
+  - the timing tower every second (since 2026-10-04, Day 6b): cars ranked by
+    progress round the lap, interpolated between their stored line crossings
+    (`replay_lap_timings`), with each gap the time the car behind needs to
+    reach where the car ahead is now. `replay_gap_snapshots` gives only the
+    starting order and which cars are still running. It replaced one stored
+    snapshot per lap, published when the leader finished it, which left a
+    pitting car's tower place up to two minutes behind the map
+    (`replay_playback.tower_gaps`; `replay_pipeline.py` still publishes per
+    lap);
   - each driver's `process_lap`-shaped lap event (from `lap_data`) when they
     really finished the lap, plus every driver's lap-before event at the first
     moment, so the race page switches to stored predictions at once instead of
@@ -2865,11 +2974,18 @@ Titillium Web font files, and `favicon.svg`. `pages/SimulatorPage.tsx` is
 copied-and-adapted (live-mode detection removed, session/driver source
 switched to `raceContextStore`, desktop-only CSV export button added) —
 diff against web rather than blind-overwriting on sync. Hooks are
-deliberately **not** copied (window-management/native-API concerns differ
+mostly **not** copied (window-management/native-API concerns differ
 per platform) — `desktop/src/hooks/{useDrivers,useSessionGaps,
-useDriverLaps,useStrategy,useAuth}.ts` are hand-written re-implementations
+useDriverLaps,useAuth,useCurrentRace}.ts` are hand-written re-implementations
 of the same react-query logic and can drift independently; check them too
-when the corresponding web hook changes.
+when the corresponding web hook changes. Since demo deployment Day 6b,
+hooks with no browser or window concern are copied byte-for-byte
+(`useResolvedSession`, `useLastIngestedSession`, `useLiveTelemetry`), and
+`useStrategy` is web's plus a 15 s `useUndercut` poll. Desktop's own
+`useWebSocket` (WebView `WebSocket`, hand-written backoff, no
+`reconnecting-websocket`) and `useRaceSession` (the session every page uses)
+have no verbatim web counterpart. Desktop now has a WebSocket and web's
+replay-aware panels and charts.
 
 ## Mobile Sync Protocol
 

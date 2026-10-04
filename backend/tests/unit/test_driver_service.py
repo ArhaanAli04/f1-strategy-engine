@@ -370,6 +370,42 @@ async def test_driver_analysis_uses_population_cache(
 
 
 @pytest.mark.unit
+async def test_driver_style_fit_is_cached_for_the_configured_ttl(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DRIVER_STYLE_FIT_TTL_SECONDS sets both the population and fingerprint keys' TTL."""
+    season, driver_id = 2026, uuid.uuid4()
+    monkeypatch.setattr(
+        driver_service,
+        "get_app_settings",
+        lambda: MagicMock(driver_style_fit_ttl_seconds=604800),
+    )
+    monkeypatch.setattr(
+        driver_service,
+        "_fit_population",
+        AsyncMock(return_value=[_population_row(driver_id, season)]),
+    )
+    mock_db_session.execute.side_effect = [
+        _scalar_one_or_none_result(season),
+        _scalar_one_or_none_result(None),
+    ]
+
+    await driver_service.get_driver_analysis(mock_db_session, fakeredis, driver_id, uuid.uuid4())
+
+    assert 3600 < await fakeredis.ttl(f"f1:driver_style:fit:{season}") <= 604800
+    assert 3600 < await fakeredis.ttl(f"f1:driver:{driver_id}:fingerprint") <= 604800
+
+
+@pytest.mark.unit
+def test_driver_style_fit_ttl_defaults_to_an_hour() -> None:
+    from backend.core.config import AppSettings
+
+    assert AppSettings().driver_style_fit_ttl_seconds == 3600
+
+
+@pytest.mark.unit
 async def test_unknown_driver_raises_not_found(
     mock_db_session: AsyncMock,
     fakeredis: fakeredis_lib.FakeAsyncRedis,

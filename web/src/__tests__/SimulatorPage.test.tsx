@@ -302,6 +302,52 @@ describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
   })
 })
 
+// Waiting for a worker that starts on demand (demo deployment Day 6).
+describe("SimulatorPage — waiting for the simulation engine", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    baseSetup()
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(vi.fn().mockResolvedValue({ task_id: "task-1", status: "PENDING" })),
+    )
+  })
+
+  async function runAndWait(result: { slowStart: boolean; timedOut: boolean }) {
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: { task_id: "task-1", status: "PENDING", result: null, error: null },
+      ...result,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Run Simulation" }))
+    await screen.findByText(/Running Monte Carlo simulation|didn't respond in time/)
+  }
+
+  it("shows only the running message at first", async () => {
+    await runAndWait({ slowStart: false, timedOut: false })
+
+    expect(screen.getByText("Running Monte Carlo simulation…")).toBeInTheDocument()
+    expect(screen.queryByText(/engine was asleep/)).not.toBeInTheDocument()
+  })
+
+  it("explains a cold start once the run has been waiting a while", async () => {
+    await runAndWait({ slowStart: true, timedOut: false })
+
+    expect(
+      screen.getByText("If the simulation engine was asleep, it takes about a minute to start."),
+    ).toBeInTheDocument()
+  })
+
+  it("stops waiting with a retry when the engine never responds", async () => {
+    await runAndWait({ slowStart: true, timedOut: true })
+
+    expect(
+      screen.getByText("The simulation engine didn't respond in time. Please try again in a minute."),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/race weekend/)).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Try Again" })).toBeInTheDocument()
+  })
+})
+
 // Daily simulation quota (demo deployment Day 5): a single plan costs one
 // scenario, a comparison one per scenario, and a run is refused if it goes
 // over the visitor's own or the demo-wide limit.

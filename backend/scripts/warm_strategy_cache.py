@@ -3,9 +3,14 @@
 Intended trigger: the live ingestor (scripts/ingest_live_session.py) calls this
 at race-day session startup, once lap data starts flowing, so the first user
 request against /strategy/{session_id}/{driver_id}/pit-window or
-/strategy/{session_id}/overview is never a cold cache miss (both are already
-@cacheable(ttl=30) in strategy_service.py — this script just pays that first
-compute cost proactively instead of on a real user's request).
+/strategy/{session_id}/overview is never a cold cache miss (both are
+@cacheable in strategy_service.py — this script just pays that first compute
+cost proactively instead of on a real user's request).
+
+Also run after each production deploy, for the session the race page shows
+(the most recent completed race): with COMPLETED_SESSION_STRATEGY_TTL_SECONDS
+set, what it warms then stays cached for that long instead of 30 s
+(strategy_service._strategy_cache_ttl).
 
 Driver roster: CLAUDE.md's Deferred Wiring Gaps section notes driver_contracts
 is currently empty (no seed_teams.py yet), so it cannot be used to enumerate

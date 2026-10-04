@@ -1,4 +1,5 @@
 import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import { isAxiosError } from "axios"
 import { StrictMode } from "react"
 import ReactDOM from "react-dom/client"
 import { getCurrentWindow } from "@tauri-apps/api/window"
@@ -18,7 +19,22 @@ const queryClient = new QueryClient({
     },
   },
   queryCache: new QueryCache({
-    onError: (error) => {
+    onError: (error, query) => {
+      // Same as web's main.tsx: a few queries treat a specific HTTP status
+      // as a normal outcome the component renders itself, not a global error
+      // toast. Opt in via `meta: { silentOn404: true }` / `silentOn503: true`.
+      // - 404: useCurrentRace when no race is live or upcoming,
+      //   useCircuitOutline before outlines are extracted.
+      // - 503: useLiveDriverTelemetry whenever no CarData sample is cached —
+      //   always during a Demo Replay, which publishes no car telemetry
+      //   (Day 6b: desktop toasted "No live telemetry cached for car N"
+      //   every poll).
+      if (isAxiosError(error) && error.response) {
+        const status = error.response.status
+        if ((status === 404 && query.meta?.silentOn404) || (status === 503 && query.meta?.silentOn503)) {
+          return
+        }
+      }
       toast.error(getApiErrorMessage(error))
     },
   }),
