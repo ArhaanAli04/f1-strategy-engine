@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react"
 import { invoke } from "@tauri-apps/api/core"
 import * as telemetryApi from "@/api/telemetry"
-import { useRaceContextStore } from "@/stores/raceContextStore"
+import { useRaceSession } from "@/hooks/useRaceSession"
 
 const TRAY_POLL_INTERVAL_MS = 30_000
 // A session counts as "active" if at least one car has reported a position
@@ -14,7 +14,7 @@ const FRESHNESS_WINDOW_MS = 60_000
 // grey = idle) via the set_tray_status Tauri command. Call once, in the
 // main window only — the tray is process-global, not per-window.
 export function useTrayStatus(): void {
-  const sessionId = useRaceContextStore((state) => state.sessionId)
+  const { sessionId } = useRaceSession()
   const lastStatusRef = useRef<boolean | null>(null)
 
   useEffect(() => {

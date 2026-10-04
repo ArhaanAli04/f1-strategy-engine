@@ -8,6 +8,7 @@ import { useNeighborDrivers } from "@/hooks/useNeighborDrivers"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { useUndercut } from "@/hooks/useStrategy"
 import { useRaceContextBridge } from "@/hooks/useRaceContextBridge"
+import { useRaceSession } from "@/hooks/useRaceSession"
 import { useRaceContextStore } from "@/stores/raceContextStore"
 import { cn } from "@/lib/utils"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
@@ -35,7 +36,7 @@ function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
 
 export function RaceOverlay() {
   useRaceContextBridge()
-  const sessionId = useRaceContextStore((state) => state.sessionId)
+  const { sessionId } = useRaceSession()
   const driverId = useRaceContextStore((state) => state.driverId)
 
   const { data: gapsResponse, isLoading } = useSessionGaps(sessionId)
@@ -77,7 +78,8 @@ export function RaceOverlay() {
         code: driver?.code ?? "???",
         teamColor: driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR,
         gapLabel: gapLabels[gap.driver_id] ?? "—",
-        compound: latest?.compound ?? null,
+        // Same preference as LiveTimingTower: the current tyre, then the last lap's.
+        compound: gap.compound ?? latest?.compound ?? null,
       }
     })
     // lapsQueries is a fresh array each render (useQueries) — topGaps is the

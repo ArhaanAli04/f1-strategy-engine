@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from backend.schemas.simulate_schema import ScenarioPlan, SimulateStrategyRequest
 from backend.schemas.strategy_schema import StrategyPredictionResponse
-from backend.schemas.telemetry_schema import LiveTelemetryEvent
+from backend.schemas.telemetry_schema import LiveTelemetryEvent, SessionGapsResponse
 
 
 @pytest.mark.unit
@@ -218,6 +218,24 @@ def test_strategy_response_serialises_to_json() -> None:
 
     assert parsed["optimal_pit_lap"] == 22
     assert parsed["model_version"] == "production"
+
+
+@pytest.mark.unit
+def test_session_gaps_keep_each_cars_current_tyre_and_default_it_to_none() -> None:
+    """compound is optional: the DB reconstruction path never sets it."""
+    entry = {
+        "driver_id": str(uuid.uuid4()),
+        "lap_number": 18,
+        "position": 6,
+        "gap_to_ahead_seconds": 1.2,
+        "gap_to_behind_seconds": 0.4,
+    }
+    response = SessionGapsResponse.model_validate(
+        {"session_id": str(uuid.uuid4()), "gaps": [{**entry, "compound": "HARD"}, entry]}
+    )
+
+    assert [g.compound for g in response.gaps] == ["HARD", None]
+    assert json.loads(response.model_dump_json())["gaps"][0]["compound"] == "HARD"
 
 
 @pytest.mark.unit

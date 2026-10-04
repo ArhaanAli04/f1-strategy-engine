@@ -1,70 +1,58 @@
-import { useEffect, useMemo, useState } from "react"
+import { useMemo } from "react"
 import { AnimatedDriverDots } from "./AnimatedDriverDots"
 import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
+import { padCountdownValue, useCountdown } from "@/hooks/useCountdown"
 import { useDriverCarNumbers, useDriverPositions } from "@/hooks/useDriverPositions"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useLiveDriverTelemetry } from "@/hooks/useLiveDriverTelemetry"
+import { useRaceBySession } from "@/hooks/useRaceBySession"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 import { useLiveRaceSelectionStore } from "@/stores/liveRaceSelectionStore"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 
 const FALLBACK_VIEWBOX = "0 0 1000 1000"
 
-type Mode = "live" | "non-race" | "finished" | "unknown"
-
-interface Countdown {
-  days: number
-  hours: number
-  minutes: number
-  seconds: number
-}
-
-function useCountdown(targetIso: string | null): Countdown | null {
-  const [now, setNow] = useState(() => Date.now())
-
-  useEffect(() => {
-    if (!targetIso) return
-    const interval = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(interval)
-  }, [targetIso])
-
-  if (!targetIso) return null
-  const diffMs = new Date(targetIso).getTime() - now
-  if (diffMs <= 0) return { days: 0, hours: 0, minutes: 0, seconds: 0 }
-  const totalSeconds = Math.floor(diffMs / 1000)
-  return {
-    days: Math.floor(totalSeconds / 86400),
-    hours: Math.floor((totalSeconds % 86400) / 3600),
-    minutes: Math.floor((totalSeconds % 3600) / 60),
-    seconds: totalSeconds % 60,
-  }
-}
-
-function pad(value: number): string {
-  return value.toString().padStart(2, "0")
-}
+type Mode = "live" | "historical" | "non-race" | "finished" | "unknown"
 
 interface CircuitMapPanelProps {
   sessionId: string
+  // True when this session came from an explicit :sessionId URL param
+  // (a deliberate deep link — e.g. a Demo Replay's own session, or any
+  // other specific historical session), false when RacePage fell back to
+  // resolving one itself (useResolvedSession's "no live race → most recent
+  // completed race" fallback). Distinguishes "the user asked to see THIS
+  // race" (its own circuit is always correct, live or not) from "nothing
+  // else to show, defaulting to something" (where the generic upcoming-race
+  // countdown is the more useful thing to display) — see the mode/outline
+  // logic below for why these need different circuit sources.
+  isExplicitSession: boolean
 }
 
-// Circuit_id/race_name/scheduled_start all come from useUpcomingRace rather
-// than a per-session lookup: there's no session_id -> circuit_id endpoint,
-// and GET /races/upcoming's race_date >= today query keeps it pinned to the
-// same race all day (before, during, and immediately after it runs), so it
-// doubles correctly as "this session's race" for a currently-relevant
-// session. Historical browsing of an old/unrelated session is not yet a
-// real navigation path in this app (DashboardPage is still a stub) — revisit
-// if that changes.
-export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
+// Day 43 fix: circuit_id/outline/transform come from useRaceBySession
+// (sessionId's OWN race) whenever sessionId means something specific —
+// live/replay dots (mode "live") or an explicit deep link (mode
+// "historical") — not useUpcomingRace, which answers a different question
+// ("what's next on the calendar") that has nothing to do with sessionId.
+// Confirmed live, two distinct regressions during Day 43 verification: (1)
+// replaying British GP while the real upcoming race was Monza rendered
+// Monza's outline/transform against Silverstone's real coordinates — fixed
+// by sourcing "live" mode from raceBySession; (2) that fix then broke the
+// OPPOSITE case — visiting /race/{british-gp-session-id} directly (no live
+// data, since no replay is currently running) fell through to "non-race"
+// and showed Monza's outline again, this time under a countdown to a race
+// nobody asked to see. useUpcomingRace is still used below, but only for
+// its own genuinely distinct purpose — the idle "nothing else to show"
+// dashboard state ("non-race"/"finished"), which only applies when
+// sessionId is itself a fallback, not an explicit ask.
+export function CircuitMapPanel({ sessionId, isExplicitSession }: CircuitMapPanelProps) {
+  const { data: raceBySession } = useRaceBySession(sessionId)
   const {
     data: upcomingRace,
     isLoading: upcomingLoading,
     isError: upcomingErrored,
   } = useUpcomingRace()
-  const { data: outline } = useCircuitOutline(upcomingRace?.circuit_id ?? null)
   const { data: positions } = useDriverPositions(sessionId)
   const { data: carNumbers } = useDriverCarNumbers(sessionId)
   const { data: drivers } = useDrivers()
@@ -77,11 +65,19 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
 
   const mode: Mode = isLive
     ? "live"
-    : upcomingLoading || upcomingErrored || !scheduledStart
-      ? "unknown"
-      : new Date(scheduledStart).getTime() > Date.now()
-        ? "non-race"
-        : "finished"
+    : isExplicitSession
+      ? "historical"
+      : upcomingLoading || upcomingErrored || !scheduledStart
+        ? "unknown"
+        : new Date(scheduledStart).getTime() > Date.now()
+          ? "non-race"
+          : "finished"
+
+  const outlineCircuitId =
+    mode === "live" || mode === "historical"
+      ? (raceBySession?.circuit_id ?? null)
+      : (upcomingRace?.circuit_id ?? null)
+  const { data: outline } = useCircuitOutline(outlineCircuitId)
 
   const countdown = useCountdown(mode === "non-race" ? scheduledStart : null)
 
@@ -134,7 +130,22 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
                 Live Now
               </div>
               <div className="text-2xl font-bold text-foreground">
-                {upcomingRace?.race_name ?? "Race"}
+                {raceBySession?.event_name ?? raceBySession?.circuit?.name ?? "Race"}
+              </div>
+              {!transform && (
+                <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
+                  Track outline unavailable
+                </div>
+              )}
+            </div>
+          )}
+          {mode === "historical" && (
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Circuit
+              </div>
+              <div className="text-2xl font-bold text-foreground">
+                {raceBySession?.event_name ?? raceBySession?.circuit?.name ?? "Race"}
               </div>
               {!transform && (
                 <div className="mt-1 inline-block rounded bg-background/80 px-3 py-1.5 text-xs text-muted-foreground backdrop-blur-sm">
@@ -174,8 +185,8 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
 
         {mode === "non-race" && countdown && (
           <div className="self-end font-mono text-sm text-muted-foreground">
-            Starts in: {countdown.days}d {pad(countdown.hours)}h {pad(countdown.minutes)}m{" "}
-            {pad(countdown.seconds)}s
+            Starts in: {countdown.days}d {padCountdownValue(countdown.hours)}h{" "}
+            {padCountdownValue(countdown.minutes)}m {padCountdownValue(countdown.seconds)}s
           </div>
         )}
       </div>
