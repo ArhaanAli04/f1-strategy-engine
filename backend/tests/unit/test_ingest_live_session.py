@@ -370,9 +370,17 @@ def test_retired_car_is_left_out_of_the_published_standings() -> None:
 
 
 @pytest.mark.unit
-def test_published_standings_carry_each_cars_current_tyre() -> None:
+def test_published_standings_carry_each_cars_current_tyre(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The tyre comes from TimingAppData's current stint, so a new tyre shows
     from the stop instead of when the out-lap is completed (Day 6b)."""
+    # A new stint is also recorded through Celery; stubbed so the test never
+    # reaches a broker (CI has no Redis: the real .delay retried and failed).
+    dispatched: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        ingest_live_session.record_tire_stint, "delay", lambda payload: dispatched.append(payload)
+    )
     redis_mock = MagicMock()
     ingestor = ingest_live_session.F1SignalRIngestor(
         season=2026,
@@ -395,6 +403,7 @@ def test_published_standings_carry_each_cars_current_tyre() -> None:
         ("d1", "HARD"),
         ("d2", None),  # no stint seen yet for car 2
     ]
+    assert [(p["driver_id"], p["compound"]) for p in dispatched] == [("d1", "HARD")]
 
 
 # --- final standings (gaps:final), written once the leader has finished ---
