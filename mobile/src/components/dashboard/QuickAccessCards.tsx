@@ -25,8 +25,8 @@ function QuickAccessCard({ icon, label, description, onPress }: QuickAccessCardP
 
 // RN port of web/src/components/dashboard/QuickAccessCards.tsx. Web's third
 // card ("Driver Analytics") scroll-anchors to an #driver-roster section on
-// the same page — mobile has no roster section on Home, so it navigates
-// straight to the Drivers tab instead.
+// the same page. Mobile's Home has the roster too (DriverRosterGrid), but
+// this card opens the Drivers tab, a screen of its own.
 export function QuickAccessCards() {
   return (
     <View className="flex-row gap-3">

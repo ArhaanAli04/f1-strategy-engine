@@ -134,7 +134,7 @@ export function CircuitMapPanel({ sessionId }: CircuitMapPanelProps) {
         </View>
 
         {mode === "non-race" && countdown && (
-          <Text className="self-end font-mono text-sm text-muted">
+          <Text className="self-end font-mono text-sm text-foreground">
             Starts in: {countdown.days}d {pad(countdown.hours)}h {pad(countdown.minutes)}m{" "}
             {pad(countdown.seconds)}s
           </Text>

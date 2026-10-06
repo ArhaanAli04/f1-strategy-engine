@@ -1,6 +1,7 @@
 import { Picker } from "@react-native-picker/picker"
 import { TitilliumWeb_400Regular } from "@expo-google-fonts/titillium-web/400Regular"
 import { useFont } from "@shopify/react-native-skia"
+import { isAxiosError } from "axios"
 import { useEffect, useRef, useState } from "react"
 import {
   ActivityIndicator,
@@ -19,6 +20,7 @@ import { useSimulateStrategy, useSimulationQuota, useSimulationResult } from "@/
 import { useSessionStore } from "@/stores/sessionStore"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
+import * as haptics from "@/utils/haptics"
 import type { SimulateStrategyRequest } from "@/types"
 
 type Step = 1 | 2 | 3 | 4
@@ -148,8 +150,17 @@ export default function SimulatorScreen() {
   const outOfQuota = scenariosLeft === 0
 
   useEffect(() => {
-    if (simulationResult.data?.status === "SUCCESS") setStep(4)
+    if (simulationResult.data?.status === "SUCCESS") {
+      haptics.success()
+      setStep(4)
+    } else if (simulationResult.data?.status === "FAILURE") {
+      haptics.error()
+    }
   }, [simulationResult.data?.status])
+
+  useEffect(() => {
+    if (simulationResult.timedOut) haptics.warning()
+  }, [simulationResult.timedOut])
 
   function addPitStop() {
     setPitStops((rows) => [...rows, { lap: Number(remainingLaps) || 1, compound: "HARD" }])
@@ -179,13 +190,16 @@ export default function SimulatorScreen() {
     // step 3's spinner, which would otherwise strand the user with no task
     // ever created and no FAILURE condition to show a "Try Again". Mirrors
     // web/src/pages/SimulatorPage.tsx and desktop's copy.
+    haptics.confirm()
     try {
       const accepted = await simulateMutation.mutateAsync(payload)
       setTaskId(accepted.task_id)
       setStep(3)
-    } catch {
-      // Rendered from simulateMutation.error in step 2's JSX — nothing more
-      // to do here.
+    } catch (error) {
+      // Rendered from simulateMutation.error in step 2's JSX. The daily
+      // scenario limit (429) is a warning, anything else an error.
+      if (isAxiosError(error) && error.response?.status === 429) haptics.warning()
+      else haptics.error()
     }
   }
 

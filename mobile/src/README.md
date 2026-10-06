@@ -8,16 +8,26 @@ their `web/` source changes.
 
 ## Verbatim copies — re-copy on change
 
+**Drift audit, 2026-10-07:** five of these no longer match web, because web
+changed and mobile was out of scope: `types/index.ts`, `types/simulate.ts`,
+`types/telemetry.ts` (mobile's `DriverGap` lacks `compound` and `laps_behind`,
+and its gaps aren't nullable), `api/strategy.ts` (lacks `getStrategyHistory`
+and `getLastIngestedSession`) and `utils/formatters.ts`. Web's `types/demo.ts`
+has no mobile copy. Re-syncing them is checkpoint 1 of the Day 6b mobile
+catch-up (`docs/internal/demo-deployment-plan-2026.md`, "Day 6b-mobile").
+Everything else in this table matches web.
+
 | mobile/src path | web/ source |
 |---|---|
 | `types/*.ts` (10 files) | `web/src/types/*.ts` |
-| `api/alerts.ts`, `auth.ts`, `circuit.ts`, `driver.ts`, `ergast.ts`, `race.ts`, `strategy.ts`, `telemetry.ts` (8 files) | `web/src/api/*.ts` (same filenames) |
+| `api/alerts.ts`, `auth.ts`, `circuit.ts`, `driver.ts`, `race.ts`, `strategy.ts`, `telemetry.ts` (7 files) | `web/src/api/*.ts` (same filenames). `race.ts` was re-synced 2026-10-07 to get `getRaceBySession`. |
 | `utils/errors.ts` | `web/src/utils/errors.ts` |
 | `utils/formatters.ts` | `web/src/utils/formatters.ts` |
 | `utils/drivers.ts` | `web/src/utils/drivers.ts` |
 | `utils/ergastDriverIds.ts` | `web/src/utils/ergastDriverIds.ts` (copied Day 32 Checkpoint 3 — was undeployed until `useDriverSeasonStats` was ported) |
 | `stores/sessionStore.ts` | `web/src/stores/sessionStore.ts` |
 | `stores/alertStore.ts` | `web/src/stores/alertStore.ts` |
+| `hooks/useConstructorStandings.ts` | `web/src/hooks/useConstructorStandings.ts` (2026-10-07, for the roster order) |
 
 ## Copied and adapted — re-diff on change, don't blind-overwrite
 
@@ -25,6 +35,7 @@ their `web/` source changes.
 |---|---|---|
 | `api/client.ts` | `web/src/api/client.ts` | Same axios instance, same request/response interceptor shape (attach bearer token, single-flight 401 refresh). Reads `accessToken` synchronously from `useAuthStore.getState()`, same as web — the store itself is now SecureStore-backed (see below), not the interceptor. |
 | `stores/authStore.ts` | `web/src/stores/authStore.ts` | `persist`'s storage swapped from the default (localStorage) to a `StateStorage` adapter wrapping `expo-secure-store`'s async `getItemAsync`/`setItemAsync`/`deleteItemAsync`. `partialize` persists only `accessToken`/`refreshToken`/`expiresAt` — `user` is intentionally never persisted (SecureStore caps each item at ~2048 bytes on iOS; `user` has no fixed size bound and is cheap to refetch via `GET /auth/me` on launch instead). Adds a `hasHydrated` flag (`onRehydrateStorage`) — the root layout (`app/_layout.tsx`, Checkpoint 3) must gate rendering on this before reading `accessToken`, since SecureStore's read is async unlike localStorage's synchronous one. |
+| `api/ergast.ts` | `web/src/api/ergast.ts` | Web's file plus one mobile-only function, `getSeasonDriverStandings(season)`: the whole drivers' championship in one request, for the Drivers tab's championship card (2026-10-07). Re-copy web's functions on change and keep this one. |
 | `utils/constants.ts` | `web/src/utils/constants.ts` | Drops `CHART_TOOLTIP_STYLE` (styled Recharts' web-only `<Tooltip>` — no chart library wired up yet, victory-native is deferred to Day 32). `API_URL`/`WS_URL` read from `process.env.EXPO_PUBLIC_*` (Expo's built-in env inlining) instead of Vite's `import.meta.env`. `ROUTES` redefined entirely as Expo Router file-based paths (`/(tabs)/live`, `/(auth)/login`, etc.) instead of web's react-router path strings — same key names, different values/shape. `FALLBACK_TEAM_COLOR` and `COMPOUND_COLORS` are unchanged. |
 
 ## New files — not copies, but mirror web hook logic
@@ -43,7 +54,8 @@ shapes, etc).
 | `hooks/useResolvedSession.ts` | `web/src/hooks/useResolvedSession.ts` |
 | `hooks/useSessionGaps.ts` | `web/src/hooks/useSessionGaps.ts` |
 | `hooks/useStrategy.ts` | `web/src/hooks/useStrategy.ts` (`usePitWindow`/`useStrategyOverview` ported first for the Strategy tab; `useSimulateStrategy`/`useSimulationResult` added Day 32 Checkpoint 4 for the Simulator screen. `useUndercut` still isn't ported — no mobile consumer yet) |
-| `hooks/useDriverSeasonStats.ts` | `web/src/hooks/useDriverSeasonStats.ts` (ported Day 32 Checkpoint 3, verbatim logic — pure react-query + fetch, no browser API to adapt) |
+| `hooks/useDriverSeasonStats.ts` | `web/src/hooks/useDriverSeasonStats.ts` (ported Day 32 Checkpoint 3, verbatim logic — pure react-query + fetch, no browser API to adapt). Since 2026-10-07 points come from the championship standing, which includes sprints, in all three clients. |
+| `hooks/useRaceBySession.ts` | `web/src/hooks/useRaceBySession.ts`, plus an exported `raceBySessionQueryOptions` (mobile only) so the Alerts tab can look up every alert's race with `useQueries` on the same cache (2026-10-07). |
 | `hooks/useDriverAnalysis.ts` | inline `useQuery` in `web/src/components/driver/StyleRadar.tsx` | web defines this query inline since `StyleRadar` is its only consumer; mobile's Driver Detail header also needs `archetype`, so it's a shared hook here — same queryKey, so react-query dedupes the request between the header and `StyleRadar` instead of firing it twice. |
 | `hooks/useUpcomingRace.ts` | `web/src/hooks/useUpcomingRace.ts` |
 | `hooks/useCircuitOutline.ts` | `web/src/hooks/useCircuitOutline.ts` |
@@ -52,6 +64,25 @@ shapes, etc).
 | `hooks/useDriverPositions.ts` | `web/src/hooks/useDriverPositions.ts` |
 | `hooks/useLiveDriverTelemetry.ts` | `web/src/hooks/useLiveDriverTelemetry.ts` (drops `meta: { silentOn503: true }` for the same reason noted below) |
 | `hooks/useCountdown.ts` | inline `useCountdown` in `web/src/components/dashboard/UpcomingRaceCard.tsx` | web deliberately keeps two separate copies (see its own comment on why); mobile has a second consumer too (`CircuitMapPanel`, Checkpoint 6) so this one was extracted into a shared file instead of copied a third time — `UpcomingRaceCard.tsx` was refactored to import it. |
+
+## Mobile-only files (2026-10-07) — no web counterpart
+
+| mobile/src path | What it is |
+|---|---|
+| `hooks/useRosterDrivers.ts` | Active drivers in web's roster order (constructor standings, Racing Bulls aliased to Ergast's `rb`, alphabetical-by-team fallback). Used by Home's roster and the Drivers tab. |
+| `hooks/useDriverStandings.ts` | The season's drivers' championship (`getSeasonDriverStandings`), cached an hour. |
+| `components/dashboard/DriverRosterGrid.tsx` | Home's roster, under the quick-access cards, as on web and desktop. Two-column rows in a plain `View` (Home is a `ScrollView`). |
+| `components/driver/DriverStandingsCard.tsx` | Drivers tab: a fixed-height card (about 7 rows) whose rows scroll inside it: position, team logo, name, points. Matched to our roster by driver code; a row opens the driver page. |
+| `utils/driverNames.ts` | `displayDriverName`: "Max VERSTAPPEN" (given name, surname in capitals; "Kimi" for ANT, the owner's choice). Live tower and standings card. |
+| `utils/rowLogoSizes.ts` | Team logo sizes for list rows (Red Bull, Haas, Alpine 36 px, Ferrari 30, others 24), so rows stay one height. Live tower and standings card. |
+| `utils/haptics.ts` | The app's haptics (`expo-haptics`): `selectionTick`, `confirm`, `threshold`, `success`, `warning`, `error`. Screens never import `expo-haptics` directly, so a Settings off switch can be added here. |
+
+**NativeWind gotcha (found 2026-10-07):** a class that no other file uses may
+not be applied on the device at all. `ml-4`/`ml-6` between the tower's GAP and
+TYRE columns did nothing, and the columns touched, even though `tsc` and the
+export were clean. Before using a class in new code, check another file already
+uses it (`grep -rlF -- "<class>" app src`); otherwise set the value as a plain
+`style`. Reanimated's `Animated.View` takes plain styles only.
 
 **`useCurrentRace`/`useUpcomingRace`/`useCircuitOutline` drop web's `meta: { silentOn404: true }`** — that flag suppresses a global react-query error toast that web's `QueryClientProvider` wires up; mobile's `app/_layout.tsx` uses a bare `new QueryClient()` with no such global handler yet, so the flag would be inert. Restore it on these three if a future checkpoint adds one (e.g. a toast-on-error convention), otherwise 404s could start surfacing as an unwanted global toast.
 
@@ -95,32 +126,59 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
 | `components/driver/StyleRadar.tsx` | `web/src/components/driver/StyleRadar.tsx` | Ported Day 32 (Checkpoint 3). Same 4 axes/metrics/normalization/archetype-description logic, copied verbatim where it's pure data transformation. The chart itself is **not** a victory-native chart — victory-native 41.x (confirmed against its installed source) has no radar/spider chart; its `PolarChart` only supports a `Pie.Chart` child. Hand-rolled instead with `react-native-svg` (`Polygon`/`Line`/`Text`), same manual polar-trig convention as `TelemetryGauge.tsx`/`CircuitOutlineSvg.tsx`. Web's "About this chart" `Dialog` modal becomes a `Pressable`-toggled inline expand section (no modal-in-a-Card pattern established on mobile). |
 | `components/driver/SectorComparison.tsx` | `web/src/components/driver/SectorComparison.tsx` | Ported Day 32 (Checkpoint 3). Same per-driver-mean-then-averaged team calculation, copied verbatim. Grouped bars use victory-native's real `CartesianChart` + `BarGroup` API (confirmed against the installed 41.26.0 source) — the classic web `victory` package's `VictoryBar`/`VictoryChart` naming this project's own CLAUDE.md/spec text referenced doesn't apply to this Skia rewrite. Axis tick labels need a real Skia `Font` object (`useFont`) — reuses the same bundled Titillium Web `.ttf` already loaded for RN `Text` via `expo-font`, as a second independent load into Skia's own font subsystem (Skia's Canvas doesn't share React Native's font registration). No `Legend` component exists in victory-native's exports — hand-rolled a small swatch row below the chart instead, same as web's `<Legend/>` visually. |
 | `components/circuit/CircuitMapPanel.tsx` | `web/src/components/circuit/CircuitMapPanel.tsx` | Same 3 modes (live/non-race/finished/unknown), same `applyTransform` geometry, same turn markers/countdown/telemetry gauge. Placed at the top of the **Live tab**, not Home — web's Home-equivalent (`DashboardPage`) only ever got the static `UpcomingRaceCard`; the full live panel lives on web's `RacePage` instead, which this mirrors by putting it above `live.tsx`'s driver `FlatList` (as a `ListHeaderComponent`, always rendered regardless of the gaps list's own loading/empty state, same as web mounting both `CircuitMapPanel` and `LiveTimingTower` independently). Live dot movement uses a new `AnimatedDriverDot.tsx` (Reanimated `useAnimatedProps` on an `Animated.createAnimatedComponent(Circle)`) instead of web's CSS `transform` transition — react-native-svg has nothing CSS transitions can hook into. It ports web's `AnimatedDriverDots.tsx` render-behind interpolation buffer: per-instance `useSharedValue<PositionSample[]>` fed one raw `(x, y, Date.now())` sample per poll, a `useFrameCallback` worklet drawing the dot at `Date.now() - renderDelayMs` between the two straddling samples (`renderDelayMs` derives from `useDriverPositions.ts`'s `POSITIONS_POLL_INTERVAL_MS`, 2s on mobile). `applyTransform` moved into `AnimatedDriverDot.tsx` as a `"worklet"` and takes raw `x/y` + `transform` props now, not pre-computed `cx/cy`. |
+| `components/driver/LapTimesChart.tsx` | `web/src/components/driver/LapTimesChart.tsx` | Ported 2026-10-07 into Driver Detail's Sector Times tab, below the teammate comparison. Lap time by tyre age, one line per compound. victory-native `CartesianChart` takes one data array with fixed y keys, so each compound is a column and each lap fills only its own; `connectMissingData` joins a compound's laps across the others' rows. No tooltip; swatch legend. |
+| `components/telemetry/LapTimeChart.tsx` | `web/src/components/telemetry/LapTimeChart.tsx` | Ported 2026-10-07 for the Live tab's Lap Times view. Lap time by lap, the line coloured by compound: the lap before a tyre change is written into both compounds' columns (web's bridge point), and `connectMissingData` is off so two stints on one compound aren't joined. Dashed "Pit" markers are Skia lines drawn with the chart's `xScale` (victory-native has no reference line). Same live/replay lap limit as web. Takes `lapsByDriver` as a prop instead of calling `useLiveTelemetry`, because on mobile every call opens its own WebSocket. Laps with no time are left out (web draws through them). |
+| `components/telemetry/SectorHeatmap.tsx` | `web/src/components/telemetry/SectorHeatmap.tsx` | Ported 2026-10-07 for the Live tab's Sectors view. `classifySector`/`minOf`/`formatTimeValue` copied unchanged; times are coloured text in a grey pill (`bg-pill`, web's `bg-pill-surface`), zebra rows as web, and the selected row is outlined (web's ring). Tapping a row selects the driver. `lapsByDriver` is a prop, as above. |
 | `components/circuit/TelemetryGauge.tsx` | `web/src/components/circuit/TelemetryGauge.tsx` | Same arc-geometry math (`polarToCartesian`/`describeArc`), same 5 readouts. Two disclosed drops: (1) no arc-sweep animation on data updates — web transitions the `d` attribute via CSS, which browsers can interpolate directly; react-native-svg can't animate `Path`'s `d` as a single tweenable value without a path-morphing library (not installed), so arcs snap to their new value each 8s poll instead of sweeping. (2) accessibility: dropped `role="img"`/`aria-label` (`describeGauge`) and `useId()`-based unique SVG path ids (fixed string ids used instead) — the fixed ids are safe since only one `TelemetryGauge` instance mounts at a time on mobile (unlike web, where nothing prevents two instances existing at once). |
 
 **Simplified vs. web — disclosed, not full parity:**
 
-- `app/(tabs)/drivers.tsx` sorts alphabetically by team name rather than by
-  real Ergast constructor-standings position
-  (`web/src/hooks/useConstructorStandings.ts` was not ported — it's an
-  external-API integration not needed anywhere else on mobile yet). This is
-  the exact same fallback web itself uses when the standings fetch is
-  empty/unavailable, just used unconditionally here instead of only as a
-  fallback.
-- `app/(tabs)/live.tsx` drops web's FLIP-style row-reorder animation
-  (`LiveTimingTower.tsx`'s `useLayoutEffect` + `getBoundingClientRect`) — that
-  technique is DOM-measurement-specific with no direct React Native
-  equivalent. `FlatList` re-renders rows in their new sorted order on every
-  gaps poll with no animated glide between old/new positions.
-- `app/driver/[id].tsx` was a minimal stub (identity + current-session
-  snapshot only) through Day 31 — full-ported Day 32 (Checkpoint 3) into a
-  team-color header + segmented Overview/Driving Style/Sector Times control,
-  mirroring `web/src/pages/DriverPage.tsx`. One chart is intentionally not
-  ported: web's `LapTimesChart.tsx` (lap time by compound, over a session)
-  isn't in the Day 32 spec's 3 sub-views — Overview/Driving Style/Sector
-  Times only. Add it as a 4th sub-view if a future day wants full parity.
-  The historical-data banner (shown when `!isLive`) doesn't persist
-  dismissal to `AsyncStorage` like web's `localStorage`-backed version does
-  — plain component state, resets each time the screen mounts.
+- `app/(tabs)/drivers.tsx` (since 2026-10-07): the Drivers' Championship card
+  (`DriverStandingsCard`), then the roster sorted by constructor standings
+  (`useRosterDrivers`), as web.
+- `app/(tabs)/live.tsx` (rebuilt 2026-10-07, the owner's phone layout): the
+  circuit map, then a `Timing | Lap Times | Sectors` switch that sticks to the
+  top of the `ScrollView` once the map scrolls away
+  (`stickyHeaderIndices`), then one view at a time. Web shows the tower,
+  `LapTimeChart` and `SectorHeatmap` side by side.
+  - **Timing** has a header row (POS, DRIVER, GAP, TYRE) and rows showing
+    position, team logo, driver name, gap and tyre. There is no last lap time;
+    Sectors has it, coloured.
+  - **Tapping a row** selects the driver (`sessionStore`) for the map, Lap
+    Times and Sectors; its `›` opens Driver Detail.
+  - **Spacing:** the gap-to-tyre space is a plain style (see the NativeWind
+    gotcha above).
+  - **No row animation:** web's FLIP row-reorder animation is
+    DOM-measurement-specific, so rows re-render in their new order.
+  - **Not yet:** the tower still takes the tyre from the last lap, not
+    `gap.compound` (Day 6b mobile catch-up, checkpoint 2).
+- `app/driver/[id].tsx`: a team-colour header and two tabs (since
+  2026-10-07, the owner's choice; it was three).
+  - **Overview** shows season stats, then the driving-style radar.
+  - **Sector Times** shows the teammate comparison, then the ported
+    `LapTimesChart`.
+  - **Banner:** the historical-data banner doesn't persist its dismissal like
+    web's `localStorage` version; it resets each time the screen mounts.
+- `app/(tabs)/alerts.tsx` (rebuilt 2026-10-07, mobile only; web and desktop
+  unchanged):
+  - **Cards:** each alert has a type badge and title, a relative time and an
+    unread edge, and alerts are grouped by race under sticky headers
+    (`SectionList`).
+  - **Filters and refresh:** filter chips (All, Unread, each type present)
+    and pull to refresh.
+  - **Tap** marks the alert read and opens the Live tab on its driver.
+  - **Swipe left** marks one read (`ReanimatedSwipeable`; the deprecated
+    `Swipeable` is gone).
+  - **Long press** starts multi-select: "Select all unread" (within the
+    filter), and Mark as read sends one `PUT /alerts/{id}/read` per alert
+    (there is no bulk endpoint) and counts failures.
+  - **Motion:** Reanimated animations and `utils/haptics.ts`.
+  - **Empty states:** the no-alerts state links to Settings; the no-match
+    state links back to All.
+  - **Keep `onLongPress` always set on the row's `Pressable`.** React Native
+    only skips the tap on release if it is still set; removing it once
+    selection mode started made the release untick the alert and end
+    selection mode.
 - `app/simulator.tsx` is new Day 32 (Checkpoint 4) — a port of
   `web/src/pages/SimulatorPage.tsx`/`desktop/src/pages/SimulatorPage.tsx`'s
   4-step flow, reached via a "Run Simulator" button at the top of the
@@ -206,13 +264,16 @@ stream itself is gated off.
 
 ## Testing Options
 
-No physical iOS/Android device or Apple Developer account is available for
-the remainder of Days 31-32 — every checkpoint through the build sprint is
-verified by `tsc --noEmit` + `npx expo export --platform ios` (full Metro
-module-graph resolution) + code review only, not a running app. Real-device
-testing was possible on Day 30 for the desktop app but isn't for mobile
-right now. Options to actually run and interact with the app, in rough
-order of setup cost, once the build sprint itself is done:
+**Since 2026-10-06 the app runs in Expo Go on the owner's iPhone.** Expo Go
+now ships SDK 57, the project's SDK, and has every native module the app uses,
+so no development build or Apple Developer account is needed. Setup and steps
+are in `mobile/README.md`, section 1. The first device run found a crash that
+`tsc` and the export never could: `usePushNotifications` ran above the query
+provider (fixed in `app/_layout.tsx`). Every change is still checked with
+`npx tsc --noEmit` and `npx expo export --platform ios`, then on the phone.
+
+The options below were written when no device was available (Days 31-32).
+They are still the routes for Android and for a development build:
 
 1. **Android Studio emulator (AVD)** — free, no developer account of any
    kind needed. The most complete free option: runs `expo start` +
@@ -258,7 +319,10 @@ tested in Expo Go. All push-notification code (Checkpoint 5 —
 `src/notifications/notificationHandler.ts`,
 `src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`) was
 written and verified via `tsc`/Metro export only, per this constraint —
-see the `NOTE:` comment at the top of each of those files.
+see the `NOTE:` comment at the top of each of those files. In Expo Go on the
+iPhone (2026-10-06) token registration runs at sign-in without breaking
+anything (it catches its own failure); whether a push is actually delivered
+there has not been tested.
 
 Real Apple Developer Program enrollment ($99/year) only becomes
 unavoidable once TestFlight distribution or an App Store submission is the

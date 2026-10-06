@@ -4,6 +4,7 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput,
 import { PasswordInput } from "@/components/PasswordInput"
 import { useAuth } from "@/hooks/useAuth"
 import { getApiErrorMessage } from "@/utils/errors"
+import * as haptics from "@/utils/haptics"
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -30,7 +31,10 @@ export default function LoginScreen() {
 
   async function onSubmit() {
     setServerError(null)
-    if (!validate()) return
+    if (!validate()) {
+      haptics.error()
+      return
+    }
     try {
       await login({ email, password })
       // replace, not push — back button shouldn't return to login. No
@@ -38,6 +42,7 @@ export default function LoginScreen() {
       // a href literal, only "/(tabs)" (or the flattened "/") validate.
       router.replace("/(tabs)")
     } catch (error) {
+      haptics.error()
       setServerError(getApiErrorMessage(error, "Login failed"))
     }
   }

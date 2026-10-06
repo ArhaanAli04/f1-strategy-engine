@@ -42,6 +42,15 @@ function shouldPersistQuery(query: Query): boolean {
   )
 }
 
+// usePushNotifications sends the token with useMutation, so it must run
+// inside the query provider: called from RootLayout itself, above the
+// provider, it threw "No QueryClient set" on the first device run (Expo Go,
+// 2026-10-06). It no-ops until the user is authenticated.
+function PushNotificationRegistrar(): null {
+  usePushNotifications()
+  return null
+}
+
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
     TitilliumWeb_400Regular,
@@ -57,12 +66,8 @@ export default function RootLayout() {
   // Same useState-not-module-level rationale as queryClient above.
   const [persister] = useState(() => createAsyncStoragePersister({ storage: AsyncStorage }))
 
-  // NOTE: Push notifications require a development build installed on a
-  // physical device (iOS: Apple Developer account required, Android: free
-  // via EAS). Cannot be tested in Expo Go or without a build. Called
-  // unconditionally (Rules of Hooks) — both hooks internally no-op until
-  // there's something to do (unauthenticated / no tap yet).
-  usePushNotifications()
+  // Push token registration runs in PushNotificationRegistrar, inside the
+  // query provider below. This listener needs no query client.
   useNotificationResponseListener()
 
   // Fonts and SecureStore rehydration must both finish before any screen
@@ -84,6 +89,7 @@ export default function RootLayout() {
             dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
           }}
         >
+          <PushNotificationRegistrar />
           <View className="flex-1 bg-background">
             <Stack
               screenOptions={{

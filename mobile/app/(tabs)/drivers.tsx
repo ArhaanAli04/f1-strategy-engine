@@ -1,35 +1,19 @@
 import { router } from "expo-router"
-import { useMemo } from "react"
 import { FlatList, Pressable, Text, View } from "react-native"
+import { DriverStandingsCard } from "@/components/driver/DriverStandingsCard"
 import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { TeamLogo } from "@/components/shared/TeamLogo"
-import { useDrivers } from "@/hooks/useDrivers"
+import { useRosterDrivers } from "@/hooks/useRosterDrivers"
 import { FALLBACK_TEAM_COLOR, ROUTES } from "@/utils/constants"
-import { isActiveDriver } from "@/utils/drivers"
-import type { DriverResponse } from "@/types"
 
 // RN port of web/src/components/dashboard/DriverRosterGrid.tsx as a full
-// screen — FlatList with numColumns instead of a CSS grid. Simplified vs.
-// web: sorted alphabetically by team name rather than by real Ergast
-// constructor-standings position (useConstructorStandings wasn't ported —
-// it's an extra external API integration not needed for anything else on
-// mobile today). Same fallback web itself uses when standings are
-// unavailable, just not the primary sort here.
-function sortByTeamName(drivers: DriverResponse[]): DriverResponse[] {
-  return [...drivers].sort((a, b) => {
-    const teamA = a.contracts[0]?.team?.name ?? ""
-    const teamB = b.contracts[0]?.team?.name ?? ""
-    return teamA.localeCompare(teamB)
-  })
-}
-
+// screen — FlatList with numColumns instead of a CSS grid. Sorted by the
+// current constructor standings like web (useRosterDrivers, since
+// 2026-10-06; alphabetical by team name before). Above the roster, the
+// season's drivers' championship in a card that scrolls on its own
+// (DriverStandingsCard, mobile only, 2026-10-07).
 export default function DriversScreen() {
-  const { data: drivers, dataUpdatedAt, isLoading } = useDrivers()
-
-  const activeDrivers = useMemo(
-    () => sortByTeamName((drivers ?? []).filter(isActiveDriver)),
-    [drivers],
-  )
+  const { rosterDrivers: activeDrivers, dataUpdatedAt, isLoading } = useRosterDrivers()
 
   if (isLoading) {
     return (
@@ -47,7 +31,13 @@ export default function DriversScreen() {
       data={activeDrivers}
       numColumns={2}
       keyExtractor={(driver) => driver.id}
-      ListHeaderComponent={<OfflineBanner dataUpdatedAt={dataUpdatedAt} />}
+      ListHeaderComponent={
+        <View className="gap-3">
+          <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
+          <DriverStandingsCard />
+          <Text className="text-lg font-semibold text-foreground">Driver Roster</Text>
+        </View>
+      }
       renderItem={({ item: driver }) => {
         const team = driver.contracts[0]?.team
         return (

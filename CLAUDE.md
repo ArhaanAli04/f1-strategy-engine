@@ -628,8 +628,8 @@ Next:     Open items are in docs/internal/live-pipeline-open-decisions-and-
           calibration, V5 check at the next live race (Azerbaijan R15,
           2026-09-26, stack up with --env-file .env), lead-lap fallback only
           if V5 shows F1's Position field does not stream live.
-Blockers: No physical device for testing — Android emulator
-          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
+Blockers: Mobile is tested on one iPhone in Expo Go (2026-10-06); Android
+          not yet run (see mobile/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
 ```
 
 ---
@@ -1461,16 +1461,11 @@ happen), or was found already fixed and moved into ### Notes below instead.
   would be running multiple machines, not K8s pods. Still open; not
   re-measured since the DB pool fix.
 
-- **[deferred, reworded] Mobile Driver Detail charts (victory-native +
-  @shopify/react-native-skia):** still not installed — the Mobile Sync
-  Protocol section confirms Driver Detail remains "a minimal stub" with no
-  ported charts. The original "install at the start of Day 32" framing is
-  stale (Day 32 passed without this happening); the substance is unchanged
-  — `npx expo install @shopify/react-native-skia && npm install
-  victory-native` is still needed before porting
-  `web/src/components/driver/{LapTimesChart,SectorComparison,
-  StyleRadar}.tsx` onto `app/driver/[id].tsx`. Post-v1.0.0 polish, not
-  blocking.
+- **[✅ done] Mobile Driver Detail charts.** Skia and victory-native were
+  installed on Day 32, and Driver Detail has all three of web's charts: the
+  style radar (Overview tab), and the sector comparison plus
+  `LapTimesChart` (Sector Times tab, LapTimesChart ported 2026-10-07). Run on
+  the owner's iPhone in Expo Go. See `mobile/src/README.md`.
 
 - **[✅ done 2026-10-04, Day 6b CP3 + CP5] Strategy Simulator "last ingested race"
   session source is web-only.** Day 6b CP5 added web's Demo Replay selector
@@ -2950,8 +2945,10 @@ connect to the locally hosted Docker stack during development and demos.
 - Backend: Docker Compose (all services on localhost)
 - Web app: Vercel (frontend only, points to local backend via ngrok for demos)
 - Desktop app: Tauri native build, connects to local backend
-- Mobile app: Expo Development Build on iPhone, connects to local backend 
-  via LAN IP (same WiFi network required)
+- Mobile app: Expo Go on iPhone (since 2026-10-06; Expo Go ships SDK 57, so
+  no development build or Apple account is needed), connects to the local
+  backend via LAN IP from `mobile/.env` (same WiFi network required). See
+  `mobile/README.md` section 1.
 - Demo videos: recorded from each client, stored in demos/ directory
 
 No cloud VM deployment during the build — see DEPLOYMENT.md for full 
@@ -3022,15 +3019,29 @@ CSS `transform` transition. `CircuitMapPanel` sits at the top of the
 **Live** tab, not Home — web's Home-equivalent only ever got the static
 outline (`UpcomingRaceCard`), the full live panel belongs where web
 mounts it (`RacePage`). Several simplifications are disclosed inline in
-`mobile/src/README.md` (`TeamLogo` swatch-only, no Ergast-standings sort
-on the Drivers tab, no FLIP row-reorder animation, Driver Detail is a
-minimal stub, `TelemetryGauge`'s arcs snap instead of sweep) — check that
-file before assuming full parity with any given web component.
+`mobile/src/README.md` (no FLIP row-reorder animation, `TelemetryGauge`'s
+arcs snap instead of sweep, a single-plan Simulator with a typed session ID)
+— check that file before assuming full parity with any given web component.
+
+**Since 2026-10-06 mobile runs in Expo Go on the owner's iPhone,** and was
+reworked for the phone (mobile only): the Live tab is the map plus a sticky
+Timing / Lap Times / Sectors switch (web's `LapTimeChart` and `SectorHeatmap`
+ported); Home and the Drivers tab show the roster in constructor-standings
+order; the Drivers tab adds a Drivers' Championship card; the Alerts tab has
+type cards, race grouping, filters, tap-to-open, multi-select and animations;
+and `src/utils/haptics.ts` (`expo-haptics`) is the one haptics helper. Mobile
+has **not** had the Day 6b changes yet (tyre at the pit stop, Demo Replay
+selector, a session that follows a replay, replay-aware strategy panels), and
+several of its "verbatim" copies have drifted from web; both are the "Day
+6b-mobile" catch-up in `docs/internal/demo-deployment-plan-2026.md`, together
+with the Simulator changes the owner will specify. **NativeWind gotcha:** a
+class no other mobile file uses may not apply on the device (it cost two
+rounds on the tower); check before using a new class, else use a plain
+`style`.
 
 Push notifications (`src/notifications/notificationHandler.ts`,
 `src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`)
-have no web equivalent — mobile-only capability. Written and verified via
-`tsc`/Metro export only; untestable without a physical device + dev
-build (no Apple Developer account or Android emulator set up this
-sprint — see `mobile/src/README.md`'s Testing Options, including a full
-Android-emulator setup procedure verified against Expo's current docs).
+have no web equivalent — mobile-only capability. Delivery has never been
+tested: it most likely needs a development build on a device. In Expo Go,
+token registration runs at sign-in without breaking anything (it used to crash
+the app, see `mobile/src/README.md`'s Testing Options).
