@@ -29,6 +29,22 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
   const window = windows?.[0] ?? null
 
   if (!window) {
+    // The compact card keeps its usual shape with no window, so the strategy
+    // wall still shows whose card it is (owner's request 2026-10-07: most
+    // cards are empty for a completed race).
+    if (compact) {
+      return (
+        <View className="gap-1 rounded-md border border-white/10 bg-surface p-2">
+          <View className="flex-row items-center justify-between gap-2">
+            {driverId && <DriverChip driverId={driverId} />}
+            <Text className="font-mono text-xs font-semibold text-muted">—</Text>
+          </View>
+          <Text numberOfLines={1} className="text-[10px] text-muted">
+            No pit window predicted
+          </Text>
+        </View>
+      )
+    }
     return (
       <View className="rounded-md border border-white/10 bg-surface p-3">
         <Text className="text-xs text-muted">No pit window predicted.</Text>

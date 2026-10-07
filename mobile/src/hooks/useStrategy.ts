@@ -4,14 +4,32 @@ import * as strategyApi from "@/api/strategy"
 import type { SimulateStrategyRequest, SimulateTaskStatusResponse } from "@/types"
 
 // Hand-written — mirrors web/src/hooks/useStrategy.ts. usePitWindow and
-// useStrategyOverview were ported first (Strategy tab's needs); useUndercut
-// still isn't ported (no mobile consumer yet) — useSimulateStrategy/
-// useSimulationResult added Day 32 Checkpoint 4 for the Simulator screen.
+// useStrategyOverview were ported first (Strategy tab's needs);
+// useSimulateStrategy/useSimulationResult added Day 32 Checkpoint 4 for the
+// Simulator screen; useUndercut 2026-10-07 for the Strategy tab's driver
+// sheet.
 export function usePitWindow(sessionId: string | null, driverId: string | null) {
   return useQuery({
     queryKey: ["strategy", "pit-window", sessionId, driverId],
     queryFn: () => strategyApi.getPitWindow(sessionId as string, driverId as string),
     enabled: Boolean(sessionId && driverId),
+  })
+}
+
+// Same as web's: "does driverId pitting now gain a position over target".
+// enabled lets a caller switch the live ML call off (web does during a
+// replay).
+export function useUndercut(
+  sessionId: string | null,
+  driverId: string | null,
+  target: string | null,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["strategy", "undercut", sessionId, driverId, target],
+    queryFn: () =>
+      strategyApi.getUndercut(sessionId as string, driverId as string, target as string),
+    enabled: Boolean(sessionId && driverId && target) && enabled,
   })
 }
 

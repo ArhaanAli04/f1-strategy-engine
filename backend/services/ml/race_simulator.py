@@ -95,6 +95,12 @@ SC_LAP_TIME_SECONDS = 25.0
 # an assumed multiplier (no computed historical SC-lap-time data exists in
 # this codebase), same spirit as LAP_TIME_NOISE_STD_SECONDS.
 SC_LAP_TIME_MULTIPLIER = 1.4
+# Spacing between consecutive cars once a safety car has bunched the field.
+# Assumed, like SC_LAP_TIME_MULTIPLIER: cars queue roughly a second apart
+# behind the safety car. It keeps the running order through an SC lap; before
+# 2026-10-07 every car was given the same time, so the order after an SC lap
+# came down to tie-breaking (found when a P9 driver finished P22 in one run).
+SC_BUNCHED_GAP_SECONDS = 1.0
 MIN_LAPS_BETWEEN_PITS = 5
 
 
@@ -212,9 +218,10 @@ def _advance_lap(
 ) -> None:
     """Numba-compiled inner loop: advance every (simulation, driver) pair by one lap.
 
-    Mutates cumulative_time and tyre_age in place. On a safety car lap, every driver
-    in that simulation is bunched to the simulation's current leader time (gaps
-    neutralised) instead of receiving their individually predicted pace. Pit stops
+    Mutates cumulative_time and tyre_age in place. On a safety car lap, the field
+    in that simulation is bunched behind its current leader in its current order,
+    SC_BUNCHED_GAP_SECONDS apart (gaps neutralised, order kept), instead of each
+    driver receiving their individually predicted pace. Pit stops
     add pit_stop_seconds and reset tyre age to 0, applied after the lap's time/age
     update on both the racing and safety-car branches.
 
@@ -246,13 +253,11 @@ def _advance_lap(
     n_sims, n_drivers = cumulative_time.shape
     for s in range(n_sims):
         if sc_active[s]:
-            leader_time = cumulative_time[s, 0]
-            for d in range(1, n_drivers):
-                if cumulative_time[s, d] < leader_time:
-                    leader_time = cumulative_time[s, d]
-            sc_time = leader_time + sc_lap_time_seconds
-            for d in range(n_drivers):
-                cumulative_time[s, d] = sc_time
+            order = np.argsort(cumulative_time[s])
+            sc_time = cumulative_time[s, order[0]] + sc_lap_time_seconds
+            for rank in range(n_drivers):
+                d = order[rank]
+                cumulative_time[s, d] = sc_time + rank * SC_BUNCHED_GAP_SECONDS
                 tyre_age[s, d] += 1
                 if pit_flags[s, d]:
                     cumulative_time[s, d] += pit_stop_seconds

@@ -113,15 +113,31 @@ export default function RootLayout() {
                   name="driver/[id]"
                   options={{
                     headerShown: true,
+                    // iOS would show the previous screen's title, "(tabs)".
+                    headerBackButtonDisplayMode: "minimal",
                     title: "Driver",
                     headerStyle: { backgroundColor: "#0a0a0a" },
                     headerTintColor: "#fafafa",
                   }}
                 />
                 <Stack.Screen
+                  name="strategy-driver"
+                  options={{
+                    // A native iOS sheet exactly as tall as its content (the
+                    // Strategy tab's driver detail; owner's choice 2026-10-07).
+                    presentation: "formSheet",
+                    sheetAllowedDetents: "fitToContents",
+                    sheetGrabberVisible: true,
+                    headerShown: false,
+                    contentStyle: { backgroundColor: "#0a0a0a" },
+                  }}
+                />
+                <Stack.Screen
                   name="simulator"
                   options={{
                     headerShown: true,
+                    // iOS would show the previous screen's title, "(tabs)".
+                    headerBackButtonDisplayMode: "minimal",
                     title: "Strategy Simulator",
                     headerStyle: { backgroundColor: "#0a0a0a" },
                     headerTintColor: "#fafafa",

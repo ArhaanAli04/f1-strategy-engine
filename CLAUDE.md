@@ -1812,6 +1812,44 @@ prevent silent breaks during pip install --upgrade.
 
 ### Notes
 
+**Strategy Simulator counted retired cars, and four related fixes (✅ fixed
+2026-10-07):** Found on the iPhone: LIN, P9 at Belgian GP 2026 lap 40 (HARD,
+age 24, stop lap 42 onto SOFT, 4 laps left) came out "−3", P12 in 99.7% of
+runs, while the explanation said "position unchanged" and the mean finish
+time sat below its own 5th percentile.
+- **Root cause: `prediction_worker._build_race_state` kept retired cars.** Its
+  field is every driver's latest row; three cars out since laps 8-27 kept
+  race times 1,569-4,569 s below LIN's, so they "finished" P1-P3 and pushed
+  the field down 3 places. On a safety-car lap the field was bunched behind
+  the earliest of them, which skewed the mean. It now applies
+  `strategy_service.still_racing` against the requester's row as of
+  `current_lap`, as `_resolve_position_context` has since 2026-09-28. After:
+  19 cars, LIN P9 in 99.5%, change 0, mean inside the range.
+- **Safety-car laps keep the order** (`race_simulator._advance_lap`): every
+  car used to get the identical time, so the order after an SC lap came down
+  to tie-breaking. Cars now queue behind the leader in their current order,
+  `SC_BUNCHED_GAP_SECONDS` (1.0 s, assumed) apart.
+- **`drivers_overtaken` lists real swaps** (`_build_plan_explanation`): the
+  rivals that swap places with the requester in more than half of the runs,
+  either way (the sign of `gap_seconds` gives the direction), ordered by
+  starting position. Before, it was the cars behind within 22 s at
+  `current_lap`, a snapshot that could contradict the result. Same response
+  fields; web, desktop and mobile now label each row ("passes you" / "you
+  pass") and say "No driver swaps places with you in most simulations"
+  instead of "position unchanged by pit stop timing".
+- **Rivals' tyres as of `current_lap`** (`_build_race_state`): every other
+  car's compound and tyre age came from their LAST lap of the race, so a
+  what-if at Belgian lap 25 started LEC on lap-44 HARDs aged 24 (really 5,
+  he stopped on lap 20) and NOR on the MEDIUMs he fitted on lap 31. The pit
+  model then stopped 19 of 20 cars (LEC on lap 26 in every run). Now read
+  from the same `current_lap` row as position: 6 cars stop after lap 25 (the
+  real race had 3), and NOR stopping on lap 32 lands P7 in 97% of runs (real:
+  stopped lap 31, finished P7).
+- **Not needed:** a `precompute_replay` rerun. Only `POST /simulate` calls
+  `simulate_race`; replay predictions and the pit window don't.
+- **Verified:** 889 unit, 12 Simulator integration, 70 web tests; `tsc` on
+  web, desktop and mobile; the LIN case re-run in the worker.
+
 **Demo Replay playback without a worker (✅ built 2026-09-30, demo deployment
 Day 4 — `docs/internal/demo-deployment-plan-2026.md`):**
 - **Two replay engines.** `replay_pipeline.py` sends every lap through the
@@ -3020,7 +3058,8 @@ CSS `transform` transition. `CircuitMapPanel` sits at the top of the
 outline (`UpcomingRaceCard`), the full live panel belongs where web
 mounts it (`RacePage`). Several simplifications are disclosed inline in
 `mobile/src/README.md` (no FLIP row-reorder animation, `TelemetryGauge`'s
-arcs snap instead of sweep, a single-plan Simulator with a typed session ID)
+arcs snap instead of sweep; the Simulator matches web since 2026-10-07 apart
+from CSV export and drag-drop)
 — check that file before assuming full parity with any given web component.
 
 **Since 2026-10-06 mobile runs in Expo Go on the owner's iPhone,** and was
