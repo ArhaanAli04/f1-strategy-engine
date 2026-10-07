@@ -1,13 +1,14 @@
-import { ScrollView, View } from "react-native"
+import { ScrollView, Text, View } from "react-native"
+import { DriverRosterGrid } from "@/components/dashboard/DriverRosterGrid"
 import { QuickAccessCards } from "@/components/dashboard/QuickAccessCards"
 import { RecentAlertsFeed } from "@/components/dashboard/RecentAlertsFeed"
 import { UpcomingRaceCard } from "@/components/dashboard/UpcomingRaceCard"
 import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { useUpcomingRace } from "@/hooks/useUpcomingRace"
 
-// RN port of web/src/pages/DashboardPage.tsx. Drops DriverRosterGrid (the
-// full roster already has its own Drivers tab on mobile — no need to
-// duplicate it on Home the way web's single-page layout does).
+// RN port of web/src/pages/DashboardPage.tsx, roster included below the quick
+// access cards as on web and desktop (since 2026-10-06; it was left to the
+// Drivers tab before).
 export default function HomeScreen() {
   // Called again here (UpcomingRaceCard already calls it internally) purely
   // for its dataUpdatedAt — react-query dedupes same-key queries onto one
@@ -21,6 +22,10 @@ export default function HomeScreen() {
         <UpcomingRaceCard />
         <RecentAlertsFeed />
         <QuickAccessCards />
+        <View className="gap-3">
+          <Text className="text-lg font-semibold text-foreground">Driver Roster</Text>
+          <DriverRosterGrid />
+        </View>
       </ScrollView>
     </View>
   )

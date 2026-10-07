@@ -1,6 +1,7 @@
 import { useLocalSearchParams } from "expo-router"
 import { useState } from "react"
 import { Pressable, ScrollView, Text, View } from "react-native"
+import { LapTimesChart } from "@/components/driver/LapTimesChart"
 import { SectorComparison } from "@/components/driver/SectorComparison"
 import { StyleRadar } from "@/components/driver/StyleRadar"
 import { OfflineBanner } from "@/components/shared/OfflineBanner"
@@ -10,21 +11,22 @@ import { useDriverSeasonStats } from "@/hooks/useDriverSeasonStats"
 import { useDrivers } from "@/hooks/useDrivers"
 import { useResolvedSession } from "@/hooks/useResolvedSession"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
+import * as haptics from "@/utils/haptics"
 
 // Full port of web/src/pages/DriverPage.tsx, replacing the Day 31 identity-
 // only stub (which deferred all 3 charts until victory-native +
 // @shopify/react-native-skia were installed — see CLAUDE.md's Day 32
 // deferred-wiring note). Segmented control instead of web's always-visible
-// 3-card grid — 3 charts don't fit one mobile screen at once, so this
-// paginates them behind Overview / Driving Style / Sector Times, per the
-// Day 32 spec's explicit choice of a hand-rolled tab switcher over pulling
-// in @react-navigation/material-top-tabs.
+// card grid, which doesn't fit one mobile screen: Overview (season stats,
+// then the driving-style chart below them) and Sector Times. A hand-rolled
+// tab switcher rather than @react-navigation/material-top-tabs (Day 32
+// spec). Driving Style was its own tab until 2026-10-06; the owner merged it
+// into Overview after the first device run.
 
-type SubView = "overview" | "style" | "sectors"
+type SubView = "overview" | "sectors"
 
 const SUB_VIEWS: { key: SubView; label: string }[] = [
   { key: "overview", label: "Overview" },
-  { key: "style", label: "Driving Style" },
   { key: "sectors", label: "Sector Times" },
 ]
 
@@ -145,7 +147,10 @@ export default function DriverDetailScreen() {
               return (
                 <Pressable
                   key={key}
-                  onPress={() => setSubView(key)}
+                  onPress={() => {
+                    if (key !== subView) haptics.selectionTick()
+                    setSubView(key)
+                  }}
                   className={`flex-1 items-center border-b-2 py-2.5 ${active ? "border-foreground" : "border-transparent"}`}
                 >
                   <Text className={`text-xs font-medium ${active ? "text-foreground" : "text-muted"}`}>
@@ -187,12 +192,10 @@ export default function DriverDetailScreen() {
                   </View>
                 )}
               </View>
-            </View>
-          )}
-
-          {subView === "style" && (
-            <View className="rounded-md border border-white/10 bg-surface p-4">
-              <StyleRadar driverId={driver.id} sessionId={sessionId} driverCode={driver.code} />
+              <View className="rounded-md border border-white/10 bg-surface p-4">
+                <Text className="mb-3 text-sm font-semibold text-foreground">Driving Style</Text>
+                <StyleRadar driverId={driver.id} sessionId={sessionId} driverCode={driver.code} />
+              </View>
             </View>
           )}
 
@@ -202,6 +205,15 @@ export default function DriverDetailScreen() {
                 Sector Times vs. Team Average
               </Text>
               <SectorComparison sessionId={sessionId} driverId={driver.id} />
+            </View>
+          )}
+
+          {subView === "sectors" && (
+            <View className="rounded-md border border-white/10 bg-surface p-4">
+              <Text className="mb-3 text-sm font-semibold text-foreground">
+                Lap Times by Compound
+              </Text>
+              <LapTimesChart sessionId={sessionId} driverId={driver.id} />
             </View>
           )}
         </View>
