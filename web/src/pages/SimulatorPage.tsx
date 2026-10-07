@@ -159,6 +159,16 @@ function formatOvertakingEnrichment(entry: OvertakingDriver): string {
   return parts.join(" · ")
 }
 
+// drivers_overtaken holds the rivals who swap places with the driver in most
+// simulations (backend selection since 2026-10-07). gap_seconds is the
+// rival's race time minus the driver's at the current lap, so its sign says
+// which way the swap went.
+function formatSwap(entry: OvertakingDriver): string {
+  return entry.gap_seconds > 0
+    ? `+${entry.gap_seconds.toFixed(1)}s behind → passes you`
+    : `${Math.abs(entry.gap_seconds).toFixed(1)}s ahead → you pass`
+}
+
 interface PlanExplanationCardProps {
   planLabel: string
   strategy: SimulatedRaceOutcome
@@ -193,8 +203,6 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
       ? `Why ${planLabel} loses ${pluralize(Math.abs(position_gain_loss), "position")}`
       : `Why ${planLabel} doesn't change your position`
 
-  const driverListLabel = isGain ? "Drivers you overtake after pit" : "Drivers who overtook you in pitstop"
-  const arrowLabel = isGain ? "→ you overtake" : "→ now ahead of you"
 
   return (
     <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
@@ -216,11 +224,11 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
 
       {explanation.drivers_overtaken.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          No drivers within pit stop window — position unchanged by pit stop timing
+          No driver swaps places with you in most simulations
         </p>
       ) : (
         <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">{driverListLabel}</p>
+          <p className="text-xs font-medium text-muted-foreground">Drivers who swap places with you in most simulations</p>
           <div className="space-y-1">
             {explanation.drivers_overtaken.map((entry) => {
               const driver = driversById.get(entry.driver_id)
@@ -238,7 +246,7 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
                       {driver?.code ?? "???"}
                     </span>
                     <span className="text-muted-foreground">
-                      +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
+                      {formatSwap(entry)}
                     </span>
                   </div>
                   {/* Real Monte Carlo outputs from the SAME simulate_race call
@@ -270,8 +278,8 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
           isFasterOnFreshTyre above), which the old hardcoded constant could
           never represent. Still deliberately does NOT assert a "sufficient"/
           "not enough to recover" verdict about POSITION (removed
-          2026-09-06) — drivers_overtaken above is a frozen current-lap
-          snapshot, and this line's rival-pace assumption (see the trailing
+          2026-09-06) — drivers_overtaken above comes from the simulation,
+          and this line's rival-pace assumption (see the trailing
           sentence below) is unchanged by this fix: the real Monte Carlo
           simulation behind position_gain_loss models every rival's own tyre
           wear and pit decisions lap by lap, which this simplified pace

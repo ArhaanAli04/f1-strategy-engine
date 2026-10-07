@@ -2,11 +2,7 @@
 
 // One candidate pit plan within a multi-scenario compare request — see
 // ScenarioPlan's own docstring in simulate_schema.py. label is optional and
-// display-only. Not yet used by any mobile screen (Compare Scenarios mode
-// is web/desktop-only for now — see mobile/src/README.md), but kept here so
-// the type mirror stays complete and mobile's SimulatedRaceOutcome below
-// (which the backend always populates, single-plan or not) type-checks
-// against the real response shape.
+// display-only.
 export interface ScenarioPlan {
   pit_laps: number[]
   compounds: string[]
@@ -36,6 +32,7 @@ export interface SimulateStrategyRequest {
 
 // driver_id, not driver_code — the frontend resolves id -> code/team color via
 // useDrivers, same pattern as DriverChip/LiveTimingTower.
+//
 // finish_ahead_probability/rival_projected_pit_lap/rival_pit_probability are
 // real outputs of the SAME 1000-run Monte Carlo simulate_race call behind
 // position_gain_loss/position_probabilities — added for the What-If
@@ -71,8 +68,6 @@ export interface PlanExplanation {
 // One finishing position's probability from the real 1000-run Monte Carlo
 // outcome — sparse (probability > 0 only) and sorted by position ascending,
 // see backend/schemas/simulate_schema.py's PositionProbability docstring.
-// Not yet rendered by any mobile screen (the distribution chart is web/
-// desktop-only for now — see mobile/src/README.md).
 export interface PositionProbability {
   position: number
   probability: number
@@ -82,8 +77,7 @@ export interface SimulatedRaceOutcome {
   pit_laps: number[]
   compounds: string[]
   // Passed through verbatim from the matching ScenarioPlan.label in a
-  // multi-scenario compare request; null for the single-plan path (the only
-  // path any mobile screen submits today).
+  // multi-scenario compare request; null for the single-plan path.
   label: string | null
   predicted_finish_time: number
   position_gain_loss: number

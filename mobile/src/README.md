@@ -8,14 +8,16 @@ their `web/` source changes.
 
 ## Verbatim copies — re-copy on change
 
-**Drift audit, 2026-10-07:** five of these no longer match web, because web
-changed and mobile was out of scope: `types/index.ts`, `types/simulate.ts`,
-`types/telemetry.ts` (mobile's `DriverGap` lacks `compound` and `laps_behind`,
-and its gaps aren't nullable), `api/strategy.ts` (lacks `getStrategyHistory`
-and `getLastIngestedSession`) and `utils/formatters.ts`. Web's `types/demo.ts`
-has no mobile copy. Re-syncing them is checkpoint 1 of the Day 6b mobile
-catch-up (`docs/internal/demo-deployment-plan-2026.md`, "Day 6b-mobile").
-Everything else in this table matches web.
+**Drift audit, 2026-10-07:** five of these no longer matched web, because
+web changed and mobile was out of scope. Three were re-copied for the
+Simulator rework the same day and match again: `types/simulate.ts`,
+`api/strategy.ts` (now has `getStrategyHistory` and `getLastIngestedSession`)
+and `utils/formatters.ts` (now has `formatRaceTime`). Two still differ:
+`types/index.ts` and `types/telemetry.ts` (mobile's `DriverGap` lacks
+`compound` and `laps_behind`, and its gaps aren't nullable). Web's
+`types/demo.ts` has no mobile copy. Re-syncing those is checkpoint 1 of the
+Day 6b mobile catch-up (`docs/internal/demo-deployment-plan-2026.md`, "Day
+6b-mobile"). Everything else in this table matches web.
 
 | mobile/src path | web/ source |
 |---|---|
@@ -36,7 +38,7 @@ Everything else in this table matches web.
 | `api/client.ts` | `web/src/api/client.ts` | Same axios instance, same request/response interceptor shape (attach bearer token, single-flight 401 refresh). Reads `accessToken` synchronously from `useAuthStore.getState()`, same as web — the store itself is now SecureStore-backed (see below), not the interceptor. |
 | `stores/authStore.ts` | `web/src/stores/authStore.ts` | `persist`'s storage swapped from the default (localStorage) to a `StateStorage` adapter wrapping `expo-secure-store`'s async `getItemAsync`/`setItemAsync`/`deleteItemAsync`. `partialize` persists only `accessToken`/`refreshToken`/`expiresAt` — `user` is intentionally never persisted (SecureStore caps each item at ~2048 bytes on iOS; `user` has no fixed size bound and is cheap to refetch via `GET /auth/me` on launch instead). Adds a `hasHydrated` flag (`onRehydrateStorage`) — the root layout (`app/_layout.tsx`, Checkpoint 3) must gate rendering on this before reading `accessToken`, since SecureStore's read is async unlike localStorage's synchronous one. |
 | `api/ergast.ts` | `web/src/api/ergast.ts` | Web's file plus one mobile-only function, `getSeasonDriverStandings(season)`: the whole drivers' championship in one request, for the Drivers tab's championship card (2026-10-07). Re-copy web's functions on change and keep this one. |
-| `utils/constants.ts` | `web/src/utils/constants.ts` | Drops `CHART_TOOLTIP_STYLE` (styled Recharts' web-only `<Tooltip>` — no chart library wired up yet, victory-native is deferred to Day 32). `API_URL`/`WS_URL` read from `process.env.EXPO_PUBLIC_*` (Expo's built-in env inlining) instead of Vite's `import.meta.env`. `ROUTES` redefined entirely as Expo Router file-based paths (`/(tabs)/live`, `/(auth)/login`, etc.) instead of web's react-router path strings — same key names, different values/shape. `FALLBACK_TEAM_COLOR` and `COMPOUND_COLORS` are unchanged. |
+| `utils/constants.ts` | `web/src/utils/constants.ts` | Drops `CHART_TOOLTIP_STYLE` (styled Recharts' web-only `<Tooltip>` — no chart library wired up yet, victory-native is deferred to Day 32). `API_URL`/`WS_URL` read from `process.env.EXPO_PUBLIC_*` (Expo's built-in env inlining) instead of Vite's `import.meta.env`. `ROUTES` redefined entirely as Expo Router file-based paths (`/(tabs)/live`, `/(auth)/login`, etc.) instead of web's react-router path strings — same key names, different values/shape. `FALLBACK_TEAM_COLOR`, `COMPOUND_COLORS` and `SCENARIO_SERIES_COLORS` (added 2026-10-07 with its comment, for the Simulator) are unchanged. |
 
 ## New files — not copies, but mirror web hook logic
 
@@ -52,9 +54,11 @@ shapes, etc).
 | `hooks/useDrivers.ts` | `web/src/hooks/useDrivers.ts` |
 | `hooks/useCurrentRace.ts` | `web/src/hooks/useCurrentRace.ts` |
 | `hooks/useResolvedSession.ts` | `web/src/hooks/useResolvedSession.ts` |
+| `hooks/useLastIngestedSession.ts` | `web/src/hooks/useLastIngestedSession.ts`, without web's `meta.silentOn404` (mobile has no global error toast to silence). Added 2026-10-07 for the Simulator's session. |
 | `hooks/useSessionGaps.ts` | `web/src/hooks/useSessionGaps.ts` |
 | `hooks/useStrategy.ts` | `web/src/hooks/useStrategy.ts` (`usePitWindow`/`useStrategyOverview` ported first for the Strategy tab; `useSimulateStrategy`/`useSimulationResult` added Day 32 Checkpoint 4 for the Simulator screen. `useUndercut` still isn't ported — no mobile consumer yet) |
 | `hooks/useDriverSeasonStats.ts` | `web/src/hooks/useDriverSeasonStats.ts` (ported Day 32 Checkpoint 3, verbatim logic — pure react-query + fetch, no browser API to adapt). Since 2026-10-07 points come from the championship standing, which includes sprints, in all three clients. |
+| `hooks/useStrategy.ts` `useUndercut` | web's `useUndercut`, same key and `enabled` flag (2026-10-07, for the Strategy tab's driver sheet). |
 | `hooks/useRaceBySession.ts` | `web/src/hooks/useRaceBySession.ts`, plus an exported `raceBySessionQueryOptions` (mobile only) so the Alerts tab can look up every alert's race with `useQueries` on the same cache (2026-10-07). |
 | `hooks/useDriverAnalysis.ts` | inline `useQuery` in `web/src/components/driver/StyleRadar.tsx` | web defines this query inline since `StyleRadar` is its only consumer; mobile's Driver Detail header also needs `archetype`, so it's a shared hook here — same queryKey, so react-query dedupes the request between the header and `StyleRadar` instead of firing it twice. |
 | `hooks/useUpcomingRace.ts` | `web/src/hooks/useUpcomingRace.ts` |
@@ -119,6 +123,7 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
 | `components/circuit/CircuitOutlineSvg.tsx` | `web/src/components/circuit/CircuitOutlineSvg.tsx` | `svg`/`path`/`circle`/`text` -> react-native-svg's `Svg`/`Path`/`Circle`/`Text`. Web's actual markup uses `<path>` (built from `points`), not `<polyline>` — ported as literally written, not per the primitive-mapping note's general guidance. `dominantBaseline="central"` has no react-native-svg equivalent — approximated with a `dy` nudge. |
 | `components/telemetry/TyreIcon.tsx` | inline `TyreIcon` function in `web/src/components/telemetry/LiveTimingTower.tsx` | Extracted into its own file since mobile reuses it on both the Live tab and Driver Detail; web only uses it in one place. Same two-arc geometry. |
 | `components/strategy/PitWindowCard.tsx` | `web/src/components/strategy/PitWindowCard.tsx` | Same compact/full modes, same fields (recommended_compound/confidence_score/explanation.narrative, Checkpoint 5 of the core-feature-rebuild — replaced the old client-side SHAP top-contribution formatting, now redundant with the server-built narrative). Deliberately simpler than web's post-Checkpoint-5 version: always sources from usePitWindow's on-demand REST recompute — mobile has no WebSocket lap-completion stream wired to the Strategy tab (`hooks/useLiveTelemetry.ts` exists for the Live tab's CircuitMapPanel only), so there's no `isReplayActive`/`usePitRecommendation`-style unification to port; the Strategy tab (`app/(tabs)/strategy.tsx`) only ever renders this in `compact` mode inside its driver grid, same as before. |
+| `components/strategy/PositionDistributionChart.tsx` | `web/src/components/strategy/PositionDistributionChart.tsx` | Ported 2026-10-07. Same data (union of positions, percentages to one decimal, gain/hold/lose against `starting_position`, mean position to two decimals) and the same scenario colours. Grouped bars with victory-native's `BarGroup` (as `driver/SectorComparison.tsx`), one fixed y key per strategy (`s0`-`s3`, the backend's 4-scenario cap). No tooltip. The edge padding is sized from the measured width so the first and last bar groups fit (a fixed 16 px cut them off on the iPhone). The table drops web's finish-time range column, which the Simulator's result cards already show. Also exports `strategyLabel`, the Simulator's name for a strategy. |
 | `components/strategy/PlanExplanationCard.tsx` | inline `PlanExplanationCard` in `web/src/pages/SimulatorPage.tsx` (desktop's copy-and-adapted version is identical here, minus CSV export) | Ported Day 32 (Checkpoint 4). Same gain/loss heading logic, same pit-cost/recoverable-seconds text. `drivers_overtaken` renders as a `FlatList` (`scrollEnabled={false}`, nested inside the Simulator screen's outer `ScrollView` — lists here are short enough that the nested-list perf warning doesn't matter in practice) using `LiveTimingTower`'s team-color-bar + code row convention (`app/(tabs)/live.tsx`), not `DriverChip`'s pill style — same choice web/desktop made for the same reason. **2026-09-06:** ported web/desktop's wording fix — no longer asserts a "sufficient"/"not enough to recover" verdict from the hardcoded `fresh_tyre_gain_per_lap` constant, which could contradict the real Monte Carlo `position_gain_loss` above it (see `docs/internal/core-feature-rebuild-whatif-simulator.md`'s deferred-item writeup). |
 | `components/dashboard/UpcomingRaceCard.tsx` | `web/src/components/dashboard/UpcomingRaceCard.tsx` | Same countdown logic. |
 | `components/dashboard/QuickAccessCards.tsx` | `web/src/components/dashboard/QuickAccessCards.tsx` | Two cards, not three — web's third card scroll-anchors to an in-page `#driver-roster` section that doesn't exist on mobile's Home; navigates to the Drivers tab instead. |
@@ -159,6 +164,20 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
     `LapTimesChart`.
   - **Banner:** the historical-data banner doesn't persist its dismissal like
     web's `localStorage` version; it resets each time the screen mounts.
+- `app/(tabs)/strategy.tsx` (2026-10-07, mobile only):
+  - **Header:** the race and whether it is live.
+  - **Cards:** tapping a card selects the driver (`sessionStore`, shared with
+    the Live tab; the selected card is outlined) and opens the
+    `app/strategy-driver.tsx` route: a native iOS form sheet sized to its
+    content (`presentation: "formSheet"`, `sheetAllowedDetents:
+    "fitToContents"` in `app/_layout.tsx`; React Native's `Modal` only opens
+    full height). It renders `components/strategy/DriverStrategySheet.tsx`,
+    a plain `View`: a ScrollView inside a fit-to-contents sheet doesn't size
+    it.
+  - **The sheet** shows the full `PitWindowCard`, `UndercutThreatPanel` (a
+    port of web's, live rows only until mobile detects replays) and
+    "Simulate this driver", which opens `app/simulator.tsx` with `sessionId`
+    and `driverId` route params as the starting values.
 - `app/(tabs)/alerts.tsx` (rebuilt 2026-10-07, mobile only; web and desktop
   unchanged):
   - **Cards:** each alert has a type badge and title, a relative time and an
@@ -180,49 +199,39 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
     selection mode started made the release untick the alert and end
     selection mode.
 - `app/simulator.tsx` is new Day 32 (Checkpoint 4) — a port of
-  `web/src/pages/SimulatorPage.tsx`/`desktop/src/pages/SimulatorPage.tsx`'s
-  4-step flow, reached via a "Run Simulator" button at the top of the
-  Strategy tab (`app/(tabs)/strategy.tsx`) rather than a 6th tab bar entry.
-  Session ID is always a plain manual text input, matching desktop's
-  version — no web-only live-mode auto-detect (`useCurrentRace`/
-  `useSessionGaps`-driven read-only field). No CSV export (desktop-only) and
-  no drag-drop (add/remove buttons only, same as web). Uses
-  `@react-native-picker/picker` (added Day 32 Checkpoint 4) for the
-  driver/compound selects — confirmed via Expo's docs as still current and
-  Expo-SDK-57-compatible; `@expo/ui/community/picker` (a newer Jetpack-
-  Compose/SwiftUI-backed drop-in Expo also documents) was not used, to avoid
-  pulling in the larger `@expo/ui` package for a single form control. Step
-  4's chart is a horizontal bar (victory-native's `CartesianChart` +
-  `HorizontalBar`, `orientation="horizontal"`) — per-bar gain/loss coloring
-  isn't a built-in prop (no Recharts-style per-`Cell` coloring), so the
-  chart data carries two synthetic y-series (`gain`/`loss`, only one nonzero
-  per row) rendered as two independently-colored `HorizontalBar` layers.
-  That chart data is passed to `CartesianChart` inline in JSX, not through a
-  separately-typed component prop — routing it through a named interface
-  first breaks TypeScript's overload resolution for `CartesianChart`'s
-  generic `RawData` (confirmed while building this screen; see the inline
-  comment at the call site).
-  **Not yet ported (What-If Simulator multi-scenario rebuild, 2026-09-06 —
-  see `docs/internal/core-feature-rebuild-whatif-simulator.md`):** web/desktop gained
-  a Single Plan vs. Compare Scenarios mode toggle (up to 4 candidate pit
-  laps run against one shared field state, one shared random seed) and a
-  new finishing-position probability distribution chart (`components/
-  strategy/PositionDistributionChart.tsx` on web/desktop — a recharts
-  grouped bar chart with a risk/reward table). Only the DATA layer was
-  synced here: `types/simulate.ts` mirrors the full new response shape
-  (`ScenarioPlan`, `SimulatedRaceOutcome.label`/`mean_position`/
-  `position_probabilities`, `SimulateStrategyResponse.starting_position`),
-  and `PlanExplanationCard.tsx` got the same wording fix web/desktop did
-  (see its own table row below). The UI itself — the mode toggle, the
-  scenario-row builder, and a native equivalent of the distribution chart —
-  is deferred: this screen's existing chart is already a real engineering
-  lift over web's recharts version (see the synthetic-gain/loss-series
-  workaround above), and a grouped bar chart with a DYNAMIC per-scenario
-  series count would need its own dedicated native charting effort, not a
-  quick follow-on to this one. `app/simulator.tsx` still only submits a
-  single plan (`pit_laps`/`compounds`, `scenarios` never set) and never
-  reads `position_probabilities`/`mean_position`/`starting_position` from a
-  response. Add when a future session scopes the native chart properly.
+  `web/src/pages/SimulatorPage.tsx`'s 4-step flow, reached from the Strategy
+  tab's "Run Simulator" button and a driver sheet's "Simulate this driver"
+  (not a 6th tab). **Brought level with web on 2026-10-07** (owner: the
+  results must match web):
+  - **Steps:** Setup / Strategy / Simulate / Results, one word each so they
+    fit under their circles on a phone.
+  - **Session, read-only:** a driver sheet's session first, else the live
+    race (a `/races/current` Race session with timing data, as web), else the
+    last ingested race (`useLastIngestedSession`). The typed Session ID field
+    is gone.
+  - **Single Plan / Compare Scenarios,** as web: up to 4 scenarios (pit lap,
+    compound, optional label, defaulting to "Pit lap N"), sent as
+    `scenarios`. A scenario's lap and label share a line and its compound
+    wheel sits below, since web's one-line row is too wide for a phone. The
+    quota line says what a comparison costs ("This run needs N").
+  - **Results:** the position-change bar chart, named by each strategy's
+    label; one card per strategy with the change, `formatRaceTime` finish time
+    and its range (web's table, four columns, didn't fit); then
+    `PositionDistributionChart` and a labelled `PlanExplanationCard` per
+    strategy.
+  - **Not on mobile:** CSV export (desktop only) and drag-drop.
+  - **NativeWind:** the disabled buttons dim through a plain `opacity` style;
+    the `disabled:` variant isn't used elsewhere in mobile, so it may not
+    apply on the device.
+  Uses `@react-native-picker/picker` (added Day 32 Checkpoint 4) for the
+  driver/compound selects, with `itemStyle` so the iOS wheel's labels aren't
+  black. The position-change chart is a horizontal bar (victory-native's
+  `CartesianChart` + `HorizontalBar`, `orientation="horizontal"`): per-bar
+  gain/loss colouring isn't a built-in prop, so the data carries two
+  synthetic y-series (`gain`/`loss`, only one nonzero per row) drawn as two
+  differently coloured `HorizontalBar` layers. That data is passed to
+  `CartesianChart` inline in JSX: routing it through a named interface first
+  breaks TypeScript's overload resolution for its generic `RawData`.
 
 ## Offline support (Day 32 Checkpoint 5)
 
