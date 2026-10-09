@@ -4,6 +4,7 @@ import { router } from "expo-router"
 import { useMemo, useState } from "react"
 import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native"
 import { CircuitMapPanel } from "@/components/circuit/CircuitMapPanel"
+import { ReplaySelectorPanel } from "@/components/demo/ReplaySelectorPanel"
 import { OfflineBanner } from "@/components/shared/OfflineBanner"
 import { TeamLogo } from "@/components/shared/TeamLogo"
 import { LapTimeChart } from "@/components/telemetry/LapTimeChart"
@@ -11,8 +12,8 @@ import { SectorHeatmap } from "@/components/telemetry/SectorHeatmap"
 import { TyreIcon } from "@/components/telemetry/TyreIcon"
 import { driverLapsQueryOptions } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
-import { useLiveTelemetry } from "@/hooks/useLiveTelemetry"
-import { useResolvedSession } from "@/hooks/useResolvedSession"
+import { useSharedLiveTelemetry } from "@/hooks/useSharedLiveTelemetry"
+import { useRaceSession } from "@/hooks/useRaceSession"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
 import { useSessionStore } from "@/stores/sessionStore"
 import { ROUTES, FALLBACK_TEAM_COLOR } from "@/utils/constants"
@@ -55,13 +56,22 @@ function formatGapToLeader(seconds: number): string {
   return `+${formatLapTime(seconds)}`
 }
 
+function formatLapsBehind(laps: number): string {
+  return `+${laps} LAP${laps > 1 ? "S" : ""}`
+}
+
 // Mirrors web/src/components/telemetry/LiveTimingTower.tsx's
-// computeGapLabels exactly — position 1 shows "Leader", a broken
-// ahead-chain (null gap) shows "—" for itself and everything behind it.
+// computeGapLabels exactly (re-synced 2026-10-09). Position 1 shows
+// "Leader". From the first car a lap down (laps_behind > 0) the tower counts
+// laps instead of seconds for everyone behind, since a lapped car's race time
+// isn't comparable to the lead lap's. A null gap with laps_behind 0 (no time
+// set yet) shows "—" for itself and everything behind it.
 function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
   const sorted = [...gaps].sort((a, b) => a.position - b.position)
   const labels: Record<string, string> = {}
-  let cumulative = 0
+  let cumulativeSeconds = 0
+  let cumulativeLaps = 0
+  let lappedMode = false
   let chainBroken = false
 
   for (const gap of sorted) {
@@ -69,13 +79,19 @@ function computeGapLabels(gaps: DriverGap[]): Record<string, string> {
       labels[gap.driver_id] = "Leader"
       continue
     }
+    if (lappedMode || gap.laps_behind > 0) {
+      lappedMode = true
+      cumulativeLaps += gap.laps_behind
+      labels[gap.driver_id] = formatLapsBehind(cumulativeLaps)
+      continue
+    }
     if (gap.gap_to_ahead_seconds === null || chainBroken) {
       chainBroken = true
       labels[gap.driver_id] = "—"
       continue
     }
-    cumulative += gap.gap_to_ahead_seconds
-    labels[gap.driver_id] = formatGapToLeader(cumulative)
+    cumulativeSeconds += gap.gap_to_ahead_seconds
+    labels[gap.driver_id] = formatGapToLeader(cumulativeSeconds)
   }
 
   return labels
@@ -123,7 +139,8 @@ function ViewSwitch({ view, onChange }: ViewSwitchProps) {
 // rows simply re-render in their new order. Pull to refresh refetches the
 // gaps.
 export default function LiveScreen() {
-  const { sessionId } = useResolvedSession()
+  // Follows a running Demo Replay, else the live or last completed race.
+  const { sessionId, isLive, isReplay } = useRaceSession()
   const { data: drivers } = useDrivers()
   const {
     data: gapsResponse,
@@ -132,9 +149,9 @@ export default function LiveScreen() {
     refetch,
     isRefetching,
   } = useSessionGaps(sessionId)
-  // The tab's one WebSocket: LapTimeChart and SectorHeatmap get its events as
-  // a prop, because each useLiveTelemetry call would open another.
-  const { lapsByDriver } = useLiveTelemetry(sessionId)
+  // The app's one shared live connection (LiveTelemetryBridge). LapTimeChart
+  // and SectorHeatmap still get its events as a prop.
+  const { lapsByDriver } = useSharedLiveTelemetry(sessionId)
   const selectedDriverId = useSessionStore((state) => state.selectedDriverId)
   const setSelectedDriver = useSessionStore((state) => state.setSelectedDriver)
   const [view, setView] = useState<LiveView>("timing")
@@ -184,7 +201,10 @@ export default function LiveScreen() {
           teamName: driver?.contracts[0]?.team?.name,
           teamColor: driver?.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR,
           gapLabel: gapLabels[gap.driver_id] ?? "—",
-          compound: liveLap?.compound ?? latestRestLap?.compound ?? null,
+          // gap.compound is the tyre the car is on now (live feed or Demo
+          // Replay), so a new tyre shows from the pit stop; a lap's compound
+          // only arrives once the out-lap is completed (Day 6b CP2, as web).
+          compound: gap.compound ?? liveLap?.compound ?? latestRestLap?.compound ?? null,
         }
       })
   }, [gaps, driversById, lapsByDriver, latestLapByDriver, gapLabels])
@@ -301,8 +321,9 @@ export default function LiveScreen() {
 
   // The map is shown in every state, as on web's race page, where it and the
   // tower load independently. stickyHeaderIndices counts children, so the
-  // switch's index depends on whether the map is there.
-  const switchIndex = sessionId ? 1 : 0
+  // switch's index depends on whether the map is there. The replay panel is
+  // always a child (it renders nothing when hidden, but still counts).
+  const switchIndex = sessionId ? 2 : 1
 
   return (
     <View className="flex-1 bg-background">
@@ -315,7 +336,8 @@ export default function LiveScreen() {
           <RefreshControl refreshing={isRefetching} onRefresh={refetch} tintColor="#fafafa" />
         }
       >
-        {sessionId ? <CircuitMapPanel sessionId={sessionId} /> : null}
+        <ReplaySelectorPanel sessionId={sessionId} isLive={isLive} />
+        {sessionId ? <CircuitMapPanel sessionId={sessionId} isExplicitSession={isReplay} /> : null}
         <ViewSwitch
           view={view}
           onChange={(next) => {

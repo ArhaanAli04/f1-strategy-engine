@@ -2,7 +2,7 @@ import { useMemo } from "react"
 import { Text, View } from "react-native"
 import { DriverChip } from "@/components/shared/DriverChip"
 import { useSessionGaps } from "@/hooks/useSessionGaps"
-import { useUndercut } from "@/hooks/useStrategy"
+import { useCurrentLapHistoryEntry, useUndercut } from "@/hooks/useStrategy"
 import type { DriverGap, UndercutThreatResponse } from "@/types"
 
 // Web's colours for a net gain and a net loss.
@@ -99,6 +99,46 @@ function ThreatRow({ label, otherDriverId, data, isLoading }: ThreatRowProps) {
   )
 }
 
+interface ReplayThreatRowProps {
+  label: string
+  otherDriverId: string | null
+  probability: number | null
+  asOfLap: number | null
+}
+
+// As web's ReplayThreatRow: a stored prediction has no projected gap or
+// recommended action, so this shows the probability bar and the lap it is
+// as of.
+function ReplayThreatRow({ label, otherDriverId, probability, asOfLap }: ReplayThreatRowProps) {
+  if (!otherDriverId) {
+    return (
+      <View className="rounded-md border border-white/10 p-2">
+        <Text className="text-xs text-muted">{label}: no car in range.</Text>
+      </View>
+    )
+  }
+
+  return (
+    <View className="gap-1.5 rounded-md border border-white/10 p-2">
+      <View className="flex-row items-center justify-between">
+        <Text className="text-xs font-medium text-muted">{label}</Text>
+        <DriverChip driverId={otherDriverId} />
+      </View>
+      {probability === null ? (
+        <Text className="text-xs text-muted">No prediction yet</Text>
+      ) : (
+        <>
+          <ProbabilityBar value={probability} />
+          <View className="flex-row items-center justify-between">
+            <Text className="text-xs text-muted">{Math.round(probability * 100)}% gain probability</Text>
+            <Text className="text-xs text-muted">as of lap {asOfLap}</Text>
+          </View>
+        </>
+      )}
+    </View>
+  )
+}
+
 interface UndercutThreatPanelProps {
   sessionId: string | null
   driverId: string | null
@@ -106,17 +146,21 @@ interface UndercutThreatPanelProps {
 
 // RN port of web/src/components/strategy/UndercutThreatPanel.tsx (2026-10-07,
 // the Strategy tab's driver sheet): the undercut opportunity on the car
-// ahead, and the threat from the car behind pitting now. Live rows only, from
-// GET .../undercut. Web's replay rows (the stored prediction for the current
-// lap, so a replay runs no ML on the web machine) come with the Day 6b mobile
-// catch-up, once mobile can tell a replay is running.
+// ahead, and the threat from the car behind pitting now. While a live race or
+// Demo Replay progresses, the rows show the stored prediction for the current
+// lap, so no ML runs on the server (web's replay rows, Day 6b-mobile CP4,
+// 2026-10-09); otherwise they come from GET .../undercut.
 export function UndercutThreatPanel({ sessionId, driverId }: UndercutThreatPanelProps) {
   const { data: gapsResponse } = useSessionGaps(sessionId)
   const gaps = useMemo(() => gapsResponse?.gaps ?? [], [gapsResponse])
   const { aheadDriverId, behindDriverId } = useMemo(() => resolveNeighbors(gaps, driverId), [gaps, driverId])
 
-  const opportunity = useUndercut(sessionId, driverId, aheadDriverId)
-  const threat = useUndercut(sessionId, behindDriverId, driverId)
+  // As web: the selected driver's stored undercut_score is already the
+  // opportunity on the car ahead, and the car behind's chance of gaining by
+  // pitting now is the complement of the stored overcut_score.
+  const { entry: historyEntry, isReplayActive } = useCurrentLapHistoryEntry(sessionId, driverId)
+  const opportunity = useUndercut(sessionId, driverId, aheadDriverId, !isReplayActive)
+  const threat = useUndercut(sessionId, behindDriverId, driverId, !isReplayActive)
 
   if (!sessionId || !driverId) {
     return <Text className="text-sm text-muted">No race session to show.</Text>
@@ -125,18 +169,37 @@ export function UndercutThreatPanel({ sessionId, driverId }: UndercutThreatPanel
   return (
     <View className="gap-2 rounded-md border border-white/10 bg-surface p-3">
       <Text className="text-sm font-semibold text-foreground">Undercut Threats</Text>
-      <ThreatRow
-        label="Opportunity — car ahead"
-        otherDriverId={aheadDriverId}
-        data={opportunity.data}
-        isLoading={opportunity.isLoading}
-      />
-      <ThreatRow
-        label="Threat — car behind"
-        otherDriverId={behindDriverId}
-        data={threat.data}
-        isLoading={threat.isLoading}
-      />
+      {isReplayActive ? (
+        <>
+          <ReplayThreatRow
+            label="Opportunity — car ahead"
+            otherDriverId={aheadDriverId}
+            probability={historyEntry?.undercut_score ?? null}
+            asOfLap={historyEntry?.lap_number ?? null}
+          />
+          <ReplayThreatRow
+            label="Threat — car behind"
+            otherDriverId={behindDriverId}
+            probability={historyEntry ? 1 - historyEntry.overcut_score : null}
+            asOfLap={historyEntry?.lap_number ?? null}
+          />
+        </>
+      ) : (
+        <>
+          <ThreatRow
+            label="Opportunity — car ahead"
+            otherDriverId={aheadDriverId}
+            data={opportunity.data}
+            isLoading={opportunity.isLoading}
+          />
+          <ThreatRow
+            label="Threat — car behind"
+            otherDriverId={behindDriverId}
+            data={threat.data}
+            isLoading={threat.isLoading}
+          />
+        </>
+      )}
     </View>
   )
 }

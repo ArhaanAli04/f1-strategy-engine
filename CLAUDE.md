@@ -612,24 +612,33 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Monza live-race fixes + verification tooling (2026-09-19/20) —
-          docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
-Status:   Monza issues A-E all fixed. Verification built: archive replay (V1),
-          property tests (V4), live-feed counters + raw recorder (V5), shadow
-          race (V3, full 53-lap run passed 14/14 on 2026-09-20). Two
-          prediction_worker bugs found by V3 and fixed (engine dispose, lap-
-          persist ordering retry), plus the same dispose flaw in
-          alert_worker (2026-09-20). Unit suite 651 passed. Nothing committed
-          yet by the session. Earlier tire-deg work (2026-09-09/11) is
-          closed except CP6 — see docs/internal/tire-deg-model-quality-and-rival-pit-
-          behavior.md and Deferred Wiring.
-Next:     Open items are in docs/internal/live-pipeline-open-decisions-and-
-          calibration-2026.md: chain-vs-retry decision (3b), V2 score
-          calibration, V5 check at the next live race (Azerbaijan R15,
-          2026-09-26, stack up with --env-file .env), lead-lap fallback only
-          if V5 shows F1's Position field does not stream live.
-Blockers: Mobile is tested on one iPhone in Expo Go (2026-10-06); Android
-          not yet run (see mobile/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
+Day:      Demo deployment plan (docs/internal/demo-deployment-plan-2026.md):
+          Days 1-6b and Day 6b-mobile done; last session 2026-10-09.
+Status:   Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
+          mobile's copies match web again, every race screen follows a running
+          Demo Replay, the Live tab has a replay selector, the strategy panels
+          show stored predictions during a replay, and the app shares one live
+          WebSocket. Also 2026-10-09: the selected driver's code label on the
+          circuit map (web, desktop, mobile) and a 180/min limit for
+          /positions (was 60; caused "something went wrong" toasts).
+          2026-10-07: mobile Simulator matched to web, and four Simulator bugs
+          fixed (retired cars in the field, rivals on last-lap tyres, safety-car
+          laps erasing the order, explanation list). Unit suite 891 passed,
+          web 74. Committing is the owner's.
+Next:     Day 6c, the pit-window recommendation engine (plan doc "Day 6c":
+          "no further stop", two-compound rule, compound choice, window
+          display, wording, undercut after a stop, replay recompute, tower
+          around pit laps). Then Day 6d, Simulator testing (scenario harness
+          against the curated races; ANT's phantom second stop; negligible
+          rival stops shown). Then Day 7, Fly deploy, starting with its
+          "Mobile pre-release pass" (npm audit triage, haptics switch,
+          react-native-worklets with the chosen mobile option).
+Blockers: Mobile tested on one iPhone in Expo Go only; Android not yet run
+          (mobile/README.md). Production is Fly.io (decided Day 24); its
+          deploy is demo plan Day 7, and VITE_API_URL_PROD and ALLOWED_ORIGINS
+          need the real URLs after it. Sector boundaries (S1/S2/S3) deferred.
+          Always recreate the local Docker stack with --env-file .env, or
+          secrets are silently blank.
 ```
 
 ---
@@ -1782,7 +1791,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
     - **Who sets it:** the live ingestor from TimingAppData's current stint,
       and playback from the lap the car is on.
     - **Who uses it:** web's and desktop's towers and desktop's overlay use
-      it first. Mobile is unchanged.
+      it first. Mobile's tower too since 2026-10-09 (Day 6b-mobile CP1).
     - **Result, Belgian window:** all 15 tyre changes now show at pit entry,
       124-145 s earlier.
   - **Plan and data:** `docs/internal/demo-deployment-plan-2026.md`,
@@ -1811,6 +1820,27 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Selected driver's code label on the circuit map, and a higher `/positions`
+rate limit (✅ done 2026-10-09):**
+- **Label (web, desktop, mobile; owner's request):** the selected driver's
+  enlarged dot carries a dark pill with a team-colour border and the driver
+  code, moving with the dot, drawn above the other dots, flipped below the dot
+  near the map's top edge. Web and desktop (`AnimatedDriverDots.tsx`, code
+  identical): each driver is an SVG `<g>` that the render-behind loop moves via
+  `style.transform`, the label inside it; `CircuitMapPanel` passes `code`
+  through `DriverDotMeta`. Mobile: `SelectedDriverLabel.tsx`, a React Native
+  `Animated.View` over the map fed by the selected `AnimatedDriverDot`'s
+  centre (`useAnimatedReaction` into shared values), because react-native-svg
+  `<Text>` doesn't take Reanimated's animated x/y reliably. Checked by the
+  owner on web and the iPhone; 4 new web tests.
+- **`/telemetry/{session_id}/positions` limit 180/min for a signed-in user**
+  (`core/rate_limit.py`'s `positions_rate_limit_value`; every other route
+  stays 60/min, logged-out 10/min). The map polls it by design (web 1 s,
+  desktop and mobile 2 s); web alone sat exactly at 60/min, and web plus the
+  phone on one account reached 59-83/min, so 32 requests got 429 in two
+  minutes, each a "something went wrong" toast on web. Verified: 100
+  back-to-back signed-in requests all 200. 2 new unit tests.
 
 **Strategy Simulator counted retired cars, and four related fixes (✅ fixed
 2026-10-07):** Found on the iPhone: LIN, P9 at Belgian GP 2026 lap 40 (HARD,
@@ -3068,12 +3098,17 @@ Timing / Lap Times / Sectors switch (web's `LapTimeChart` and `SectorHeatmap`
 ported); Home and the Drivers tab show the roster in constructor-standings
 order; the Drivers tab adds a Drivers' Championship card; the Alerts tab has
 type cards, race grouping, filters, tap-to-open, multi-select and animations;
-and `src/utils/haptics.ts` (`expo-haptics`) is the one haptics helper. Mobile
-has **not** had the Day 6b changes yet (tyre at the pit stop, Demo Replay
-selector, a session that follows a replay, replay-aware strategy panels), and
-several of its "verbatim" copies have drifted from web; both are the "Day
-6b-mobile" catch-up in `docs/internal/demo-deployment-plan-2026.md`, together
-with the Simulator changes the owner will specify. **NativeWind gotcha:** a
+and `src/utils/haptics.ts` (`expo-haptics`) is the one haptics helper. **Day
+6b caught up on 2026-10-09** (Day 6b-mobile CP1-CP4 in
+`docs/internal/demo-deployment-plan-2026.md`; checked on the owner's iPhone
+the same day): every verbatim copy matches web again; the tower's tyre changes at
+the pit stop and lapped cars show "+1 LAP"; Live, Strategy and Driver Detail
+follow a running Demo Replay (`useRaceSession`); the Live tab has a replay
+selector; the strategy panels show stored predictions during a replay; and the
+whole app shares **one** live-telemetry WebSocket (`LiveTelemetryBridge` +
+`stores/liveTelemetryStore.ts`, read with `useSharedLiveTelemetry`; never call
+`useLiveTelemetry` in a screen, each call opens its own socket). The Simulator
+matches web since 2026-10-07. **NativeWind gotcha:** a
 class no other mobile file uses may not apply on the device (it cost two
 rounds on the tower); check before using a new class, else use a plain
 `style`.

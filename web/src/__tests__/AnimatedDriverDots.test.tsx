@@ -1,6 +1,6 @@
 import { render, act } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { AnimatedDriverDots } from "@/components/circuit/AnimatedDriverDots"
+import { AnimatedDriverDots, type DriverDotMeta } from "@/components/circuit/AnimatedDriverDots"
 import type { CircuitOutlineTransform, DriverPosition } from "@/types"
 
 // Identity-ish transform: rotation 0, no centering, unit scale, origin
@@ -54,10 +54,12 @@ function dotsEl(positions: DriverPosition[], prefersReducedMotion = false) {
   )
 }
 
+// Each driver is a <g> carrying the position (the dot, and for the selected
+// driver its label, move together).
 function dotTransform(container: HTMLElement): string {
-  const circle = container.querySelector("circle")
-  if (!circle) throw new Error("no <circle> rendered")
-  return circle.style.transform
+  const group = container.querySelector<SVGGElement>("g[data-driver-number]")
+  if (!group) throw new Error("no driver <g> rendered")
+  return group.style.transform
 }
 
 function dotX(container: HTMLElement): number {
@@ -155,3 +157,67 @@ describe("AnimatedDriverDots render-behind buffer", () => {
     expect(dotX(container)).toBe(-99)
   })
 })
+
+// The selected driver's code label (2026-10-09): a pill inside the selected
+// driver's group, drawn last so it sits above the other dots, flipped below
+// the dot near the top edge of the map.
+describe("AnimatedDriverDots selected-driver label", () => {
+  const META = new Map<string, DriverDotMeta>([
+    ["1", { color: "#3671C6", driverId: "ver", code: "VER" }],
+    ["44", { color: "#E8002D", driverId: "ham", code: "HAM" }],
+    ["16", { color: "#E8002D", driverId: "lec", code: "LEC" }],
+  ])
+
+  function fieldEl(selectedDriverId: string | null, y = 500) {
+    const positions: DriverPosition[] = ["1", "44", "16"].map((driverNumber, index) => ({
+      driver_number: driverNumber,
+      x: -100 * index,
+      y,
+      z: null,
+      timestamp: null,
+    }))
+    return (
+      <svg>
+        <AnimatedDriverDots
+          positions={positions}
+          transform={TRANSFORM}
+          driverByCarNumber={META}
+          selectedDriverId={selectedDriverId}
+          prefersReducedMotion
+          renderDelayMs={RENDER_DELAY_MS}
+        />
+      </svg>
+    )
+  }
+
+  it("labels only the selected driver, with their code", () => {
+    const { container } = render(fieldEl("ham"))
+    const labels = container.querySelectorAll("[data-driver-label]")
+    expect(labels).toHaveLength(1)
+    expect(labels[0].textContent).toBe("HAM")
+    expect(labels[0].closest("g[data-driver-number]")?.getAttribute("data-driver-number")).toBe("44")
+  })
+
+  it("shows no label when no driver is selected", () => {
+    const { container } = render(fieldEl(null))
+    expect(container.querySelectorAll("[data-driver-label]")).toHaveLength(0)
+  })
+
+  it("draws the selected driver last, above the other dots", () => {
+    const { container } = render(fieldEl("ver"))
+    const order = Array.from(container.querySelectorAll("g[data-driver-number]")).map((group) =>
+      group.getAttribute("data-driver-number"),
+    )
+    expect(order).toEqual(["44", "16", "1"])
+  })
+
+  it("flips the label below the dot only when there is no room above it", () => {
+    const { container, rerender } = render(fieldEl("ham", 500))
+    const label = () => container.querySelector<SVGGElement>("[data-driver-label]")
+    expect(label()?.style.transform).toBe("")
+
+    rerender(fieldEl("ham", 10))
+    expect(label()?.style.transform).toMatch(/^translateY\(\d+px\)$/)
+  })
+})
+

@@ -67,3 +67,16 @@ def test_a_signed_in_request_is_bucketed_by_user_not_ip(monkeypatch: pytest.Monk
     )
 
     assert key == "user:user-123"
+
+
+@pytest.mark.unit
+def test_positions_poll_gets_a_higher_limit_for_a_signed_in_user() -> None:
+    # The circuit map polls positions every 1 s on web and every 2 s on
+    # desktop and mobile; one account on all three must stay under the limit.
+    assert rate_limit.positions_rate_limit_value("user:abc") == "180/minute"
+    assert rate_limit.rate_limit_value("user:abc") == "60/minute"
+
+
+@pytest.mark.unit
+def test_positions_poll_keeps_the_logged_out_limit() -> None:
+    assert rate_limit.positions_rate_limit_value(f"ip:{VISITOR_IP}") == "10/minute"
