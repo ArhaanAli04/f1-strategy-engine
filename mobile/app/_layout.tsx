@@ -17,6 +17,7 @@ import { useState } from "react"
 import { View } from "react-native"
 import { GestureHandlerRootView } from "react-native-gesture-handler"
 import { SafeAreaProvider } from "react-native-safe-area-context"
+import { LiveTelemetryBridge } from "@/components/shared/LiveTelemetryBridge"
 import { useNotificationResponseListener } from "@/hooks/useNotificationResponseListener"
 import { usePushNotifications } from "@/hooks/usePushNotifications"
 import { useAuthStore, useIsAuthenticated } from "@/stores/authStore"
@@ -90,6 +91,9 @@ export default function RootLayout() {
           }}
         >
           <PushNotificationRegistrar />
+          {/* The app's one live telemetry connection, beside the navigator so a
+              change of session never remounts the screens. */}
+          <LiveTelemetryBridge />
           <View className="flex-1 bg-background">
             <Stack
               screenOptions={{

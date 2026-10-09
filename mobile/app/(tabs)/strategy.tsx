@@ -2,7 +2,8 @@ import { router } from "expo-router"
 import { FlatList, Pressable, RefreshControl, Text, View } from "react-native"
 import { PitWindowCard } from "@/components/strategy/PitWindowCard"
 import { OfflineBanner } from "@/components/shared/OfflineBanner"
-import { useResolvedSession } from "@/hooks/useResolvedSession"
+import { useRaceSession } from "@/hooks/useRaceSession"
+import { useSharedLiveTelemetry } from "@/hooks/useSharedLiveTelemetry"
 import { useStrategyOverview } from "@/hooks/useStrategy"
 import { useSessionStore } from "@/stores/sessionStore"
 import { ROUTES } from "@/utils/constants"
@@ -38,15 +39,26 @@ function RunSimulatorButton() {
 // The tab's heading (mobile only, 2026-10-07): "Strategy Dashboard", then
 // which race the predictions are for and whether it is live. The line about
 // tapping a card is the list's footer, below the last card (owner's choice:
-// less text above the cards). A running Demo Replay is not detected yet; that
-// comes with the Day 6b mobile catch-up.
+// less text above the cards). During a Demo Replay it says so, with the
+// replay's lap (Day 6b-mobile CP4, 2026-10-09).
 function DashboardHeader() {
-  const { sessionId, isLive, raceName, raceDate } = useResolvedSession()
+  const { sessionId, isLive, isReplay, raceName, raceDate } = useRaceSession()
+  const { lapsByDriver } = useSharedLiveTelemetry(sessionId)
   if (!sessionId) return null
+  // The furthest-along car's lap, from the shared live connection's events.
+  const laps = Object.values(lapsByDriver).map((event) => event.lap_number)
+  const replayLap = laps.length > 0 ? Math.max(...laps) : null
   // Short on purpose (owner, 2026-10-07) so it fits on the title's line:
-  // "Belgian GP · 26 Jul", or "· Live now" during a live race.
+  // "Belgian GP · 26 Jul", "· Live now" during a live race, or
+  // "· Demo Replay · Lap 18" during a replay.
   const race = (raceName ?? "Race").replace("Grand Prix", "GP")
-  const status = isLive ? "Live now" : raceDate ? formatRaceDate(raceDate) : null
+  const status = isReplay
+    ? `Demo Replay${replayLap !== null ? ` · Lap ${replayLap}` : ""}`
+    : isLive
+      ? "Live now"
+      : raceDate
+        ? formatRaceDate(raceDate)
+        : null
   return (
     <View className="mx-3 mt-3 flex-row items-baseline justify-between gap-2">
       <Text className="text-lg font-semibold text-foreground">Strategy Dashboard</Text>
@@ -65,7 +77,7 @@ function DashboardHeader() {
 // is the app/strategy-driver.tsx route, a native form sheet sized to its
 // content.
 export default function StrategyScreen() {
-  const { sessionId } = useResolvedSession()
+  const { sessionId } = useRaceSession()
   const { data: overview, dataUpdatedAt, isLoading, refetch, isRefetching } = useStrategyOverview(sessionId)
   const selectedDriverId = useSessionStore((state) => state.selectedDriverId)
   const setSelectedDriver = useSessionStore((state) => state.setSelectedDriver)

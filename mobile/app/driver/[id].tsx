@@ -9,7 +9,7 @@ import { TeamLogo } from "@/components/shared/TeamLogo"
 import { useDriverAnalysis } from "@/hooks/useDriverAnalysis"
 import { useDriverSeasonStats } from "@/hooks/useDriverSeasonStats"
 import { useDrivers } from "@/hooks/useDrivers"
-import { useResolvedSession } from "@/hooks/useResolvedSession"
+import { useRaceSession } from "@/hooks/useRaceSession"
 import { FALLBACK_TEAM_COLOR } from "@/utils/constants"
 import * as haptics from "@/utils/haptics"
 
@@ -89,7 +89,7 @@ export default function DriverDetailScreen() {
   const [subView, setSubView] = useState<SubView>("overview")
 
   const { data: drivers, dataUpdatedAt, isLoading: driversLoading } = useDrivers()
-  const { sessionId, isLive, raceName, raceDate } = useResolvedSession()
+  const { sessionId, isLive, isReplay, raceName, raceDate } = useRaceSession()
 
   const driver = drivers?.find((d) => d.id === driverId) ?? null
   const team = driver?.contracts[0]?.team ?? null
@@ -124,7 +124,7 @@ export default function DriverDetailScreen() {
   return (
     <View className="flex-1 bg-background">
       <OfflineBanner dataUpdatedAt={dataUpdatedAt} />
-      {sessionId && !isLive && <HistoricalDataBanner raceName={raceName} raceDate={raceDate} />}
+      {sessionId && !isLive && !isReplay && <HistoricalDataBanner raceName={raceName} raceDate={raceDate} />}
       <ScrollView className="flex-1">
         <View className="h-1.5" style={{ backgroundColor: teamColor }} />
         <View className="gap-4 p-4">

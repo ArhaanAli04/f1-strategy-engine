@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from backend.core.database import get_db, get_engine
 from backend.core.exceptions import AuthenticationError, NotFoundError
 from backend.core.metrics import f1_active_websocket_connections
-from backend.core.rate_limit import limiter, rate_limit_value
+from backend.core.rate_limit import limiter, positions_rate_limit_value, rate_limit_value
 from backend.core.redis_client import get_redis
 from backend.core.security import decode_token
 from backend.schemas.telemetry_schema import (
@@ -163,7 +163,7 @@ async def get_session_gaps(
         "number, not driver_id) for the Circuit Map Panel's moving dots."
     ),
 )
-@limiter.limit(rate_limit_value)
+@limiter.limit(positions_rate_limit_value)
 async def get_session_positions(
     request: Request,
     session_id: uuid.UUID,
