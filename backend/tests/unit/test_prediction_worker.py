@@ -209,6 +209,8 @@ async def test_resolve_inference_context_prefers_stored_total_laps(
         "_resolve_position_context",
         AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
     )
+    earlier_compounds = AsyncMock(return_value=["SOFT"])
+    monkeypatch.setattr(strategy_service, "compounds_used", earlier_compounds)
 
     resolved = await prediction_worker._resolve_inference_context(
         mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
@@ -217,6 +219,13 @@ async def test_resolve_inference_context_prefers_stored_total_laps(
     assert resolved["total_laps"] == 53  # the real stored value, NOT MAX(lap_number)
     assert resolved["stored_total_laps"] == 53
     mock_db_session.execute.assert_called_once()
+    # The stint history for the two-compound rule (Day 6c CP2): laps before
+    # this one from the database, plus this lap's compound from the lap event,
+    # since this lap's own row may not be committed yet.
+    earlier_compounds.assert_awaited_once()
+    assert earlier_compounds.await_args is not None
+    assert earlier_compounds.await_args.args[3] == 37
+    assert resolved["compounds_used"] == ["MEDIUM", "SOFT"]
 
 
 @pytest.mark.unit
@@ -245,6 +254,7 @@ async def test_resolve_inference_context_falls_back_to_max_lap_number(
         "_resolve_position_context",
         AsyncMock(return_value={"position": 3, "gap_to_car_ahead": None}),
     )
+    monkeypatch.setattr(strategy_service, "compounds_used", AsyncMock(return_value=[]))
 
     resolved = await prediction_worker._resolve_inference_context(
         mock_db_session, fakeredis, session_id, driver_id, "MEDIUM", 38
@@ -287,6 +297,91 @@ def test_run_inference_clamps_optimal_pit_lap_to_known_total_laps() -> None:
 
     assert result["tire_life_remaining"] == 40.0
     assert result["optimal_pit_lap"] == 53  # clamped — NOT 38 + 40 = 78
+
+
+def _constant_delta_tyre_models() -> dict[str, Any]:
+    """MEDIUM loses 0.1 s a lap, SOFT gains 0.5, HARD loses 0.5: staying out on
+    MEDIUM for 20 laps (2.0 s) beats any stop (22 s pit loss)."""
+
+    def pipeline(value: float) -> MagicMock:
+        model = MagicMock()
+        model.predict.side_effect = lambda features: np.full(len(features), value)
+        return model
+
+    return {
+        "tire_deg_soft.pkl": pipeline(-0.5),
+        "tire_deg_medium.pkl": pipeline(0.1),
+        "tire_deg_hard.pkl": pipeline(0.5),
+    }
+
+
+def _recommendation_resolved(compounds_used: list[str]) -> dict[str, Any]:
+    return {
+        "circuit_name": "Test Circuit",
+        "total_laps": 30,
+        "stored_total_laps": 30,
+        "position": 3,
+        "gap_to_car_ahead": 2.0,
+        "gap_to_car_behind": 4.0,
+        "target_ahead_driver_id": uuid.uuid4(),
+        "target_behind_driver_id": uuid.uuid4(),
+        "compounds_used": compounds_used,
+    }
+
+
+@pytest.mark.unit
+def test_compute_recommendation_fields_stores_no_further_stop() -> None:
+    """Day 6c CP2: when running to the flag wins, the stored row says so and
+    its explanation does too (no pit lap named, no new stint explained)."""
+    context = {"compound": "MEDIUM", "lap_number": 10, "tyre_age_laps": 10}
+
+    fields = prediction_worker._compute_recommendation_fields(
+        _constant_delta_tyre_models(),
+        {},
+        {},
+        uuid.uuid4(),
+        context,
+        _recommendation_resolved(["SOFT", "MEDIUM"]),
+        0.2,
+        0.7,
+    )
+
+    assert fields["no_further_stop"] is True
+    assert fields["recommended_pit_lap"] == 30
+    assert fields["recommended_compound"] == "MEDIUM"
+    assert fields["explanation"]["narrative"].startswith("No further stop")
+    assert fields["explanation"]["tire_deg_shap"] == []
+
+
+@pytest.mark.unit
+def test_compute_recommendation_fields_two_compound_rule_forces_a_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only MEDIUM run so far in a dry race: the same models would say stay
+    out, but the stored recommendation is a stop onto another compound."""
+    # SHAP can't explain the stand-in models, and the new stint's explanation
+    # isn't what this test is about.
+    monkeypatch.setattr(
+        strategy_service,
+        "tire_deg_recommendation_contributions",
+        lambda *args: [],
+    )
+    context = {"compound": "MEDIUM", "lap_number": 10, "tyre_age_laps": 10}
+
+    fields = prediction_worker._compute_recommendation_fields(
+        _constant_delta_tyre_models(),
+        {},
+        {},
+        uuid.uuid4(),
+        context,
+        _recommendation_resolved(["MEDIUM"]),
+        0.2,
+        0.7,
+    )
+
+    assert fields["no_further_stop"] is False
+    assert fields["recommended_pit_lap"] == 11
+    assert fields["recommended_compound"] == "SOFT"
 
 
 @pytest.mark.unit

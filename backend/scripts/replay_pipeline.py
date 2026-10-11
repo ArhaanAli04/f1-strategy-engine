@@ -232,6 +232,7 @@ async def _fetch_laps(session_id: uuid.UUID) -> list[dict[str, Any]]:
             "lap_time_seconds": lap.lap_time_seconds,
             "compound": lap.compound,
             "tyre_age_laps": lap.tyre_age_laps,
+            "track_status": lap.track_status,
             "is_valid": lap.is_valid,
             "sector1_seconds": lap.sector1_seconds,
             "sector2_seconds": lap.sector2_seconds,

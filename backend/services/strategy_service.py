@@ -139,14 +139,28 @@ _COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET
 _WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 PIT_WINDOW_LOOKAHEAD_LAPS = 15
+# Under a safety car the field is slow, so a stop costs roughly half the usual
+# time; under a virtual safety car, a little more. Assumed, like
+# race_simulator's SC constants (no pit-loss measurements exist in the data).
+# Applied to a stop on the lap after one that ran under the neutralisation.
+SC_PIT_LOSS_FACTOR = 0.5
+VSC_PIT_LOSS_FACTOR = 0.65
+# FastF1 track status codes (lap_data.track_status concatenates every code
+# seen during the lap): 4 safety car; 6 VSC deployed, 7 VSC ending.
+_SAFETY_CAR_STATUS = "4"
+_VSC_STATUSES = ("6", "7")
 _STINT2_CANDIDATE_COMPOUNDS = ("SOFT", "MEDIUM", "HARD")
-# Contiguous band, around the recommended pit_lap, of candidates whose
-# projected_total_delta_seconds is within this many seconds of the optimal
-# candidate's own delta — see build_pit_recommendation's window computation.
-# Anchored to the same order of magnitude as tire_deg_model.
-# DEGRADATION_THRESHOLD_SECONDS (1.5s) rather than picked arbitrarily: both
-# describe "a lap-time difference small enough to not matter operationally."
-PIT_WINDOW_TOLERANCE_SECONDS = 1.5
+# The pit window is the recommended lap plus or minus this many laps, kept to
+# laps the driver can still stop on (Day 6c CP4, 2026-10-10, owner's choice).
+# Measured on the 3 curated replays (backend/scripts/evaluate_pit_
+# recommendations.py), it holds the driver's real in-lap 58% of the time, as
+# often as any rule tried, at 5 laps or fewer: the old rule (stops within
+# 1.5 s of the best whole-race total) held it 57% of the time but gave a
+# single lap 30% of the time, false precision; a window sized from the
+# confidence Monte Carlo held it 58% but averaged 8 laps. What limits the
+# window is the engine's timing error (median 2 laps), not how it is drawn.
+# How sure the engine is shows separately, as confidence_score.
+PIT_WINDOW_HALF_WIDTH_LAPS = 2
 # Monte Carlo draws for build_pit_recommendation's confidence_score — pure
 # numpy noise sampling + argmin, no per-sample model calls, so this can be
 # large without a real runtime cost (unlike UNDERCUT_MONTE_CARLO_SIMS, which
@@ -581,7 +595,70 @@ async def _current_state(
         "total_laps": int(total_laps),
         "circuit_id": circuit_id,
         "circuit_name": circuit_name,
+        # Every FastF1 status code seen during the lap; a safety car or VSC
+        # makes a stop on the next lap cheaper (pit_loss_after_lap).
+        "track_status": lap.track_status,
     }
+
+
+async def compounds_used(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    driver_id: uuid.UUID,
+    up_to_lap: int,
+) -> list[str]:
+    """Every compound a driver has run in this race, up to and including a lap.
+
+    The pit-window engine needs it for F1's two-compound rule (see
+    dry_compound_obligation). Read from lap_data, so it works the same for a
+    live race (laps arrive as they are run) and a replay of an ingested race
+    (bounded by up_to_lap, not the race's end).
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_id: Driver to read.
+        up_to_lap: Last lap to consider.
+    Returns:
+        The distinct compounds, upper case, sorted.
+    """
+    query = (
+        select(LapData.compound)
+        .where(
+            LapData.session_id == session_id,
+            LapData.driver_id == driver_id,
+            LapData.lap_number <= up_to_lap,
+        )
+        .distinct()
+    )
+    return sorted({str(compound).upper() for compound in (await db.execute(query)).scalars()})
+
+
+_DRY_COMPOUNDS = frozenset({"SOFT", "MEDIUM", "HARD"})
+
+
+def dry_compound_obligation(compounds: Iterable[str] | None) -> str | None:
+    """The dry compound a driver must still change away from, under F1's two-compound rule.
+
+    In a dry race a driver must use at least two different dry compounds
+    (SOFT/MEDIUM/HARD); running intermediates or wets lifts the requirement.
+    Refitting a compound already used is allowed, so the rule only bites while
+    a driver has used exactly one dry compound: they must still stop, and onto
+    a different one.
+
+    Args:
+        compounds: Every compound the driver has run so far (compounds_used),
+            or None when unknown, in which case no rule is applied.
+    Returns:
+        That single dry compound while the rule still binds, otherwise None.
+    """
+    if compounds is None:
+        return None
+    used = {compound.upper() for compound in compounds}
+    if used & _WET_COMPOUNDS:
+        return None
+    dry = used & _DRY_COMPOUNDS
+    return next(iter(dry)) if len(dry) == 1 else None
 
 
 async def _cumulative_race_time(
@@ -880,7 +957,11 @@ def _stint2_batch_deltas(
 
     offsets = np.arange(max_remaining, dtype=np.float64)
     lap_grid = pit_laps[:, None] + 1 + offsets[None, :]
-    tyre_age_grid = np.broadcast_to(offsets[None, :], (n, max_remaining))
+    # The first lap on the new tyre is age 1, as lap_data counts it, and young
+    # tyres use the settled age (see tire_deg_model.SETTLED_TYRE_AGE).
+    tyre_age_grid = np.broadcast_to(
+        tire_deg_model.settled_tyre_ages(offsets[None, :] + 1.0), (n, max_remaining)
+    )
     valid = offsets[None, :] < laps_remaining[:, None]
 
     fuel_load_penalty = tire_deg_model.fuel_load_penalty_seconds(lap_grid, float(total_laps))
@@ -935,9 +1016,10 @@ async def build_pit_recommendation(
     - **The winning stint-2 compound is kept, not discarded.** The original
       loop tracked only best_stint2_delta (a float), never which compound
       produced it — recommended_compound now survives per candidate.
-    - **window_start/window_end is a real narrow band**, not the fixed
+    - **window_start/window_end is a band around the recommended lap**
+      (PIT_WINDOW_HALF_WIDTH_LAPS either side), not the fixed
       PIT_WINDOW_LOOKAHEAD_LAPS search horizon rendered as if it were a
-      recommendation. See the window computation below.
+      recommendation.
     - **confidence_score** is now populated (previously didn't exist in any
       form). See the Monte Carlo block below.
 
@@ -949,10 +1031,15 @@ async def build_pit_recommendation(
         driver_id: Driver to plan a pit window for.
     Returns:
         Up to 3 dicts (pit_lap, window_start, window_end,
-        projected_total_delta_seconds, recommended_compound, confidence_score),
-        ascending by projected_total_delta_seconds (lower = better).
+        projected_total_delta_seconds, recommended_compound, confidence_score,
+        no_further_stop), ascending by projected_total_delta_seconds (lower =
+        better). One of them may be "no further stop" (run the current tyre to
+        the flag, since Day 6c CP2): no_further_stop True, pit_lap the race's
+        last lap, recommended_compound the current one. It is never offered
+        while F1's two-compound rule still requires a stop.
         window_start/window_end are identical across all returned candidates
-        (the tolerance band around the #1 candidate — see below); confidence_score
+        (the band around the #1 candidate's lap, PIT_WINDOW_HALF_WIDTH_LAPS
+        either side); confidence_score
         is populated only for the #1 (rank 0) candidate, None for the rest — it
         answers "how sure is the model that THIS recommendation is optimal,"
         which isn't a meaningful question to ask of a candidate that isn't
@@ -970,7 +1057,28 @@ async def build_pit_recommendation(
     maps_cache = await encoding_maps_for_database(db, _load_encoding_maps(), [driver_id])
     mae_cache = _load_holdout_mae()
     state = await _current_state(db, session_id, driver_id)
+    # Only the pit window needs the stint history (the two-compound rule), so it
+    # is read here rather than in _current_state, which other paths share.
+    state["compounds_used"] = await compounds_used(db, session_id, driver_id, state["lap_number"])
     return compute_pit_recommendation(models, maps_cache, mae_cache, driver_id, state)
+
+
+def pit_loss_after_lap(track_status: str | None) -> float:
+    """Time a stop on the next lap costs, given how the current lap ran.
+
+    Args:
+        track_status: The current lap's lap_data.track_status (every FastF1
+            status code seen during the lap), or None if unknown.
+    Returns:
+        PIT_STOP_SECONDS, scaled down when the lap ran under a safety car or a
+        virtual safety car.
+    """
+    status = track_status or ""
+    if _SAFETY_CAR_STATUS in status:
+        return PIT_STOP_SECONDS * SC_PIT_LOSS_FACTOR
+    if any(code in status for code in _VSC_STATUSES):
+        return PIT_STOP_SECONDS * VSC_PIT_LOSS_FACTOR
+    return PIT_STOP_SECONDS
 
 
 def compute_pit_recommendation(
@@ -1003,8 +1111,11 @@ def compute_pit_recommendation(
         mae_cache: Output of _load_holdout_mae() (or an equivalent cache).
         driver_id: Driver to plan a pit window for.
         state: Dict with compound, tyre_age_laps, lap_number, total_laps,
-            circuit_name — the same shape _current_state returns (only
-            these 5 keys are read here).
+            circuit_name, and optionally compounds_used (every compound run
+            so far, for the two-compound rule; absent means unknown, and no
+            rule is applied) and track_status (the current lap's, for a
+            cheaper stop after a safety-car or VSC lap) — the same shape
+            _current_state returns.
     Returns:
         Same as build_pit_recommendation.
     Raises:
@@ -1024,41 +1135,54 @@ def compute_pit_recommendation(
         )
     current_mae = _holdout_mae_for_compound(mae_cache, state["compound"])
 
+    # F1's two-compound rule (dry race): while the driver has run only one dry
+    # compound, they must still stop, and onto a different one. Unknown history
+    # (no compounds_used in state) applies no rule.
+    obligation = dry_compound_obligation(state.get("compounds_used"))
+
     max_pit_lap = min(state["lap_number"] + PIT_WINDOW_LOOKAHEAD_LAPS, state["total_laps"])
     pit_laps = np.arange(state["lap_number"] + 1, max_pit_lap + 1)
     n_candidates = len(pit_laps)
     if n_candidates == 0:
         return []
 
-    # --- Stint 1: one predict() call, cumulative sum. ---
-    # laps_stint1[i] == pit_laps[i] by construction (both range over
-    # [current_lap+1, max_pit_lap]) — pit_laps[i] IS the last lap of stint 1
-    # for candidate i (the driver still completes that lap before pitting),
-    # so np.cumsum(per-lap deltas)[i] is exactly stint 1's total delta for
-    # pit_laps[i], with no separate indexing needed to line the two up.
-    laps_stint1 = pit_laps.astype(np.float64)
-    tyre_age_stint1 = state["tyre_age_laps"] + np.arange(1, n_candidates + 1, dtype=np.float64)
+    # --- Stint 1 to the flag: one predict() call over every remaining lap on
+    # the current tyre, cumulative sum. Its first n_candidates entries are
+    # each pit-lap candidate's stint 1 (pit_laps[i] IS the last lap of stint
+    # 1 for candidate i: the driver still completes that lap before pitting);
+    # the full sum is the "no further stop" option, running this tyre to the
+    # flag (Day 6c CP2, 2026-10-10: before, every answer was a stop). ---
+    laps_to_flag = state["total_laps"] - state["lap_number"]
+    laps_stint1 = np.arange(state["lap_number"] + 1, state["total_laps"] + 1, dtype=np.float64)
+    tyre_age_stint1 = tire_deg_model.settled_tyre_ages(
+        state["tyre_age_laps"] + np.arange(1, laps_to_flag + 1, dtype=np.float64)
+    )
     fuel_load_penalty1 = tire_deg_model.fuel_load_penalty_seconds(
         laps_stint1, float(state["total_laps"])
     )
     features1 = np.column_stack(
         [
             laps_stint1,
-            np.full(n_candidates, float(current_compound_encoded)),
+            np.full(laps_to_flag, float(current_compound_encoded)),
             tyre_age_stint1,
             fuel_load_penalty1,
-            np.full(n_candidates, float(circuit_code)),
-            np.full(n_candidates, float(driver_code)),
+            np.full(laps_to_flag, float(circuit_code)),
+            np.full(laps_to_flag, float(driver_code)),
         ]
     )
-    stint1_delta = np.cumsum(current_pipeline.predict(features1))
+    stint1_to_flag = np.cumsum(current_pipeline.predict(features1))
+    stint1_delta = stint1_to_flag[:n_candidates]
+    no_stop_delta = float(stint1_to_flag[-1])
 
     # --- Stint 2: one predict() call PER CANDIDATE COMPOUND (see
-    # _stint2_batch_deltas), each covering all n_candidates pit laps at once. ---
+    # _stint2_batch_deltas), each covering all n_candidates pit laps at once.
+    # Under the two-compound rule the compound already used is not a choice. ---
     laps_remaining = state["total_laps"] - pit_laps
     stint2_delta_by_compound: dict[str, np.ndarray] = {}
     mae_by_compound: dict[str, float] = {}
     for candidate_compound in _STINT2_CANDIDATE_COMPOUNDS:
+        if candidate_compound == obligation:
+            continue
         pipeline = _pipeline_for_compound(models, candidate_compound)
         if pipeline is None:
             continue
@@ -1087,42 +1211,37 @@ def compute_pit_recommendation(
 
     compound_names = list(stint2_delta_by_compound.keys())
     stint2_matrix = np.column_stack([stint2_delta_by_compound[c] for c in compound_names])
+
     best_stint2_idx = np.argmin(stint2_matrix, axis=1)
     best_stint2_delta = stint2_matrix[np.arange(n_candidates), best_stint2_idx]
     winning_compound = [compound_names[i] for i in best_stint2_idx]
 
-    total_delta = stint1_delta + PIT_STOP_SECONDS + best_stint2_delta
+    # A stop on the next lap is cheaper if this lap ran under a safety car or
+    # VSC (pit_loss_after_lap); every later stop pays the full pit loss.
+    pit_loss = np.full(n_candidates, PIT_STOP_SECONDS)
+    pit_loss[0] = pit_loss_after_lap(state.get("track_status"))
+    total_delta = stint1_delta + pit_loss + best_stint2_delta
 
-    order = np.argsort(total_delta)
-    best_idx = int(order[0])
+    # Every option: the n_candidates stops, then "no further stop" (index
+    # n_candidates) unless the two-compound rule still requires a stop.
+    allow_no_stop = obligation is None
+    no_stop_idx = n_candidates if allow_no_stop else -1
+    option_delta = np.append(total_delta, no_stop_delta) if allow_no_stop else total_delta
+    order = [int(i) for i in np.argsort(option_delta)]
+    best_idx = order[0]
 
-    # --- Narrow window: the contiguous band of candidates around the
-    # recommendation whose own total_delta is within PIT_WINDOW_TOLERANCE_
-    # SECONDS of the optimum — expanded outward from best_idx rather than
-    # taking every candidate under the threshold globally, since the delta
-    # curve isn't guaranteed perfectly unimodal (model noise) and a
-    # non-contiguous "window" would be a meaningless range to display. ---
-    threshold = total_delta[best_idx] + PIT_WINDOW_TOLERANCE_SECONDS
-    window_start_idx = best_idx
-    while window_start_idx > 0 and total_delta[window_start_idx - 1] <= threshold:
-        window_start_idx -= 1
-    window_end_idx = best_idx
-    while window_end_idx < n_candidates - 1 and total_delta[window_end_idx + 1] <= threshold:
-        window_end_idx += 1
-    window_start = int(pit_laps[window_start_idx])
-    window_end = int(pit_laps[window_end_idx])
-
-    # --- Confidence: vectorized Monte Carlo — P(the recommended candidate is
-    # STILL the argmin once every candidate's total_delta is perturbed by
-    # noise scaled to ITS OWN model uncertainty). Each candidate's noise std
-    # is derived from the holdout_mae of the actual model(s) that produced
-    # its total_delta (current compound for stint 1, that candidate's own
-    # winning compound for stint 2), summed by segment length under an iid-
-    # per-lap-error assumption (std scales with sqrt(n_laps) — same
-    # noise-aggregation principle as _sampled_noise above, just per-compound
-    # MAE instead of one shared LAP_TIME_NOISE_STD_SECONDS constant) and
-    # combined in quadrature (independent noise sources). No per-sample model
-    # calls — pure numpy sampling + argmin, same vectorization style as
+    # --- Confidence: vectorized Monte Carlo — P(the recommended option is
+    # STILL the argmin once every option's delta is perturbed by noise scaled
+    # to ITS OWN model uncertainty). Each stop's noise std is derived from the
+    # holdout_mae of the actual model(s) that produced its total_delta
+    # (current compound for stint 1, that candidate's own winning compound for
+    # stint 2), summed by segment length under an iid-per-lap-error assumption
+    # (std scales with sqrt(n_laps) — same noise-aggregation principle as
+    # _sampled_noise above, just per-compound MAE instead of one shared
+    # LAP_TIME_NOISE_STD_SECONDS constant) and combined in quadrature
+    # (independent noise sources); "no further stop" is the current compound
+    # over every remaining lap. No per-sample model calls — pure numpy
+    # sampling + argmin, same vectorization style as
     # _undercut_overcut_probability's own Monte Carlo. ---
     stint1_laps_by_candidate = np.arange(1, n_candidates + 1, dtype=np.float64)
     winning_mae = np.array(
@@ -1130,25 +1249,45 @@ def compute_pit_recommendation(
     )
     stint1_std = current_mae * np.sqrt(stint1_laps_by_candidate)
     stint2_std = winning_mae * np.sqrt(np.maximum(laps_remaining, 0).astype(np.float64))
-    combined_std = np.sqrt(stint1_std**2 + stint2_std**2)
+    option_std = np.sqrt(stint1_std**2 + stint2_std**2)
+    if allow_no_stop:
+        option_std = np.append(option_std, current_mae * np.sqrt(float(laps_to_flag)))
 
     rng = np.random.default_rng()
-    noise = rng.standard_normal((n_candidates, PIT_WINDOW_MONTE_CARLO_SIMS)) * combined_std[:, None]
-    noisy_delta = total_delta[:, None] + noise
+    noise = (
+        rng.standard_normal((len(option_delta), PIT_WINDOW_MONTE_CARLO_SIMS)) * option_std[:, None]
+    )
+    noisy_delta = option_delta[:, None] + noise
     winners = np.argmin(noisy_delta, axis=0)
     confidence = float(np.mean(winners == best_idx))
 
+    # --- Window: the recommended lap +/- PIT_WINDOW_HALF_WIDTH_LAPS, kept to
+    # laps the driver can still stop on (the next lap to the last). When "no
+    # further stop" wins there is no stop to window: the window is the last
+    # lap. ---
+    if best_idx == no_stop_idx:
+        window_start = window_end = int(state["total_laps"])
+    else:
+        recommended_lap = int(pit_laps[best_idx])
+        window_start = max(recommended_lap - PIT_WINDOW_HALF_WIDTH_LAPS, int(pit_laps[0]))
+        window_end = min(recommended_lap + PIT_WINDOW_HALF_WIDTH_LAPS, int(state["total_laps"]))
+
     candidates: list[dict[str, Any]] = []
-    for rank, idx in enumerate(order[:3]):
-        idx_int = int(idx)
+    for rank, idx_int in enumerate(order[:3]):
+        no_further_stop = idx_int == no_stop_idx
         candidates.append(
             {
-                "pit_lap": int(pit_laps[idx_int]),
+                # "No further stop" carries the last lap as its pit_lap (the
+                # response field is required); no_further_stop says so.
+                "pit_lap": int(state["total_laps"]) if no_further_stop else int(pit_laps[idx_int]),
                 "window_start": window_start,
                 "window_end": window_end,
-                "projected_total_delta_seconds": float(total_delta[idx_int]),
-                "recommended_compound": winning_compound[idx_int],
+                "projected_total_delta_seconds": float(option_delta[idx_int]),
+                "recommended_compound": (
+                    str(state["compound"]) if no_further_stop else winning_compound[idx_int]
+                ),
                 "confidence_score": confidence if rank == 0 else None,
+                "no_further_stop": no_further_stop,
             }
         )
     return candidates
@@ -1526,6 +1665,8 @@ def build_pit_recommendation_explanation(
     overcut_score: float | None,
     tire_deg_contributions: list[explainability.FeatureContribution],
     pit_predictor_contributions: list[explainability.FeatureContribution],
+    no_further_stop: bool = False,
+    pit_loss_seconds: float = PIT_STOP_SECONDS,
 ) -> PitRecommendationExplanation:
     """Combine tire_deg + pit_predictor SHAP and field/undercut context into
     structured facts and a plain-English narrative for one recommendation.
@@ -1550,14 +1691,33 @@ def build_pit_recommendation_explanation(
             behind (get_overcut_score), or None for the same reasons.
         tire_deg_contributions: Output of tire_deg_recommendation_contributions.
         pit_predictor_contributions: Output of pit_predictor_current_contributions.
+        no_further_stop: The recommendation is to run the current tyre
+            (recommended_compound) to the flag rather than stop again (Day 6c
+            CP2). The facts and narrative say so; pit_lap is then the last lap
+            and is not presented as a stop. tire_deg_contributions is empty
+            for it (there is no new stint to explain).
+        pit_loss_seconds: What a stop costs now (pit_loss_after_lap: less
+            after a safety-car or VSC lap), for the gap-to-the-car-behind
+            sentence.
     Returns:
         PitRecommendationExplanation.
     """
-    facts: list[ExplanationFact] = [
-        ExplanationFact(label="Recommended pit lap", value=f"Lap {pit_lap}", source="tire_deg"),
-        ExplanationFact(
-            label="Recommended compound", value=recommended_compound, source="tire_deg"
-        ),
+    facts: list[ExplanationFact] = (
+        [
+            ExplanationFact(label="Recommendation", value="No further stop", source="tire_deg"),
+            ExplanationFact(
+                label="Run to the flag on", value=recommended_compound, source="tire_deg"
+            ),
+        ]
+        if no_further_stop
+        else [
+            ExplanationFact(label="Recommended pit lap", value=f"Lap {pit_lap}", source="tire_deg"),
+            ExplanationFact(
+                label="Recommended compound", value=recommended_compound, source="tire_deg"
+            ),
+        ]
+    )
+    facts += [
         ExplanationFact(
             label="Current tyre age",
             value=f"{tyre_age_laps} lap{'s' if tyre_age_laps != 1 else ''}",
@@ -1618,6 +1778,29 @@ def build_pit_recommendation_explanation(
             )
         )
 
+    if no_further_stop:
+        narrative = (
+            f"No further stop: running these {recommended_compound}s to the flag is "
+            "projected faster than stopping again"
+        )
+        if confidence is not None:
+            narrative += f" ({confidence * 100:.0f}% confidence)"
+        narrative += f". Tyre age is currently {tyre_age_laps} laps."
+        return PitRecommendationExplanation(
+            facts=facts,
+            narrative=narrative,
+            tire_deg_shap=[],
+            pit_predictor_shap=[
+                FeatureContributionResponse(
+                    feature_name=c.feature_name,
+                    value=c.value,
+                    contribution=c.contribution,
+                    direction=c.direction,
+                )
+                for c in pit_predictor_contributions
+            ],
+        )
+
     narrative = f"Lap {pit_lap} on {recommended_compound} is the recommended pit"
     if confidence is not None:
         narrative += f" ({confidence * 100:.0f}% confidence)"
@@ -1627,15 +1810,23 @@ def build_pit_recommendation_explanation(
         narrative += f", degradation {trend}"
     narrative += "."
 
+    # What the gap to the car behind means for a stop, against what a stop
+    # costs now (Day 6c CP5, 2026-10-10). The old wording called every gap
+    # under 22 s "a close call", 0.1 s and 11.1 s alike.
     if target_behind_driver_id is not None:
-        safe = gap_to_car_behind > PIT_STOP_SECONDS
-        narrative += f" Gap to the car behind is {gap_to_car_behind:.1f}s — " + (
-            "safe to pit without losing the position."
-            if safe
-            else "a close call; rejoining could cost the position."
-        )
-    elif target_ahead_driver_id is None:
-        narrative += " Currently the race leader — no car behind to defend against."
+        if gap_to_car_behind > pit_loss_seconds:
+            narrative += (
+                f" The car behind is {gap_to_car_behind:.1f}s back, more than a stop "
+                f"costs ({pit_loss_seconds:.0f}s): stopping keeps the position."
+            )
+        else:
+            narrative += (
+                f" The car behind is {gap_to_car_behind:.1f}s back, less than a stop "
+                f"costs ({pit_loss_seconds:.0f}s): stopping would rejoin behind it, "
+                "unless it stops too."
+            )
+    else:
+        narrative += " No car behind: a stop costs time but no position."
 
     if target_ahead_driver_id is not None and undercut_score is not None and undercut_score >= 0.5:
         narrative += (
@@ -1727,15 +1918,21 @@ async def get_pit_window_with_explanation(
     top_pit_lap = int(top["pit_lap"])
     recommended_compound = str(top["recommended_compound"])
     confidence = top["confidence_score"]
+    no_further_stop = bool(top.get("no_further_stop", False))
 
-    tire_deg_contributions = tire_deg_recommendation_contributions(
-        models,
-        maps_cache,
-        driver_id,
-        state["circuit_name"],
-        state["total_laps"],
-        top_pit_lap,
-        recommended_compound,
+    # No new stint to explain when the recommendation is to stay out.
+    tire_deg_contributions = (
+        []
+        if no_further_stop
+        else tire_deg_recommendation_contributions(
+            models,
+            maps_cache,
+            driver_id,
+            state["circuit_name"],
+            state["total_laps"],
+            top_pit_lap,
+            recommended_compound,
+        )
     )
 
     neighbors = await _resolve_field_neighbors(
@@ -1787,6 +1984,8 @@ async def get_pit_window_with_explanation(
         overcut_score=overcut_score,
         tire_deg_contributions=tire_deg_contributions,
         pit_predictor_contributions=pit_predictor_contributions,
+        no_further_stop=no_further_stop,
+        pit_loss_seconds=pit_loss_after_lap(state.get("track_status")),
     )
     responses[0] = responses[0].model_copy(update={"explanation": explanation})
     return responses
@@ -2541,6 +2740,7 @@ async def get_strategy_prediction_history(
             "recommended_compound": row.recommended_compound,
             "confidence_score": row.confidence_score,
             "explanation": row.explanation,
+            "no_further_stop": row.no_further_stop,
         }
         for row in rows
     ]

@@ -613,8 +613,15 @@ Update this section at the start of each day's session:
 ```
 Phase:    8
 Day:      Demo deployment plan (docs/internal/demo-deployment-plan-2026.md):
-          Days 1-6b and Day 6b-mobile done; last session 2026-10-09.
-Status:   Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
+          Days 1-6c done; last session 2026-10-10.
+Status:   Day 6c complete (CP1-CP8): the pit-window engine offers "no further
+          stop", follows the two-compound rule, settles fresh-tyre ages,
+          cheapens a stop after a safety-car/VSC lap and shows a +/-2-lap
+          window; the replay tower places pit-stop time in the pit lane.
+          Stop/no-stop agreement with real races 49% -> 71%. Local replays
+          recomputed; the Supabase recompute waits for the merge to main
+          (migration) and owner approval. Unit suite 923, web 79.
+          Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
           mobile's copies match web again, every race screen follows a running
           Demo Replay, the Live tab has a replay selector, the strategy panels
           show stored predictions during a replay, and the app shares one live
@@ -623,16 +630,17 @@ Status:   Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
           /positions (was 60; caused "something went wrong" toasts).
           2026-10-07: mobile Simulator matched to web, and four Simulator bugs
           fixed (retired cars in the field, rivals on last-lap tyres, safety-car
-          laps erasing the order, explanation list). Unit suite 891 passed,
-          web 74. Committing is the owner's.
-Next:     Day 6c, the pit-window recommendation engine (plan doc "Day 6c":
-          "no further stop", two-compound rule, compound choice, window
-          display, wording, undercut after a stop, replay recompute, tower
-          around pit laps). Then Day 6d, Simulator testing (scenario harness
-          against the curated races; ANT's phantom second stop; negligible
-          rival stops shown). Then Day 7, Fly deploy, starting with its
-          "Mobile pre-release pass" (npm audit triage, haptics switch,
-          react-native-worklets with the chosen mobile option).
+          laps erasing the order, explanation list). Committing is the
+          owner's.
+Next:     After the merge: recompute the curated replays on Supabase (owner
+          approval) and run the validator there. Then Day 6d, Simulator
+          testing (scenario harness against the curated races; ANT's phantom
+          second stop; negligible rival stops shown; "No further stop" in the
+          Simulator; MEDIUM under-recommended; raw fresh-tyre ages and the
+          safety-car pit loss in race_simulator). Then Day 7, Fly deploy,
+          starting with its "Mobile pre-release pass" (npm audit triage,
+          haptics switch, react-native-worklets with the chosen mobile
+          option).
 Blockers: Mobile tested on one iPhone in Expo Go only; Android not yet run
           (mobile/README.md). Production is Fly.io (decided Day 24); its
           deploy is demo plan Day 7, and VITE_API_URL_PROD and ALLOWED_ORIGINS
@@ -1240,6 +1248,12 @@ happen), or was found already fixed and moved into ### Notes below instead.
     after each driver's real pit despite the tire_deg artifact still firing
     underneath it. Still worth fixing at the source; just no longer the
     same practical risk it was.
+  - **Worked around at inference, 2026-10-10 (demo deployment Day 6c):**
+    every stint projection (pit window, undercut/overcut, the Simulator's
+    plan explanation) feeds tyre ages of at least
+    `tire_deg_model.SETTLED_TYRE_AGE` (3) via `settled_tyre_ages`. The models
+    are unchanged; `race_simulator`'s per-lap loop still feeds raw ages
+    (Day 6d).
 
 - **[✅ done 2026-09-11 — full writeup: `docs/internal/tire-deg-model-quality-and-
   rival-pit-behavior.md`] `predicted_life_remaining` pegged at
@@ -1748,9 +1762,10 @@ happen), or was found already fixed and moved into ### Notes below instead.
   or genuine live message timing/interleaving quirks, all only exercisable
   against F1's real feed. Re-run against a genuine live race once one occurs.
 
-- **[deferred — scheduled as demo deployment Day 6c, before Day 7] The
-  pit-window recommendation engine gives recommendations that contradict
-  real strategy and the F1 rules.** Found 2026-10-04 in the Day 6b visual
+- **[✅ done 2026-10-10, demo deployment Day 6c; Supabase recompute pending]
+  The pit-window recommendation engine gave recommendations that contradicted
+  real strategy and the F1 rules.** See the Notes entry "Pit-window
+  recommendation engine reworked". Found 2026-10-04 in the Day 6b visual
   check (Belgian GP replay). Over 200 stored recommendations:
   - it never offers "no further stop" (ANT told to stop again although he
     one-stopped; 15 of 22 drivers one-stopped);
@@ -1766,14 +1781,22 @@ happen), or was found already fixed and moved into ### Notes below instead.
   - undercut shows 100% right after a stop.
 
   Full write-up, evidence, causes and proposed work:
-  `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". After the fix,
-  replay data must be recomputed (`precompute_replay`, local then Supabase).
-- **[partly fixed Day 6b; pit-lap remainder scheduled for Day 6c] The timing tower lags
-  the circuit map around pit stops.** Remainder (2026-10-04): the
-  progress interpolation spreads a pit lap's pit-lane loss over the whole
-  lap, so VER dropped behind LEC ~90 s before his real pit entry; the fix
-  (in-lap/out-lap handling) is item 8 of the plan doc's "Day 6c". Found 2026-10-02 in the Day 6 visual
+  `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". Replay data was
+  recomputed locally 2026-10-10; Supabase is recomputed after the merge to
+  `main` (whose migrate job adds the new column), with owner approval.
+- **[✅ fixed in playback, Day 6b and Day 6c CP7] The timing tower lagged
+  the circuit map around pit stops.** Found 2026-10-02 in the Day 6 visual
   check (Belgian GP replay, VER's lap-17 pit).
+  - **Pit laps (✅ fixed 2026-10-10, Day 6c CP7):** the progress
+    interpolation spread a pit lap's pit-lane loss over the whole lap, so VER
+    dropped behind LEC 85 s before the map showed it. `replay_playback.py` now
+    finds a stop from a tyre-age drop and spends each pit lap's extra time
+    (against the field's median on that lap) in the pit lane,
+    `PIT_LANE_LAP_FRACTION` (5%) of a lap each side of the line. VER now
+    drops behind LEC/HAM/PIA/NOR within 1 s of the map. Adjacent tower pairs
+    in the map's order within 150 s of a stop: Belgian 80.8% -> 92.3%, Canada
+    96.7% -> 97.6%, British 88.6% -> 88.5%. Playback only
+    (`DEMO_PLAYBACK_MODE=true`); `replay_pipeline.py` still publishes per lap.
   - **Order and gaps (✅ fixed in playback 2026-10-04, Day 6b CP1):** in a
     Demo Replay they changed once per lap, when the leader crossed the line,
     while the map moves every second. VER showed P4 in the tower for ~2
@@ -1820,6 +1843,40 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Pit-window recommendation engine reworked (✅ done 2026-10-10, demo
+deployment Day 6c, CP1-CP8; full write-up in the plan doc's "Day 6c"):**
+- **"No further stop"** is a candidate like any stop (run to the flag on the
+  current tyre). New not-null column `strategy_predictions.no_further_stop`
+  (migration `20261010_add_no_further_stop_to_strategy_predictions`), on
+  `PitWindowResponse` and the history entry; web, desktop and mobile cards say
+  "No further stop" / "Stay out on X to the flag".
+- **Two-compound rule:** `strategy_service.compounds_used` /
+  `dry_compound_obligation`; no-stop and the only dry compound used are not
+  offered until a second dry compound is fitted (wet compounds lift it).
+- **Fresh-tyre ages settled:** projections feed ages >= 3 (see the
+  `tire_deg_hard.pkl` entry in Deferred Wiring); this is what made HARD appear
+  (11 -> 72 recommendations, 68 real stops onto HARD) and ended undercut
+  scores of 100% right after a stop.
+- **Pit loss after a safety-car / VSC lap:** x0.5 / x0.65
+  (`pit_loss_after_lap`; lap contexts carry `track_status`).
+- **Window:** the recommended lap +/- 2, clipped; no more one-lap windows or
+  answers on the 15-lap search limit.
+- **Text:** the gap sentence compares the gap with what a stop costs now; the
+  predictor caption is "N% chance of a stop within 3 laps".
+- **Clients:** the race page shows the newest stored prediction when a lap has
+  several.
+- **Measured** with `backend/scripts/evaluate_pit_recommendations.py`
+  (read-only, run in the worker container) over the 3 curated windows, 579
+  driver-laps: stop/no-stop agreement 49% -> 71%, real in-lap inside the
+  window 33% -> 49%, two-compound rule broken 60% -> 0%, mean confidence
+  0.50 -> 0.74; compound match 38% -> 33% (MEDIUM under-recommended, Day 6d).
+- **Data:** recomputed locally (579 predictions, 401 "no further stop",
+  validator passes). Supabase: after the merge to `main`, with owner approval.
+  No model was retrained and training uses none of this, so the weekly
+  retrain doesn't interact with it.
+- **Verified:** unit suite 923 passed, web 79; ruff, mypy `--strict`, `tsc`
+  on all three clients.
 
 **Selected driver's code label on the circuit map, and a higher `/positions`
 rate limit (✅ done 2026-10-09):**

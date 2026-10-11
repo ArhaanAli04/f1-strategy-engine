@@ -624,7 +624,9 @@ async def _resolve_inference_context(
             function's docstring).
     Returns:
         Dict with circuit_id, circuit_name, season, round_number, total_laps,
-        stored_total_laps, track_temp, air_temp, plus
+        stored_total_laps, track_temp, air_temp, compounds_used (every compound
+        the driver has run up to and including this lap, for the pit-window
+        engine's two-compound rule), plus
         _resolve_position_context's position, gap_to_car_ahead,
         gap_to_car_behind, target_ahead_driver_id, target_behind_driver_id.
         stored_total_laps is the real Session.total_laps value specifically
@@ -674,6 +676,13 @@ async def _resolve_inference_context(
     position_context = await _resolve_position_context(
         db, async_redis_client, session_id, driver_id, current_lap, season, round_number
     )
+    # This lap's own lap_data row may not be committed yet (process_lap is a
+    # separate task, see _compute_recommendation_fields), so read the laps
+    # before it and add this lap's compound from the lap event itself.
+    earlier_compounds = await strategy_service.compounds_used(
+        db, session_id, driver_id, current_lap - 1
+    )
+    compounds_used = sorted({*earlier_compounds, compound.upper()} - {""})
 
     return {
         "circuit_id": circuit_id,
@@ -684,6 +693,7 @@ async def _resolve_inference_context(
         "stored_total_laps": stored_total_laps,
         "track_temp": track_temp,
         "air_temp": air_temp,
+        "compounds_used": compounds_used,
         **position_context,
     }
 
@@ -1013,7 +1023,8 @@ def _compute_recommendation_fields(
         undercut_score, overcut_score: Already resolved by the caller.
     Returns:
         Dict with recommended_pit_lap, window_start, window_end,
-        recommended_compound, confidence_score, explanation (a plain JSON-
+        recommended_compound, confidence_score, no_further_stop (Day 6c
+        CP2: run the current tyre to the flag), explanation (a plain JSON-
         serializable dict via .model_dump(mode="json"), or None) — all
         None/0.0/None if build_pit_recommendation's own candidate search
         returns nothing (e.g. current_lap >= total_laps, race essentially
@@ -1028,6 +1039,7 @@ def _compute_recommendation_fields(
         "recommended_compound": None,
         "confidence_score": 0.0,
         "explanation": None,
+        "no_further_stop": False,
     }
     try:
         compound = str(context.get("compound", "")).upper()
@@ -1040,6 +1052,8 @@ def _compute_recommendation_fields(
             "tyre_age_laps": tyre_age_laps,
             "total_laps": total_laps,
             "circuit_name": resolved["circuit_name"],
+            "compounds_used": resolved.get("compounds_used"),
+            "track_status": context.get("track_status"),
         }
 
         candidates = strategy_service.compute_pit_recommendation(
@@ -1055,16 +1069,22 @@ def _compute_recommendation_fields(
             "window_end": top["window_end"],
             "recommended_compound": top["recommended_compound"],
             "confidence_score": top["confidence_score"] or 0.0,
+            "no_further_stop": bool(top.get("no_further_stop", False)),
         }
 
-        tire_deg_contributions = strategy_service.tire_deg_recommendation_contributions(
-            models,
-            maps_cache,
-            driver_id,
-            resolved["circuit_name"],
-            total_laps,
-            top["pit_lap"],
-            top["recommended_compound"],
+        # No new stint to explain when the recommendation is to stay out.
+        tire_deg_contributions = (
+            []
+            if fields["no_further_stop"]
+            else strategy_service.tire_deg_recommendation_contributions(
+                models,
+                maps_cache,
+                driver_id,
+                resolved["circuit_name"],
+                total_laps,
+                top["pit_lap"],
+                top["recommended_compound"],
+            )
         )
         neighbors = {
             "position": resolved["position"],
@@ -1094,6 +1114,8 @@ def _compute_recommendation_fields(
             ),
             tire_deg_contributions=tire_deg_contributions,
             pit_predictor_contributions=pit_predictor_contributions,
+            no_further_stop=fields["no_further_stop"],
+            pit_loss_seconds=strategy_service.pit_loss_after_lap(context.get("track_status")),
         )
         fields["explanation"] = explanation.model_dump(mode="json")
         return fields

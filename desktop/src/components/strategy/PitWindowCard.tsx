@@ -21,7 +21,10 @@ interface PitWindowCardProps {
 // PitRecommendationView.isFallbackEstimate's own docstring for why this
 // can't be more precise than a plain visual flag (no race-length context
 // exists client-side to sanity-check the number itself).
+// "No further stop" (Day 6c) has no lap to show: the engine recommends
+// running the current tyre to the flag.
 function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLabel: string): string {
+  if (view.noFurtherStop) return windowLabel === "L" ? "No stop" : "No further stop"
   if (view.windowStart !== null && view.windowEnd !== null) {
     return `${windowLabel}${view.windowStart}–${view.windowEnd}`
   }
@@ -99,8 +102,14 @@ export function PitWindowCard({ sessionId, driverId, compact, className }: PitWi
           )}
         </div>
         <p className="text-sm text-muted-foreground">
-          {view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap {view.pitLap}
-          {view.recommendedCompound && ` — ${view.recommendedCompound}`}
+          {view.noFurtherStop ? (
+            <>Stay out on {view.recommendedCompound ?? "the current tyre"} to the flag</>
+          ) : (
+            <>
+              {view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap {view.pitLap}
+              {view.recommendedCompound && ` — ${view.recommendedCompound}`}
+            </>
+          )}
         </p>
         {view.isFallbackEstimate && (
           <p className="text-[10px] text-muted-foreground">
@@ -114,9 +123,12 @@ export function PitWindowCard({ sessionId, driverId, compact, className }: PitWi
           <p className="text-[10px] text-muted-foreground">As of lap {view.asOfLapNumber}</p>
         )}
         {view.pitProbability !== null && (
+          // pit_predictor's label: a stop on this lap or the next two
+          // (pit_predictor.PIT_LABEL_HORIZON_LAPS). It used to read "lagging
+          // indicator — fires on the pit lap itself", true only before the
+          // 2026-09-04 label fix (Day 6c rewording).
           <p className="text-[10px] text-muted-foreground">
-            Pit predictor: {Math.round(view.pitProbability * 100)}% (lagging indicator — fires on
-            the pit lap itself, not before)
+            Pit predictor: {Math.round(view.pitProbability * 100)}% chance of a stop within 3 laps
           </p>
         )}
       </CardContent>
