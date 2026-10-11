@@ -8,6 +8,25 @@ const SELECTED_DOT_RADIUS = 18
 const DOT_STROKE_WIDTH = 1.5
 const SELECTED_DOT_STROKE_WIDTH = 3
 
+// The selected driver's label: a dark pill with a team-colour border and the
+// driver code, above the dot (owner's choice, 2026-10-09). Sizes are in the
+// outline's viewBox units (every outline is "0 0 1000 1000"); the map is
+// ~500 px tall, so the 26-unit font shows at ~13 px. Codes are always three
+// letters, so the pill has a fixed width.
+const LABEL_WIDTH = 84
+const LABEL_HEIGHT = 40
+const LABEL_FONT_SIZE = 26
+const LABEL_BORDER_WIDTH = 3
+const LABEL_GAP = 8
+const LABEL_BACKGROUND = "rgba(10, 10, 10, 0.9)"
+// The pill's top edge, relative to the dot's centre, when drawn above it.
+const LABEL_ABOVE_Y = -(SELECTED_DOT_RADIUS + LABEL_GAP + LABEL_HEIGHT)
+// How far to move the pill to put it below the dot instead (mirror image).
+const LABEL_FLIP_SHIFT = 2 * (SELECTED_DOT_RADIUS + LABEL_GAP) + LABEL_HEIGHT
+// The map's top edge in viewBox units: near it the pill flips below the dot
+// rather than being cut off.
+const VIEWBOX_TOP = 0
+
 // Extra margin on top of the poll interval. The render cursor sits this far
 // in the past, so it needs the real end-to-end update interval (poll +
 // REST round-trip + render jitter), which is reliably a little OVER
@@ -81,10 +100,57 @@ function rawPositionAt(
   return { x: last.x, y: last.y }
 }
 
+// Whether the label must sit below a dot at screen y cy (no room above).
+function labelFlipsBelow(cy: number): boolean {
+  return cy + LABEL_ABOVE_Y < VIEWBOX_TOP
+}
+
+interface DriverLabelProps {
+  code: string
+  color: string
+}
+
+// Drawn inside the selected dot's group, so it moves with the dot; its flip
+// below the dot is set per frame (see placeDot).
+function DriverLabel({ code, color }: DriverLabelProps) {
+  return (
+    <>
+      <rect
+        x={-LABEL_WIDTH / 2}
+        y={LABEL_ABOVE_Y}
+        width={LABEL_WIDTH}
+        height={LABEL_HEIGHT}
+        rx={LABEL_HEIGHT / 2}
+        fill={LABEL_BACKGROUND}
+        stroke={color}
+        strokeWidth={LABEL_BORDER_WIDTH}
+      />
+      <text
+        x={0}
+        y={LABEL_ABOVE_Y + LABEL_HEIGHT / 2}
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill="#fff"
+        fontSize={LABEL_FONT_SIZE}
+        fontWeight={700}
+      >
+        {code}
+      </text>
+    </>
+  )
+}
+
+export interface DriverDotMeta {
+  color: string
+  driverId: string
+  // Three-letter driver code, shown in the selected driver's label.
+  code: string
+}
+
 interface AnimatedDriverDotsProps {
   positions: DriverPosition[]
   transform: CircuitOutlineTransform
-  driverByCarNumber: Map<string, { color: string; driverId: string }>
+  driverByCarNumber: Map<string, DriverDotMeta>
   selectedDriverId: string | null
   prefersReducedMotion: boolean
   // Draw each dot where the field was this many ms ago, so there is always a
@@ -109,10 +175,12 @@ interface AnimatedDriverDotsProps {
 //
 // Positions are buffered RAW (pre-applyTransform) and transformed per frame,
 // so a circuit-outline change can't strand stale screen coordinates in the
-// buffer. Position is written straight to each <circle>'s style.transform
-// via a ref — routing a 60fps loop through React state for up to 22 dots
-// would be wasteful; radius/fill/stroke (selection state, changing rarely)
-// stay declarative below.
+// buffer. Position is written straight to each driver's <g> (the dot, plus
+// the label for the selected driver) via style.transform on a ref — routing
+// a 60fps loop through React state for up to 22 dots would be wasteful;
+// radius/fill/stroke and the label (selection state, changing rarely) stay
+// declarative below. The selected driver is drawn last so its dot and label
+// sit above the rest.
 export function AnimatedDriverDots({
   positions,
   transform,
@@ -121,9 +189,20 @@ export function AnimatedDriverDots({
   prefersReducedMotion,
   renderDelayMs = DEFAULT_RENDER_DELAY_MS,
 }: AnimatedDriverDotsProps) {
-  const dotRefs = useRef<Map<string, SVGCircleElement>>(new Map())
+  const dotRefs = useRef<Map<string, SVGGElement>>(new Map())
   const buffersRef = useRef<Map<string, PositionSample[]>>(new Map())
   const transformRef = useRef<CircuitOutlineTransform>(transform)
+  const labelRef = useRef<SVGGElement | null>(null)
+
+  // Move one driver's group to (cx, cy); for the labelled driver, also flip
+  // the label below the dot when there is no room above it.
+  const placeDot = useCallback((group: SVGGElement, cx: number, cy: number) => {
+    group.style.transform = `translate(${cx}px, ${cy}px)`
+    const label = labelRef.current
+    if (label && group.contains(label)) {
+      label.style.transform = labelFlipsBelow(cy) ? `translateY(${LABEL_FLIP_SHIFT}px)` : ""
+    }
+  }, [])
 
   // One position pass: draw every registered dot at the render-behind
   // cursor. Called synchronously from the layout effect (correct position
@@ -139,9 +218,9 @@ export function AnimatedDriverDots({
       const raw = rawPositionAt(buffer, renderTime)
       if (!raw) continue
       const { cx, cy } = applyTransform(raw.x, raw.y, activeTransform)
-      el.style.transform = `translate(${cx}px, ${cy}px)`
+      placeDot(el, cx, cy)
     }
-  }, [renderDelayMs])
+  }, [renderDelayMs, placeDot])
 
   // New data arrived: append one raw sample per driver, drop the oldest
   // beyond MAX_SAMPLES, and forget any driver no longer in the field.
@@ -161,7 +240,7 @@ export function AnimatedDriverDots({
         const el = dotRefs.current.get(position.driver_number)
         if (el) {
           const { cx, cy } = applyTransform(position.x, position.y, transform)
-          el.style.transform = `translate(${cx}px, ${cy}px)`
+          placeDot(el, cx, cy)
         }
         continue
       }
@@ -177,7 +256,7 @@ export function AnimatedDriverDots({
     }
 
     if (!prefersReducedMotion) renderFrame()
-  }, [positions, transform, prefersReducedMotion, renderFrame])
+  }, [positions, transform, prefersReducedMotion, renderFrame, placeDot])
 
   // Continuous playback between polls — skipped under reduced motion (the
   // layout effect above already applied each update's final position, with
@@ -193,23 +272,43 @@ export function AnimatedDriverDots({
     return () => cancelAnimationFrame(frameId)
   }, [prefersReducedMotion, renderFrame])
 
+  const isSelectedCar = (driverNumber: string): boolean => {
+    const meta = driverByCarNumber.get(driverNumber)
+    return meta !== undefined && meta.driverId === selectedDriverId
+  }
+  // SVG has no z-index: later siblings paint on top, so the selected driver
+  // goes last. The sort is stable, so the others keep their order.
+  const ordered = [...positions].sort(
+    (a, b) => Number(isSelectedCar(a.driver_number)) - Number(isSelectedCar(b.driver_number)),
+  )
+
   return (
     <>
-      {positions.map((position) => {
+      {ordered.map((position) => {
         const meta = driverByCarNumber.get(position.driver_number)
-        const isSelected = meta !== undefined && meta.driverId === selectedDriverId
+        const isSelected = isSelectedCar(position.driver_number)
+        const color = meta?.color ?? FALLBACK_TEAM_COLOR
         return (
-          <circle
+          <g
             key={position.driver_number}
+            data-driver-number={position.driver_number}
             ref={(el) => {
               if (el) dotRefs.current.set(position.driver_number, el)
               else dotRefs.current.delete(position.driver_number)
             }}
-            r={isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS}
-            fill={meta?.color ?? FALLBACK_TEAM_COLOR}
-            stroke="#fff"
-            strokeWidth={isSelected ? SELECTED_DOT_STROKE_WIDTH : DOT_STROKE_WIDTH}
-          />
+          >
+            <circle
+              r={isSelected ? SELECTED_DOT_RADIUS : DOT_RADIUS}
+              fill={color}
+              stroke="#fff"
+              strokeWidth={isSelected ? SELECTED_DOT_STROKE_WIDTH : DOT_STROKE_WIDTH}
+            />
+            {isSelected && meta && (
+              <g ref={labelRef} data-driver-label="">
+                <DriverLabel code={meta.code} color={color} />
+              </g>
+            )}
+          </g>
         )
       })}
     </>

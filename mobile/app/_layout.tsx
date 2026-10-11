@@ -17,6 +17,7 @@ import { useState } from "react"
 import { View } from "react-native"
 import { GestureHandlerRootView } from "react-native-gesture-handler"
 import { SafeAreaProvider } from "react-native-safe-area-context"
+import { LiveTelemetryBridge } from "@/components/shared/LiveTelemetryBridge"
 import { useNotificationResponseListener } from "@/hooks/useNotificationResponseListener"
 import { usePushNotifications } from "@/hooks/usePushNotifications"
 import { useAuthStore, useIsAuthenticated } from "@/stores/authStore"
@@ -42,6 +43,15 @@ function shouldPersistQuery(query: Query): boolean {
   )
 }
 
+// usePushNotifications sends the token with useMutation, so it must run
+// inside the query provider: called from RootLayout itself, above the
+// provider, it threw "No QueryClient set" on the first device run (Expo Go,
+// 2026-10-06). It no-ops until the user is authenticated.
+function PushNotificationRegistrar(): null {
+  usePushNotifications()
+  return null
+}
+
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
     TitilliumWeb_400Regular,
@@ -57,12 +67,8 @@ export default function RootLayout() {
   // Same useState-not-module-level rationale as queryClient above.
   const [persister] = useState(() => createAsyncStoragePersister({ storage: AsyncStorage }))
 
-  // NOTE: Push notifications require a development build installed on a
-  // physical device (iOS: Apple Developer account required, Android: free
-  // via EAS). Cannot be tested in Expo Go or without a build. Called
-  // unconditionally (Rules of Hooks) — both hooks internally no-op until
-  // there's something to do (unauthenticated / no tap yet).
-  usePushNotifications()
+  // Push token registration runs in PushNotificationRegistrar, inside the
+  // query provider below. This listener needs no query client.
   useNotificationResponseListener()
 
   // Fonts and SecureStore rehydration must both finish before any screen
@@ -84,6 +90,10 @@ export default function RootLayout() {
             dehydrateOptions: { shouldDehydrateQuery: shouldPersistQuery },
           }}
         >
+          <PushNotificationRegistrar />
+          {/* The app's one live telemetry connection, beside the navigator so a
+              change of session never remounts the screens. */}
+          <LiveTelemetryBridge />
           <View className="flex-1 bg-background">
             <Stack
               screenOptions={{
@@ -107,15 +117,31 @@ export default function RootLayout() {
                   name="driver/[id]"
                   options={{
                     headerShown: true,
+                    // iOS would show the previous screen's title, "(tabs)".
+                    headerBackButtonDisplayMode: "minimal",
                     title: "Driver",
                     headerStyle: { backgroundColor: "#0a0a0a" },
                     headerTintColor: "#fafafa",
                   }}
                 />
                 <Stack.Screen
+                  name="strategy-driver"
+                  options={{
+                    // A native iOS sheet exactly as tall as its content (the
+                    // Strategy tab's driver detail; owner's choice 2026-10-07).
+                    presentation: "formSheet",
+                    sheetAllowedDetents: "fitToContents",
+                    sheetGrabberVisible: true,
+                    headerShown: false,
+                    contentStyle: { backgroundColor: "#0a0a0a" },
+                  }}
+                />
+                <Stack.Screen
                   name="simulator"
                   options={{
                     headerShown: true,
+                    // iOS would show the previous screen's title, "(tabs)".
+                    headerBackButtonDisplayMode: "minimal",
                     title: "Strategy Simulator",
                     headerStyle: { backgroundColor: "#0a0a0a" },
                     headerTintColor: "#fafafa",

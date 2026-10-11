@@ -624,7 +624,9 @@ async def _resolve_inference_context(
             function's docstring).
     Returns:
         Dict with circuit_id, circuit_name, season, round_number, total_laps,
-        stored_total_laps, track_temp, air_temp, plus
+        stored_total_laps, track_temp, air_temp, compounds_used (every compound
+        the driver has run up to and including this lap, for the pit-window
+        engine's two-compound rule), plus
         _resolve_position_context's position, gap_to_car_ahead,
         gap_to_car_behind, target_ahead_driver_id, target_behind_driver_id.
         stored_total_laps is the real Session.total_laps value specifically
@@ -674,6 +676,13 @@ async def _resolve_inference_context(
     position_context = await _resolve_position_context(
         db, async_redis_client, session_id, driver_id, current_lap, season, round_number
     )
+    # This lap's own lap_data row may not be committed yet (process_lap is a
+    # separate task, see _compute_recommendation_fields), so read the laps
+    # before it and add this lap's compound from the lap event itself.
+    earlier_compounds = await strategy_service.compounds_used(
+        db, session_id, driver_id, current_lap - 1
+    )
+    compounds_used = sorted({*earlier_compounds, compound.upper()} - {""})
 
     return {
         "circuit_id": circuit_id,
@@ -684,6 +693,7 @@ async def _resolve_inference_context(
         "stored_total_laps": stored_total_laps,
         "track_temp": track_temp,
         "air_temp": air_temp,
+        "compounds_used": compounds_used,
         **position_context,
     }
 
@@ -1013,7 +1023,8 @@ def _compute_recommendation_fields(
         undercut_score, overcut_score: Already resolved by the caller.
     Returns:
         Dict with recommended_pit_lap, window_start, window_end,
-        recommended_compound, confidence_score, explanation (a plain JSON-
+        recommended_compound, confidence_score, no_further_stop (Day 6c
+        CP2: run the current tyre to the flag), explanation (a plain JSON-
         serializable dict via .model_dump(mode="json"), or None) — all
         None/0.0/None if build_pit_recommendation's own candidate search
         returns nothing (e.g. current_lap >= total_laps, race essentially
@@ -1028,6 +1039,7 @@ def _compute_recommendation_fields(
         "recommended_compound": None,
         "confidence_score": 0.0,
         "explanation": None,
+        "no_further_stop": False,
     }
     try:
         compound = str(context.get("compound", "")).upper()
@@ -1040,6 +1052,8 @@ def _compute_recommendation_fields(
             "tyre_age_laps": tyre_age_laps,
             "total_laps": total_laps,
             "circuit_name": resolved["circuit_name"],
+            "compounds_used": resolved.get("compounds_used"),
+            "track_status": context.get("track_status"),
         }
 
         candidates = strategy_service.compute_pit_recommendation(
@@ -1055,16 +1069,22 @@ def _compute_recommendation_fields(
             "window_end": top["window_end"],
             "recommended_compound": top["recommended_compound"],
             "confidence_score": top["confidence_score"] or 0.0,
+            "no_further_stop": bool(top.get("no_further_stop", False)),
         }
 
-        tire_deg_contributions = strategy_service.tire_deg_recommendation_contributions(
-            models,
-            maps_cache,
-            driver_id,
-            resolved["circuit_name"],
-            total_laps,
-            top["pit_lap"],
-            top["recommended_compound"],
+        # No new stint to explain when the recommendation is to stay out.
+        tire_deg_contributions = (
+            []
+            if fields["no_further_stop"]
+            else strategy_service.tire_deg_recommendation_contributions(
+                models,
+                maps_cache,
+                driver_id,
+                resolved["circuit_name"],
+                total_laps,
+                top["pit_lap"],
+                top["recommended_compound"],
+            )
         )
         neighbors = {
             "position": resolved["position"],
@@ -1094,6 +1114,8 @@ def _compute_recommendation_fields(
             ),
             tire_deg_contributions=tire_deg_contributions,
             pit_predictor_contributions=pit_predictor_contributions,
+            no_further_stop=fields["no_further_stop"],
+            pit_loss_seconds=strategy_service.pit_loss_after_lap(context.get("track_status")),
         )
         fields["explanation"] = explanation.model_dump(mode="json")
         return fields
@@ -1384,12 +1406,16 @@ async def _build_race_state(
     )
     latest_laps = list((await db.execute(latest_laps_query)).scalars().all())
 
-    # Field position as of current_lap specifically — NOT each driver's own
-    # absolute-latest DB row (that's what latest_laps above is for, and it's
-    # fine for compound/tyre_age, but for a completed/ahead-of-current_lap
-    # session it would silently be each driver's FINAL classification
-    # position rather than their position at the point the what-if starts).
-    # Same "anchor to current_lap" fix as cumulative_race_time_seconds below.
+    # Field state as of current_lap specifically — NOT each driver's own
+    # absolute-latest DB row (latest_laps above): for a completed/ahead-of-
+    # current_lap session that row is the race's last lap, so position would
+    # be the FINAL classification and compound/tyre age the tyres the car
+    # finished on. Position has used this row since the Monte Carlo fixes;
+    # compound and tyre age only since 2026-10-07: until then a what-if at
+    # Belgian GP 2026 lap 25 started LEC on lap-44 HARDs aged 24 (really 5)
+    # and NOR on the MEDIUMs he fitted on lap 31, and the pit model stopped
+    # 19 of 20 cars. Same "anchor to current_lap" fix as
+    # cumulative_race_time_seconds below.
     position_subq = (
         select(LapData.driver_id, func.max(LapData.lap_number).label("ref_lap"))
         .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
@@ -1409,13 +1435,31 @@ async def _build_race_state(
     # below, which stays as the fallback source for a live-ingested
     # (never-backfilled) session.
     position_query = (
-        select(LapData.driver_id, LapData.position, LapData.session_elapsed_seconds)
-        .join(position_subq, position_join)
-        .where(LapData.session_id == session_id)
+        select(LapData).join(position_subq, position_join).where(LapData.session_id == session_id)
     )
-    position_rows = (await db.execute(position_query)).all()
-    position_by_driver: dict[uuid.UUID, int | None] = {row[0]: row[1] for row in position_rows}
-    elapsed_by_driver: dict[uuid.UUID, float | None] = {row[0]: row[2] for row in position_rows}
+    position_rows = list((await db.execute(position_query)).scalars().all())
+    row_at_current_lap: dict[uuid.UUID, LapData] = {row.driver_id: row for row in position_rows}
+    position_by_driver: dict[uuid.UUID, int | None] = {
+        row.driver_id: row.position for row in position_rows
+    }
+    elapsed_by_driver: dict[uuid.UUID, float | None] = {
+        row.driver_id: row.session_elapsed_seconds for row in position_rows
+    }
+    # Cars that retired before current_lap are left out of the simulated
+    # field. Their last row keeps a race time from many laps earlier, so they
+    # "finished" ahead of everyone and pushed every running car down: LIN,
+    # P9 at Belgian GP 2026 lap 40, came out P12 (-3) behind three cars out
+    # since laps 8-27, and a safety car bunched the field behind the earliest
+    # of them (2026-10-07). Judged against the requester's own lap, as in
+    # _resolve_position_context, since this field is cut off at current_lap.
+    requester_row = next(
+        (row for row in position_rows if row.driver_id == requesting_driver_id), None
+    )
+    racing_driver_ids = {
+        row.driver_id
+        for row in strategy_service.still_racing(position_rows, reference=requester_row)
+    }
+    retired_driver_ids = {row.driver_id for row in position_rows} - racing_driver_ids
 
     # Fallback source for cumulative_race_time_seconds when elapsed_by_driver
     # has no value for a driver (a live-ingested session, never backfilled —
@@ -1479,12 +1523,17 @@ async def _build_race_state(
     drivers: list[DriverRaceState] = []
     requesting_driver_found = False
     for lap in latest_laps:
+        if lap.driver_id != requesting_driver_id and lap.driver_id in retired_driver_ids:
+            continue
         driver_id_str = str(lap.driver_id)
         if lap.driver_id == requesting_driver_id:
             requesting_driver_found = True
             compound, tyre_age_laps = current_compound, current_tyre_age
         else:
-            compound, tyre_age_laps = lap.compound, lap.tyre_age_laps
+            # latest_laps only for a driver with no row at or before
+            # current_lap (none in practice: every car has run lap 1).
+            state_row = row_at_current_lap.get(lap.driver_id, lap)
+            compound, tyre_age_laps = state_row.compound, state_row.tyre_age_laps
         # Seeded against the same reference lap (current_lap) for every driver,
         # not each driver's own independently-latest ingested lap — otherwise
         # normal async ingestion skew (or the requester's current_lap running
@@ -1744,6 +1793,11 @@ def _peak_projected_pit_lap(
     return lap, probability
 
 
+# A rival counts as having swapped places with the requester when it happens
+# in more than half of the simulations ("more often than not").
+_SWAP_PROBABILITY_THRESHOLD = 0.5
+
+
 def _build_plan_explanation(
     race_state: RaceSimulationInput,
     requester_state: DriverRaceState,
@@ -1757,21 +1811,18 @@ def _build_plan_explanation(
 ) -> dict[str, Any]:
     """Explain why a plan's position_gain_loss came out the way it did.
 
-    drivers_overtaken lists every OTHER driver currently behind the requester
-    (higher cumulative_race_time_seconds) whose gap is less than
-    race_simulator.PIT_STOP_SECONDS — close enough to leapfrog the requester
-    on a full pit-stop time loss. This SELECTION criterion is a static
-    property of the field's gaps at current_lap, computed the same way
-    regardless of whether this plan has a forced pit stop — the frontend
-    relabels the same list ("overtake you" vs "you overtake") based on
-    position_gain_loss's sign. Deliberately UNCHANGED by either part of the
-    What-If Simulator rebuild fix — see docs/internal/core-feature-rebuild-whatif-
-    simulator.md §7's own scope decision: part (a) enriched fresh_tyre_
-    gain_per_lap/total_recoverable_seconds only, and this part (b) enriches
-    each row's DATA (finish_ahead_probability/rival_projected_pit_lap/
-    rival_pit_probability, all real Monte Carlo outputs from THIS SAME
-    simulate_race call) without touching which drivers appear in the list or
-    why.
+    drivers_overtaken lists every OTHER driver who swaps places with the
+    requester in most simulations of THIS plan: a rival behind at current_lap
+    (gap_seconds > 0) that the requester finishes behind more often than not,
+    or a rival ahead (gap_seconds < 0) that the requester finishes ahead of
+    more often than not, ordered by starting position. The sign of gap_seconds
+    tells the client which way the swap went. Before 2026-10-07 the list was
+    the rivals behind within race_simulator.PIT_STOP_SECONDS at current_lap, a
+    static snapshot that could contradict the real result: LIN (Belgian GP
+    2026, lap 40, stop on lap 42) lost 3 places to cars 23.6-25.0 s behind,
+    just outside 22 s, and the list came back empty. A rival with no
+    finish-ahead probability (not in the simulation) is left out, since
+    nothing says it swapped places.
 
     fresh_tyre_gain_per_lap/total_recoverable_seconds are a real
     tire_deg-model-derived comparison — see _project_pit_stop_degradation's
@@ -1815,25 +1866,30 @@ def _build_plan_explanation(
         for driver in race_state.drivers
     }
 
-    drivers_overtaken: list[_OvertakingDriverEntry] = sorted(
-        (
+    drivers_overtaken: list[_OvertakingDriverEntry] = []
+    for driver in sorted(race_state.drivers, key=lambda d: d.starting_position):
+        if driver.driver_id == requester_state.driver_id:
+            continue
+        finish_ahead = requester_finish_ahead.get(driver.driver_id)
+        if finish_ahead is None:
+            continue
+        gap_seconds = (
+            driver.cumulative_race_time_seconds - requester_state.cumulative_race_time_seconds
+        )
+        rival_passes_requester = gap_seconds > 0.0 and finish_ahead < _SWAP_PROBABILITY_THRESHOLD
+        requester_passes_rival = gap_seconds < 0.0 and finish_ahead > _SWAP_PROBABILITY_THRESHOLD
+        if not (rival_passes_requester or requester_passes_rival):
+            continue
+        drivers_overtaken.append(
             _OvertakingDriverEntry(
                 position=driver.starting_position,
                 driver_id=driver.driver_id,
-                gap_seconds=driver.cumulative_race_time_seconds
-                - requester_state.cumulative_race_time_seconds,
-                finish_ahead_probability=requester_finish_ahead.get(driver.driver_id),
+                gap_seconds=gap_seconds,
+                finish_ahead_probability=finish_ahead,
                 rival_projected_pit_lap=peak_pit_by_driver_id[driver.driver_id][0],
                 rival_pit_probability=peak_pit_by_driver_id[driver.driver_id][1],
             )
-            for driver in race_state.drivers
-            if driver.driver_id != requester_state.driver_id
-            and 0.0
-            < driver.cumulative_race_time_seconds - requester_state.cumulative_race_time_seconds
-            < race_simulator.PIT_STOP_SECONDS
-        ),
-        key=lambda entry: entry["gap_seconds"],
-    )
+        )
 
     if pit_laps:
         laps_after_pit = max(total_laps - pit_laps[-1], 0)

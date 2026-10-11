@@ -55,6 +55,10 @@ export interface PitWindowResponse {
   recommended_compound: string
   confidence_score: number | null
   explanation: PitRecommendationExplanation | null
+  // Run the current tyre to the flag instead of stopping again (Day 6c,
+  // 2026-10-10). pit_lap is then the race's last lap and recommended_compound
+  // the current one; show "No further stop", not a lap.
+  no_further_stop: boolean
 }
 
 export interface UndercutThreatResponse {
@@ -114,6 +118,8 @@ export interface StrategyPredictionHistoryEntry {
   recommended_compound: string | null
   confidence_score: number
   explanation: PitRecommendationExplanation | null
+  // See PitWindowResponse.no_further_stop. False for rows predicted before it.
+  no_further_stop: boolean
 }
 
 export interface StrategyPredictionHistoryResponse {

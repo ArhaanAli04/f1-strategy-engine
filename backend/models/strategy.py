@@ -2,7 +2,18 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, func, text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    false,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -112,6 +123,10 @@ class StrategyPrediction(Base):
     window_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     window_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recommended_compound: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # The recommendation is to run the current tyre to the flag, not stop again
+    # (Day 6c CP2, 2026-10-10). recommended_pit_lap is then the race's last lap
+    # and recommended_compound the current one. False for every older row.
+    no_further_stop: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
     # Schemas.strategy_schema.PitRecommendationExplanation, serialized via
     # .model_dump(mode="json") — facts/narrative/tire_deg_shap/pit_predictor_shap.
     explanation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

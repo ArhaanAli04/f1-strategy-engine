@@ -46,3 +46,10 @@ export async function getUpcomingRace(): Promise<UpcomingRaceResponse> {
   const { data } = await apiClient.get<UpcomingRaceResponse>("/races/upcoming")
   return data
 }
+
+// GET /races/session/{session_id} — registered ahead of /races/{race_id} on
+// the backend, same reason as getCurrentRace above.
+export async function getRaceBySession(sessionId: string): Promise<RaceResponse> {
+  const { data } = await apiClient.get<RaceResponse>(`/races/session/${sessionId}`)
+  return data
+}

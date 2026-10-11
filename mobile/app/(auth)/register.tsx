@@ -13,6 +13,7 @@ import {
 import { PasswordInput } from "@/components/PasswordInput"
 import { useAuth } from "@/hooks/useAuth"
 import { getApiErrorMessage } from "@/utils/errors"
+import * as haptics from "@/utils/haptics"
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
@@ -47,14 +48,19 @@ export default function RegisterScreen() {
 
   async function onSubmit() {
     setServerError(null)
-    if (!validate()) return
+    if (!validate()) {
+      haptics.error()
+      return
+    }
     try {
       // POST /auth/register returns UserResponse, not tokens — no
       // auto-login (see backend/apis/v1/auth.py). User logs in next.
       await register({ full_name: fullName, email, password })
+      haptics.success()
       Alert.alert("Account created", "Please log in.")
       router.replace("/(auth)/login")
     } catch (error) {
+      haptics.error()
       setServerError(getApiErrorMessage(error, "Registration failed"))
     }
   }

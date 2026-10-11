@@ -53,8 +53,15 @@ export function useDriverSeasonStats(driverCode: string | null, season: number) 
         ergastApi.getDriverSeasonResults(ergastDriverId as string, season),
         ergastApi.getDriverStandings(ergastDriverId as string, season),
       ])
+      const raceStats = computeRaceStats(races)
       return {
-        ...computeRaceStats(races),
+        ...raceStats,
+        // The championship standing's points include sprint points; the
+        // race results summed in computeRaceStats are Grand Prix only (ANT
+        // 2026 after round 16: 320 vs 294). The sum is kept for a driver with
+        // no standing yet. Wins and podiums stay Grand Prix only, as F1
+        // counts them.
+        points: standing ? Number(standing.points) : raceStats.points,
         wdcPosition: standing ? Number(standing.position) : null,
       }
     },

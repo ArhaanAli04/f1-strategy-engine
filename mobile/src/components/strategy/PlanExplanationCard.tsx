@@ -33,6 +33,16 @@ function formatOvertakingEnrichment(entry: OvertakingDriver): string {
   return parts.join(" · ")
 }
 
+// drivers_overtaken holds the rivals who swap places with the driver in most
+// simulations (backend selection since 2026-10-07). gap_seconds is the
+// rival's race time minus the driver's at the current lap, so its sign says
+// which way the swap went.
+function formatSwap(entry: OvertakingDriver): string {
+  return entry.gap_seconds > 0
+    ? `+${entry.gap_seconds.toFixed(1)}s behind → passes you`
+    : `${Math.abs(entry.gap_seconds).toFixed(1)}s ahead → you pass`
+}
+
 const GAIN_COLOR = "#10B981"
 const LOSS_COLOR = "#EF4444"
 
@@ -70,10 +80,6 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
       ? `Why ${planLabel} loses ${pluralize(Math.abs(position_gain_loss), "position")}`
       : `Why ${planLabel} doesn't change your position`
 
-  const driverListLabel = isGain
-    ? "Drivers you overtake after pit"
-    : "Drivers who overtook you in pitstop"
-  const arrowLabel = isGain ? "you overtake" : "now ahead of you"
 
   const headingColor = isGain ? GAIN_COLOR : isLoss ? LOSS_COLOR : "#fafafa"
 
@@ -90,14 +96,14 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
 
       {explanation.drivers_overtaken.length === 0 ? (
         <Text className="text-xs text-muted">
-          No drivers within pit stop window — position unchanged by pit stop timing
+          No driver swaps places with you in most simulations
         </Text>
       ) : (
         <View className="gap-1">
-          <Text className="text-xs font-medium text-muted">{driverListLabel}</Text>
+          <Text className="text-xs font-medium text-muted">Drivers who swap places with you in most simulations</Text>
           {/* scrollEnabled=false — this card sits inside the Simulator's outer
-              ScrollView (Step 4). Lists here are short (a handful of cars
-              within one pit-stop window), so the nested-list perf cost RN
+              ScrollView (Step 4). Lists here are short (the few cars that
+              swap places with the driver), so the nested-list perf cost RN
               normally warns about doesn't apply in practice. */}
           <FlatList
             data={explanation.drivers_overtaken}
@@ -119,7 +125,7 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
                       {driver?.code ?? "???"}
                     </Text>
                     <Text className="flex-1 font-mono text-xs text-muted">
-                      +{entry.gap_seconds.toFixed(1)}s behind {arrowLabel}
+                      {formatSwap(entry)}
                     </Text>
                   </View>
                   {/* Real Monte Carlo outputs from the SAME simulate_race call
@@ -149,8 +155,8 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
           isFasterOnFreshTyre above), which the old hardcoded constant could
           never represent. Still deliberately does NOT assert a "sufficient"/
           "not enough to recover" verdict about POSITION — mirrors web/src/
-          pages/SimulatorPage.tsx's Option 3 fix: drivers_overtaken above is
-          a frozen current-lap snapshot, and this line's rival-pace
+          pages/SimulatorPage.tsx's Option 3 fix: drivers_overtaken above comes from
+          the simulation, and this line's rival-pace
           assumption (see the trailing sentence below) is unchanged by this
           fix — the real Monte Carlo simulation behind position_gain_loss
           models every rival's own tyre wear and pit decisions lap by lap,

@@ -160,7 +160,13 @@ class SimulateStrategyRequest(BaseModel):
 
 
 class OvertakingDriver(BaseModel):
-    """One driver within a pit stop's worth of time of the requester at current_lap.
+    """One driver who swaps places with the requester in most simulations.
+
+    gap_seconds is this rival's race time minus the requester's at
+    current_lap: positive means the rival started behind and finishes ahead
+    (passes the requester), negative means the requester passes the rival.
+    Before 2026-10-07 the list held the rivals behind within a pit stop's
+    worth of time at current_lap instead (see PlanExplanation).
 
     driver_id, not driver_code — the frontend resolves id -> code/team color via
     its own driver roster query, same pattern as DriverChip/LiveTimingTower.
@@ -200,10 +206,11 @@ class OvertakingDriver(BaseModel):
 class PlanExplanation(BaseModel):
     """Why this plan's position_gain_loss came out the way it did.
 
-    drivers_overtaken is always the same list (drivers behind the requester at
-    current_lap, within pit_cost_seconds) regardless of whether the plan's
-    result is a gain or a loss — the frontend relabels it depending on
-    position_gain_loss's sign ("overtake you" vs "you overtake").
+    drivers_overtaken lists the rivals who swap places with the requester in
+    more than half of the simulations of this plan, either way (see
+    OvertakingDriver.gap_seconds for the direction), ordered by starting
+    position. Same fields as before 2026-10-07; only the selection changed
+    (prediction_worker._build_plan_explanation).
     """
 
     pit_cost_seconds: float

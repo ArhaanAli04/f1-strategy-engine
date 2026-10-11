@@ -28,6 +28,14 @@ from backend.core.security import decode_token
 
 AUTHENTICATED_LIMIT = "60/minute"
 UNAUTHENTICATED_LIMIT = "10/minute"
+# GET /telemetry/{session_id}/positions only: the circuit map polls it by
+# design (web every 1 s = 60/min, desktop and mobile every 2 s), so the
+# general 60/min left no room. Web alone sat exactly at the limit, and web
+# plus the phone on one account reached 59-83/min and got 32 "429 Too Many
+# Requests" in two minutes, each shown as an error toast (2026-10-09). It is
+# a Redis read; 180/min covers web, desktop and the phone together. The
+# race page needs sign-in, so the logged-out limit is unchanged.
+POSITIONS_AUTHENTICATED_LIMIT = "180/minute"
 
 
 def _client_ip(request: Request) -> str:
@@ -76,6 +84,19 @@ def rate_limit_value(key: str) -> str:
         "60/minute" for an authenticated user's bucket, "10/minute" for an IP bucket.
     """
     return AUTHENTICATED_LIMIT if key.startswith("user:") else UNAUTHENTICATED_LIMIT
+
+
+def positions_rate_limit_value(key: str) -> str:
+    """Resolve the rate-limit string for the circuit map's positions poll.
+
+    Args:
+        key: A key produced by rate_limit_key (slowapi passes it, as for
+            rate_limit_value).
+    Returns:
+        "180/minute" for an authenticated user's bucket, "10/minute" for an
+        IP bucket. See POSITIONS_AUTHENTICATED_LIMIT for why it differs.
+    """
+    return POSITIONS_AUTHENTICATED_LIMIT if key.startswith("user:") else UNAUTHENTICATED_LIMIT
 
 
 limiter = Limiter(key_func=rate_limit_key, storage_uri=get_redis_settings().redis_url)

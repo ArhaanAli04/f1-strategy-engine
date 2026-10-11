@@ -71,6 +71,56 @@ export async function getDriverStandings(
   return data.MRData.StandingsTable.StandingsLists[0]?.DriverStandings[0] ?? null
 }
 
+export interface ErgastSeasonDriverStanding {
+  position: string
+  points: string
+  wins: string
+  Driver: {
+    driverId: string
+    code?: string
+    givenName: string
+    familyName: string
+  }
+  Constructors: {
+    constructorId: string
+    name: string
+  }[]
+}
+
+export interface ErgastSeasonDriverStandings {
+  // The round the table is "after"; null before the season's first
+  // points-paying session (StandingsLists is empty then).
+  round: number | null
+  standings: ErgastSeasonDriverStanding[]
+}
+
+interface ErgastSeasonDriverStandingsResponse {
+  MRData: {
+    StandingsTable: {
+      StandingsLists: {
+        round: string
+        DriverStandings: ErgastSeasonDriverStanding[]
+      }[]
+    }
+  }
+}
+
+// Mobile only (2026-10-07, the Drivers tab's championship card): the whole
+// drivers' championship in one request, where getDriverStandings above takes
+// one request per driver. The rest of this file is a verbatim copy of web's.
+export async function getSeasonDriverStandings(season: number): Promise<ErgastSeasonDriverStandings> {
+  const response = await fetch(`${ERGAST_BASE_URL}/${season}/driverStandings/`)
+  if (!response.ok) {
+    throw new Error(`Ergast request failed: ${response.status}`)
+  }
+  const data = (await response.json()) as ErgastSeasonDriverStandingsResponse
+  const table = data.MRData.StandingsTable.StandingsLists[0]
+  return {
+    round: table ? Number(table.round) : null,
+    standings: table?.DriverStandings ?? [],
+  }
+}
+
 export interface ErgastConstructorStanding {
   position: string
   points: string

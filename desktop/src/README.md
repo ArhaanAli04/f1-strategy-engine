@@ -19,7 +19,7 @@ and must be checked by hand whenever their `web/` source changes.
 | `lib/utils.ts` | `web/src/lib/utils.ts` |
 | `components/ui/*.tsx` (11 files: button, card, checkbox, dialog, form, input, label, select, separator, sonner, switch) | `web/src/components/ui/*.tsx` |
 | `components/shared/ErrorBoundary.tsx` | `web/src/components/shared/ErrorBoundary.tsx` |
-| `components/circuit/AnimatedDriverDots.tsx` | `web/src/components/circuit/AnimatedDriverDots.tsx` (render-behind interpolation buffer for live dots; delay derives from `hooks/useDriverPositions.ts`'s `POSITIONS_POLL_INTERVAL_MS`, which is 2s on desktop vs 1s on web) |
+| `components/circuit/AnimatedDriverDots.tsx` | `web/src/components/circuit/AnimatedDriverDots.tsx` (render-behind interpolation buffer for live dots; delay derives from `hooks/useDriverPositions.ts`'s `POSITIONS_POLL_INTERVAL_MS`, which is 2s on desktop vs 1s on web). Since 2026-10-09 each driver is an SVG group, and the selected driver gets a code label above the dot and is drawn last (code identical to web's; `CircuitMapPanel.tsx` passes `code` via `DriverDotMeta`). |
 | `components/strategy/StrategyOverviewGrid.tsx` | `web/src/components/strategy/StrategyOverviewGrid.tsx` (byte-identical — never previously listed here, an existing documentation gap closed alongside the Checkpoint 5 `PitWindowCard.tsx` work below, not something that changed this session) |
 | `hooks/useRaceBySession.ts`, `hooks/useCountdown.ts` | `web/src/hooks/` same names (Day 6b CP6 — byte-identical; needed by the ported `CircuitMapPanel`) |
 | `hooks/useDemoReplay.ts` | `web/src/hooks/useDemoReplay.ts` (Day 6b CP5 — byte-identical; `types/demo.ts`/`api/demo.ts` are covered by the `types/*`/`api/*` rows) |

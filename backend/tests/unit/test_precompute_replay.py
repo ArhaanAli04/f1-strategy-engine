@@ -158,6 +158,7 @@ def _db_lap(driver_id: uuid.UUID, lap_number: int) -> Any:
         lap_time_seconds=90.0,
         compound="MEDIUM",
         tyre_age_laps=10,
+        track_status="1",
         is_valid=True,
         sector1_seconds=30.0,
         sector2_seconds=30.0,

@@ -1,5 +1,5 @@
 import { useMemo } from "react"
-import { AnimatedDriverDots } from "./AnimatedDriverDots"
+import { AnimatedDriverDots, type DriverDotMeta } from "./AnimatedDriverDots"
 import { CircuitOutlineSvg } from "./CircuitOutlineSvg"
 import { TelemetryGauge } from "./TelemetryGauge"
 import { useCircuitOutline } from "@/hooks/useCircuitOutline"
@@ -83,13 +83,14 @@ export function CircuitMapPanel({ sessionId, isExplicitSession }: CircuitMapPane
 
   const driverByCarNumber = useMemo(() => {
     const driverById = new Map((drivers ?? []).map((driver) => [driver.id, driver]))
-    const map = new Map<string, { color: string; driverId: string }>()
+    const map = new Map<string, DriverDotMeta>()
     for (const entry of carNumbers ?? []) {
       const driver = driverById.get(entry.driver_id)
       if (!driver) continue
       map.set(entry.car_number, {
         color: driver.contracts[0]?.team?.color_hex ?? FALLBACK_TEAM_COLOR,
         driverId: driver.id,
+        code: driver.code,
       })
     }
     return map

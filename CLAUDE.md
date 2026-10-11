@@ -612,24 +612,41 @@ Update this section at the start of each day's session:
 
 ```
 Phase:    8
-Day:      Monza live-race fixes + verification tooling (2026-09-19/20) —
-          docs/internal/live-race-ingestion-and-strategy-gaps-monza-2026.md
-Status:   Monza issues A-E all fixed. Verification built: archive replay (V1),
-          property tests (V4), live-feed counters + raw recorder (V5), shadow
-          race (V3, full 53-lap run passed 14/14 on 2026-09-20). Two
-          prediction_worker bugs found by V3 and fixed (engine dispose, lap-
-          persist ordering retry), plus the same dispose flaw in
-          alert_worker (2026-09-20). Unit suite 651 passed. Nothing committed
-          yet by the session. Earlier tire-deg work (2026-09-09/11) is
-          closed except CP6 — see docs/internal/tire-deg-model-quality-and-rival-pit-
-          behavior.md and Deferred Wiring.
-Next:     Open items are in docs/internal/live-pipeline-open-decisions-and-
-          calibration-2026.md: chain-vs-retry decision (3b), V2 score
-          calibration, V5 check at the next live race (Azerbaijan R15,
-          2026-09-26, stack up with --env-file .env), lead-lap fallback only
-          if V5 shows F1's Position field does not stream live.
-Blockers: No physical device for testing — Android emulator
-          setup planned after Day 32 (see mobile/src/README.md),Cloud deployment target undecided (Render/GKE) — cd.yml Jobs 3-5 remain placeholders, Sector boundaries (S1/S2/S3) deferred — see CLAUDE.md, VITE_API_URL_PROD placeholder until Fly.io deployed Day 40, ALLOWED_ORIGINS needs Vercel URL after Day 40 deployment. Note: always recreate local Docker stack with --env-file .env flag or secrets silently blank.
+Day:      Demo deployment plan (docs/internal/demo-deployment-plan-2026.md):
+          Days 1-6c done; last session 2026-10-10.
+Status:   Day 6c complete (CP1-CP8): the pit-window engine offers "no further
+          stop", follows the two-compound rule, settles fresh-tyre ages,
+          cheapens a stop after a safety-car/VSC lap and shows a +/-2-lap
+          window; the replay tower places pit-stop time in the pit lane.
+          Stop/no-stop agreement with real races 49% -> 71%. Local replays
+          recomputed; the Supabase recompute waits for the merge to main
+          (migration) and owner approval. Unit suite 923, web 79.
+          Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
+          mobile's copies match web again, every race screen follows a running
+          Demo Replay, the Live tab has a replay selector, the strategy panels
+          show stored predictions during a replay, and the app shares one live
+          WebSocket. Also 2026-10-09: the selected driver's code label on the
+          circuit map (web, desktop, mobile) and a 180/min limit for
+          /positions (was 60; caused "something went wrong" toasts).
+          2026-10-07: mobile Simulator matched to web, and four Simulator bugs
+          fixed (retired cars in the field, rivals on last-lap tyres, safety-car
+          laps erasing the order, explanation list). Committing is the
+          owner's.
+Next:     After the merge: recompute the curated replays on Supabase (owner
+          approval) and run the validator there. Then Day 6d, Simulator
+          testing (scenario harness against the curated races; ANT's phantom
+          second stop; negligible rival stops shown; "No further stop" in the
+          Simulator; MEDIUM under-recommended; raw fresh-tyre ages and the
+          safety-car pit loss in race_simulator). Then Day 7, Fly deploy,
+          starting with its "Mobile pre-release pass" (npm audit triage,
+          haptics switch, react-native-worklets with the chosen mobile
+          option).
+Blockers: Mobile tested on one iPhone in Expo Go only; Android not yet run
+          (mobile/README.md). Production is Fly.io (decided Day 24); its
+          deploy is demo plan Day 7, and VITE_API_URL_PROD and ALLOWED_ORIGINS
+          need the real URLs after it. Sector boundaries (S1/S2/S3) deferred.
+          Always recreate the local Docker stack with --env-file .env, or
+          secrets are silently blank.
 ```
 
 ---
@@ -1231,6 +1248,12 @@ happen), or was found already fixed and moved into ### Notes below instead.
     after each driver's real pit despite the tire_deg artifact still firing
     underneath it. Still worth fixing at the source; just no longer the
     same practical risk it was.
+  - **Worked around at inference, 2026-10-10 (demo deployment Day 6c):**
+    every stint projection (pit window, undercut/overcut, the Simulator's
+    plan explanation) feeds tyre ages of at least
+    `tire_deg_model.SETTLED_TYRE_AGE` (3) via `settled_tyre_ages`. The models
+    are unchanged; `race_simulator`'s per-lap loop still feeds raw ages
+    (Day 6d).
 
 - **[✅ done 2026-09-11 — full writeup: `docs/internal/tire-deg-model-quality-and-
   rival-pit-behavior.md`] `predicted_life_remaining` pegged at
@@ -1461,16 +1484,11 @@ happen), or was found already fixed and moved into ### Notes below instead.
   would be running multiple machines, not K8s pods. Still open; not
   re-measured since the DB pool fix.
 
-- **[deferred, reworded] Mobile Driver Detail charts (victory-native +
-  @shopify/react-native-skia):** still not installed — the Mobile Sync
-  Protocol section confirms Driver Detail remains "a minimal stub" with no
-  ported charts. The original "install at the start of Day 32" framing is
-  stale (Day 32 passed without this happening); the substance is unchanged
-  — `npx expo install @shopify/react-native-skia && npm install
-  victory-native` is still needed before porting
-  `web/src/components/driver/{LapTimesChart,SectorComparison,
-  StyleRadar}.tsx` onto `app/driver/[id].tsx`. Post-v1.0.0 polish, not
-  blocking.
+- **[✅ done] Mobile Driver Detail charts.** Skia and victory-native were
+  installed on Day 32, and Driver Detail has all three of web's charts: the
+  style radar (Overview tab), and the sector comparison plus
+  `LapTimesChart` (Sector Times tab, LapTimesChart ported 2026-10-07). Run on
+  the owner's iPhone in Expo Go. See `mobile/src/README.md`.
 
 - **[✅ done 2026-10-04, Day 6b CP3 + CP5] Strategy Simulator "last ingested race"
   session source is web-only.** Day 6b CP5 added web's Demo Replay selector
@@ -1744,9 +1762,10 @@ happen), or was found already fixed and moved into ### Notes below instead.
   or genuine live message timing/interleaving quirks, all only exercisable
   against F1's real feed. Re-run against a genuine live race once one occurs.
 
-- **[deferred — scheduled as demo deployment Day 6c, before Day 7] The
-  pit-window recommendation engine gives recommendations that contradict
-  real strategy and the F1 rules.** Found 2026-10-04 in the Day 6b visual
+- **[✅ done 2026-10-10, demo deployment Day 6c; Supabase recompute pending]
+  The pit-window recommendation engine gave recommendations that contradicted
+  real strategy and the F1 rules.** See the Notes entry "Pit-window
+  recommendation engine reworked". Found 2026-10-04 in the Day 6b visual
   check (Belgian GP replay). Over 200 stored recommendations:
   - it never offers "no further stop" (ANT told to stop again although he
     one-stopped; 15 of 22 drivers one-stopped);
@@ -1762,14 +1781,22 @@ happen), or was found already fixed and moved into ### Notes below instead.
   - undercut shows 100% right after a stop.
 
   Full write-up, evidence, causes and proposed work:
-  `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". After the fix,
-  replay data must be recomputed (`precompute_replay`, local then Supabase).
-- **[partly fixed Day 6b; pit-lap remainder scheduled for Day 6c] The timing tower lags
-  the circuit map around pit stops.** Remainder (2026-10-04): the
-  progress interpolation spreads a pit lap's pit-lane loss over the whole
-  lap, so VER dropped behind LEC ~90 s before his real pit entry; the fix
-  (in-lap/out-lap handling) is item 8 of the plan doc's "Day 6c". Found 2026-10-02 in the Day 6 visual
+  `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". Replay data was
+  recomputed locally 2026-10-10; Supabase is recomputed after the merge to
+  `main` (whose migrate job adds the new column), with owner approval.
+- **[✅ fixed in playback, Day 6b and Day 6c CP7] The timing tower lagged
+  the circuit map around pit stops.** Found 2026-10-02 in the Day 6 visual
   check (Belgian GP replay, VER's lap-17 pit).
+  - **Pit laps (✅ fixed 2026-10-10, Day 6c CP7):** the progress
+    interpolation spread a pit lap's pit-lane loss over the whole lap, so VER
+    dropped behind LEC 85 s before the map showed it. `replay_playback.py` now
+    finds a stop from a tyre-age drop and spends each pit lap's extra time
+    (against the field's median on that lap) in the pit lane,
+    `PIT_LANE_LAP_FRACTION` (5%) of a lap each side of the line. VER now
+    drops behind LEC/HAM/PIA/NOR within 1 s of the map. Adjacent tower pairs
+    in the map's order within 150 s of a stop: Belgian 80.8% -> 92.3%, Canada
+    96.7% -> 97.6%, British 88.6% -> 88.5%. Playback only
+    (`DEMO_PLAYBACK_MODE=true`); `replay_pipeline.py` still publishes per lap.
   - **Order and gaps (✅ fixed in playback 2026-10-04, Day 6b CP1):** in a
     Demo Replay they changed once per lap, when the leader crossed the line,
     while the map moves every second. VER showed P4 in the tower for ~2
@@ -1787,7 +1814,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
     - **Who sets it:** the live ingestor from TimingAppData's current stint,
       and playback from the lap the car is on.
     - **Who uses it:** web's and desktop's towers and desktop's overlay use
-      it first. Mobile is unchanged.
+      it first. Mobile's tower too since 2026-10-09 (Day 6b-mobile CP1).
     - **Result, Belgian window:** all 15 tyre changes now show at pit entry,
       124-145 s earlier.
   - **Plan and data:** `docs/internal/demo-deployment-plan-2026.md`,
@@ -1816,6 +1843,99 @@ libraries that hook into framework internals, consider upper bounds to
 prevent silent breaks during pip install --upgrade.
 
 ### Notes
+
+**Pit-window recommendation engine reworked (✅ done 2026-10-10, demo
+deployment Day 6c, CP1-CP8; full write-up in the plan doc's "Day 6c"):**
+- **"No further stop"** is a candidate like any stop (run to the flag on the
+  current tyre). New not-null column `strategy_predictions.no_further_stop`
+  (migration `20261010_add_no_further_stop_to_strategy_predictions`), on
+  `PitWindowResponse` and the history entry; web, desktop and mobile cards say
+  "No further stop" / "Stay out on X to the flag".
+- **Two-compound rule:** `strategy_service.compounds_used` /
+  `dry_compound_obligation`; no-stop and the only dry compound used are not
+  offered until a second dry compound is fitted (wet compounds lift it).
+- **Fresh-tyre ages settled:** projections feed ages >= 3 (see the
+  `tire_deg_hard.pkl` entry in Deferred Wiring); this is what made HARD appear
+  (11 -> 72 recommendations, 68 real stops onto HARD) and ended undercut
+  scores of 100% right after a stop.
+- **Pit loss after a safety-car / VSC lap:** x0.5 / x0.65
+  (`pit_loss_after_lap`; lap contexts carry `track_status`).
+- **Window:** the recommended lap +/- 2, clipped; no more one-lap windows or
+  answers on the 15-lap search limit.
+- **Text:** the gap sentence compares the gap with what a stop costs now; the
+  predictor caption is "N% chance of a stop within 3 laps".
+- **Clients:** the race page shows the newest stored prediction when a lap has
+  several.
+- **Measured** with `backend/scripts/evaluate_pit_recommendations.py`
+  (read-only, run in the worker container) over the 3 curated windows, 579
+  driver-laps: stop/no-stop agreement 49% -> 71%, real in-lap inside the
+  window 33% -> 49%, two-compound rule broken 60% -> 0%, mean confidence
+  0.50 -> 0.74; compound match 38% -> 33% (MEDIUM under-recommended, Day 6d).
+- **Data:** recomputed locally (579 predictions, 401 "no further stop",
+  validator passes). Supabase: after the merge to `main`, with owner approval.
+  No model was retrained and training uses none of this, so the weekly
+  retrain doesn't interact with it.
+- **Verified:** unit suite 923 passed, web 79; ruff, mypy `--strict`, `tsc`
+  on all three clients.
+
+**Selected driver's code label on the circuit map, and a higher `/positions`
+rate limit (✅ done 2026-10-09):**
+- **Label (web, desktop, mobile; owner's request):** the selected driver's
+  enlarged dot carries a dark pill with a team-colour border and the driver
+  code, moving with the dot, drawn above the other dots, flipped below the dot
+  near the map's top edge. Web and desktop (`AnimatedDriverDots.tsx`, code
+  identical): each driver is an SVG `<g>` that the render-behind loop moves via
+  `style.transform`, the label inside it; `CircuitMapPanel` passes `code`
+  through `DriverDotMeta`. Mobile: `SelectedDriverLabel.tsx`, a React Native
+  `Animated.View` over the map fed by the selected `AnimatedDriverDot`'s
+  centre (`useAnimatedReaction` into shared values), because react-native-svg
+  `<Text>` doesn't take Reanimated's animated x/y reliably. Checked by the
+  owner on web and the iPhone; 4 new web tests.
+- **`/telemetry/{session_id}/positions` limit 180/min for a signed-in user**
+  (`core/rate_limit.py`'s `positions_rate_limit_value`; every other route
+  stays 60/min, logged-out 10/min). The map polls it by design (web 1 s,
+  desktop and mobile 2 s); web alone sat exactly at 60/min, and web plus the
+  phone on one account reached 59-83/min, so 32 requests got 429 in two
+  minutes, each a "something went wrong" toast on web. Verified: 100
+  back-to-back signed-in requests all 200. 2 new unit tests.
+
+**Strategy Simulator counted retired cars, and four related fixes (✅ fixed
+2026-10-07):** Found on the iPhone: LIN, P9 at Belgian GP 2026 lap 40 (HARD,
+age 24, stop lap 42 onto SOFT, 4 laps left) came out "−3", P12 in 99.7% of
+runs, while the explanation said "position unchanged" and the mean finish
+time sat below its own 5th percentile.
+- **Root cause: `prediction_worker._build_race_state` kept retired cars.** Its
+  field is every driver's latest row; three cars out since laps 8-27 kept
+  race times 1,569-4,569 s below LIN's, so they "finished" P1-P3 and pushed
+  the field down 3 places. On a safety-car lap the field was bunched behind
+  the earliest of them, which skewed the mean. It now applies
+  `strategy_service.still_racing` against the requester's row as of
+  `current_lap`, as `_resolve_position_context` has since 2026-09-28. After:
+  19 cars, LIN P9 in 99.5%, change 0, mean inside the range.
+- **Safety-car laps keep the order** (`race_simulator._advance_lap`): every
+  car used to get the identical time, so the order after an SC lap came down
+  to tie-breaking. Cars now queue behind the leader in their current order,
+  `SC_BUNCHED_GAP_SECONDS` (1.0 s, assumed) apart.
+- **`drivers_overtaken` lists real swaps** (`_build_plan_explanation`): the
+  rivals that swap places with the requester in more than half of the runs,
+  either way (the sign of `gap_seconds` gives the direction), ordered by
+  starting position. Before, it was the cars behind within 22 s at
+  `current_lap`, a snapshot that could contradict the result. Same response
+  fields; web, desktop and mobile now label each row ("passes you" / "you
+  pass") and say "No driver swaps places with you in most simulations"
+  instead of "position unchanged by pit stop timing".
+- **Rivals' tyres as of `current_lap`** (`_build_race_state`): every other
+  car's compound and tyre age came from their LAST lap of the race, so a
+  what-if at Belgian lap 25 started LEC on lap-44 HARDs aged 24 (really 5,
+  he stopped on lap 20) and NOR on the MEDIUMs he fitted on lap 31. The pit
+  model then stopped 19 of 20 cars (LEC on lap 26 in every run). Now read
+  from the same `current_lap` row as position: 6 cars stop after lap 25 (the
+  real race had 3), and NOR stopping on lap 32 lands P7 in 97% of runs (real:
+  stopped lap 31, finished P7).
+- **Not needed:** a `precompute_replay` rerun. Only `POST /simulate` calls
+  `simulate_race`; replay predictions and the pit window don't.
+- **Verified:** 889 unit, 12 Simulator integration, 70 web tests; `tsc` on
+  web, desktop and mobile; the LIN case re-run in the worker.
 
 **Demo Replay playback without a worker (✅ built 2026-09-30, demo deployment
 Day 4 — `docs/internal/demo-deployment-plan-2026.md`):**
@@ -2950,8 +3070,10 @@ connect to the locally hosted Docker stack during development and demos.
 - Backend: Docker Compose (all services on localhost)
 - Web app: Vercel (frontend only, points to local backend via ngrok for demos)
 - Desktop app: Tauri native build, connects to local backend
-- Mobile app: Expo Development Build on iPhone, connects to local backend 
-  via LAN IP (same WiFi network required)
+- Mobile app: Expo Go on iPhone (since 2026-10-06; Expo Go ships SDK 57, so
+  no development build or Apple account is needed), connects to the local
+  backend via LAN IP from `mobile/.env` (same WiFi network required). See
+  `mobile/README.md` section 1.
 - Demo videos: recorded from each client, stored in demos/ directory
 
 No cloud VM deployment during the build — see DEPLOYMENT.md for full 
@@ -3022,15 +3144,35 @@ CSS `transform` transition. `CircuitMapPanel` sits at the top of the
 **Live** tab, not Home — web's Home-equivalent only ever got the static
 outline (`UpcomingRaceCard`), the full live panel belongs where web
 mounts it (`RacePage`). Several simplifications are disclosed inline in
-`mobile/src/README.md` (`TeamLogo` swatch-only, no Ergast-standings sort
-on the Drivers tab, no FLIP row-reorder animation, Driver Detail is a
-minimal stub, `TelemetryGauge`'s arcs snap instead of sweep) — check that
-file before assuming full parity with any given web component.
+`mobile/src/README.md` (no FLIP row-reorder animation, `TelemetryGauge`'s
+arcs snap instead of sweep; the Simulator matches web since 2026-10-07 apart
+from CSV export and drag-drop)
+— check that file before assuming full parity with any given web component.
+
+**Since 2026-10-06 mobile runs in Expo Go on the owner's iPhone,** and was
+reworked for the phone (mobile only): the Live tab is the map plus a sticky
+Timing / Lap Times / Sectors switch (web's `LapTimeChart` and `SectorHeatmap`
+ported); Home and the Drivers tab show the roster in constructor-standings
+order; the Drivers tab adds a Drivers' Championship card; the Alerts tab has
+type cards, race grouping, filters, tap-to-open, multi-select and animations;
+and `src/utils/haptics.ts` (`expo-haptics`) is the one haptics helper. **Day
+6b caught up on 2026-10-09** (Day 6b-mobile CP1-CP4 in
+`docs/internal/demo-deployment-plan-2026.md`; checked on the owner's iPhone
+the same day): every verbatim copy matches web again; the tower's tyre changes at
+the pit stop and lapped cars show "+1 LAP"; Live, Strategy and Driver Detail
+follow a running Demo Replay (`useRaceSession`); the Live tab has a replay
+selector; the strategy panels show stored predictions during a replay; and the
+whole app shares **one** live-telemetry WebSocket (`LiveTelemetryBridge` +
+`stores/liveTelemetryStore.ts`, read with `useSharedLiveTelemetry`; never call
+`useLiveTelemetry` in a screen, each call opens its own socket). The Simulator
+matches web since 2026-10-07. **NativeWind gotcha:** a
+class no other mobile file uses may not apply on the device (it cost two
+rounds on the tower); check before using a new class, else use a plain
+`style`.
 
 Push notifications (`src/notifications/notificationHandler.ts`,
 `src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`)
-have no web equivalent — mobile-only capability. Written and verified via
-`tsc`/Metro export only; untestable without a physical device + dev
-build (no Apple Developer account or Android emulator set up this
-sprint — see `mobile/src/README.md`'s Testing Options, including a full
-Android-emulator setup procedure verified against Expo's current docs).
+have no web equivalent — mobile-only capability. Delivery has never been
+tested: it most likely needs a development build on a device. In Expo Go,
+token registration runs at sign-in without breaking anything (it used to crash
+the app, see `mobile/src/README.md`'s Testing Options).

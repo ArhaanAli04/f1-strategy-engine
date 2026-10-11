@@ -1,9 +1,11 @@
 import { useEffect } from "react"
 import Animated, {
   useAnimatedProps,
+  useAnimatedReaction,
   useFrameCallback,
   useReducedMotion,
   useSharedValue,
+  type SharedValue,
 } from "react-native-reanimated"
 import { Circle } from "react-native-svg"
 import { POSITIONS_POLL_INTERVAL_MS } from "@/hooks/useDriverPositions"
@@ -12,7 +14,8 @@ import type { CircuitOutlineTransform } from "@/types"
 const AnimatedCircle = Animated.createAnimatedComponent(Circle)
 
 const DOT_RADIUS = 12
-const SELECTED_DOT_RADIUS = 18
+// Exported for SelectedDriverLabel, which sits just clear of the dot.
+export const SELECTED_DOT_RADIUS = 18
 const DOT_STROKE_WIDTH = 1.5
 const SELECTED_DOT_STROKE_WIDTH = 3
 
@@ -90,6 +93,11 @@ interface AnimatedDriverDotProps {
   transform: CircuitOutlineTransform
   color: string
   isSelected: boolean
+  // Where the selected driver's code label should follow (viewBox units).
+  // The selected dot copies its animated centre into these every frame, on
+  // the UI thread; SelectedDriverLabel reads them (2026-10-09).
+  labelX?: SharedValue<number>
+  labelY?: SharedValue<number>
   renderDelayMs?: number
 }
 
@@ -108,6 +116,8 @@ export function AnimatedDriverDot({
   transform,
   color,
   isSelected,
+  labelX,
+  labelY,
   renderDelayMs = DEFAULT_RENDER_DELAY_MS,
 }: AnimatedDriverDotProps) {
   const initial = applyTransform(x, y, transform)
@@ -146,6 +156,18 @@ export function AnimatedDriverDot({
   useEffect(() => {
     frameCallback.setActive(!prefersReducedMotion)
   }, [frameCallback, prefersReducedMotion])
+
+  // The selected dot drives the label: copy its centre whenever it moves
+  // (and at once when it becomes selected, via the dependency on isSelected).
+  useAnimatedReaction(
+    () => ({ cx: animatedCx.value, cy: animatedCy.value }),
+    (point) => {
+      if (!isSelected || labelX === undefined || labelY === undefined) return
+      labelX.value = point.cx
+      labelY.value = point.cy
+    },
+    [isSelected, labelX, labelY],
+  )
 
   const animatedProps = useAnimatedProps(() => ({
     cx: animatedCx.value,

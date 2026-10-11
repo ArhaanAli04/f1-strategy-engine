@@ -10,7 +10,53 @@ app, that one is about how it's built.
 
 ---
 
-## 1. Development setup (laptop required)
+## 1. On your iPhone with Expo Go (free, used since 2026-10-06)
+
+The quickest way to run the app on a real phone. Expo Go (App Store) ships
+SDK 57, this project's SDK, and includes every native module the app uses
+(Skia, Reanimated, react-native-svg, gesture handler, SecureStore, haptics, and
+the rest), so no development build and no Apple Developer account is needed.
+Verified on the owner's iPhone.
+
+1. **Same Wi-Fi:** the phone and the PC must be on the same network.
+2. **Point the app at your PC.** Create `mobile/.env` (gitignored) with your
+   PC's Wi-Fi address. `localhost` would mean the phone itself, so it won't
+   work.
+   ```
+   EXPO_PUBLIC_API_URL=http://192.168.x.x:8000
+   EXPO_PUBLIC_WS_URL=ws://192.168.x.x:8000
+   ```
+   On Windows, `ipconfig` shows the address (the Wi-Fi adapter's IPv4). If it
+   changes, edit the file and restart Metro.
+3. **Start the backend** from the repo root, with `--env-file .env` as usual.
+4. **Start Metro** from `mobile/`:
+   ```sh
+   npx expo start --clear
+   ```
+   `--clear` makes Metro pick up `.env` and new packages. Leave it in Expo Go
+   mode; don't press `s` (that switches to a development build).
+5. **Open the app:** scan the QR code with the iPhone's Camera app and open it
+   in Expo Go. Allow Expo Go to find devices on the local network when asked.
+   If the camera doesn't react, type `exp://<PC address>:8081` in Expo Go.
+
+**If it doesn't connect:**
+- **The app never loads:** Metro's port 8081 is blocked. Check the Wi-Fi, and
+  that Windows Firewall allows Node.js. On this PC, Node and Docker Desktop
+  already have inbound rules for Public networks.
+- **It loads but shows network errors:** port 8000 is blocked. Open
+  `http://<PC address>:8000/health` in Safari on the phone; it should answer.
+
+**Notes:**
+- **Saving a file** reloads the app on the phone. Press `r` in the Metro
+  terminal to reload by hand.
+- **New styles:** if a new NativeWind class seems to have no effect, see the
+  NativeWind gotcha in `src/README.md` (a class no other file uses may not
+  apply), and restart Metro with `--clear`.
+- **The "use a development build" line** in Metro's log is Expo's standard
+  notice; ignore it.
+- **Push notifications** are not tested in Expo Go (see Honest limitations).
+
+## 1b. Development build (only for a feature Expo Go can't run)
 
 **Prerequisites:**
 - Node.js 18+
@@ -19,17 +65,20 @@ app, that one is about how it's built.
 - **iOS physical device:** requires an active
   [Apple Developer Program](https://developer.apple.com/programs/) membership
   ($99/year) — Apple requires this to install a development build on real
-  hardware, even for your own device. There is no free path to a physical
-  iOS device.
+  hardware, even for your own device. (Expo Go, section 1, is the free way to
+  run the app on an iPhone.)
 - **Android physical device:** completely free, no account of any kind
   needed beyond the Expo account above.
 
 **One-time: build a development client.**
 
-A development client is a custom build of the app (this project's native
-modules — Skia, Reanimated, react-native-svg, etc. — aren't in the stock
-Expo Go app) that you install once and then reload instantly during
-day-to-day work, the same way Expo Go normally works.
+A development client is a custom build of the app that you install once and
+then reload instantly during day-to-day work, the same way Expo Go works.
+Expo Go already covers every module this app uses (section 1), so a
+development build is only needed for push notifications on a device, or for a
+future native module Expo Go doesn't include. A development build also needs
+`react-native-worklets` listed in `package.json` (today it is only installed
+as Reanimated's peer); `npx expo-doctor` reports it.
 
 ```sh
 cd mobile
@@ -67,10 +116,10 @@ doesn't have this limitation.
 
 ---
 
-## 2. Android Emulator (free, no device needed) — recommended path
+## 2. Android Emulator (free, no device needed)
 
-The most complete free way to actually run and interact with the app
-without owning a physical device or any paid account. Full step-by-step
+The free way to run the app on Android without a phone (not yet tried on this
+project; section 1 is what's in use). Full step-by-step
 procedure (SDK setup, AVD creation, troubleshooting) lives in
 [`src/README.md`'s "Android Emulator Testing" section](./src/README.md#android-emulator-testing-procedure) —
 this is the short version:
@@ -100,7 +149,7 @@ this is the short version:
 This gives full access to everything built so far — auth, navigation,
 charts, offline persistence — **except push notifications**, which need a
 physical device with a development build regardless of emulator vs. real
-hardware (see Section 1). No Apple hardware, no paid account, no physical
+hardware (see section 1b). No Apple hardware, no paid account, no physical
 Android device required.
 
 ---
@@ -126,7 +175,7 @@ Metro running at all.
    link — no account needed on Apple's side, and Android has no equivalent
    registered-device requirement. The iOS build still needs the target
    device registered in your Apple Developer account first, same as
-   Section 1's development build.
+   section 1b's development build.
 
 This is the first setup stage where **Android is fully unblocked** (build,
 install, and run standalone, zero cost, zero account) while **iOS still
@@ -164,30 +213,26 @@ controls.
 
 ## Honest limitations
 
-- **Development (Section 1) needs your laptop running nearby, on the same
-  WiFi, for the whole session.** No detached/standalone mode until Section 3
+- **Development (sections 1 and 1b) needs your laptop running nearby, on the
+  same WiFi, for the whole session.** No detached/standalone mode until Section 3
   (after the Fly.io deployment).
-- **iOS on a physical device needs a paid Apple Developer account
-  ($99/year)** at every stage — development, standalone preview, and
-  production. There's no free path to real iOS hardware; the iOS Simulator
-  (Mac + Xcode only, no paid account) is the only account-free way to see
-  the app running on "iOS" before that membership makes sense.
+- **An iPhone is free for development through Expo Go** (section 1). A
+  development build, a standalone preview build or the App Store on a real
+  iPhone needs a paid Apple Developer account ($99/year).
 - **Android is free at every stage except the final Play Store listing**
   ($25 one-time, paid once, covers unlimited future app submissions) —
   development builds, the emulator, and standalone preview builds all need
   no account beyond the free Expo account.
-- **Push notifications need a physical device with a development build** —
-  untestable in Expo Go, untestable in any emulator/simulator, iOS or
-  Android. This project's push-notification code
+- **Push notifications are untested.** Delivery needs a physical device and
+  most likely a development build; nothing has been tested in Expo Go or any
+  emulator. In Expo Go token registration runs at sign-in without breaking
+  anything. This project's push-notification code
   (`src/notifications/notificationHandler.ts`,
   `src/hooks/{usePushNotifications,useNotificationResponseListener}.ts`) has
   only been verified via `tsc`/Metro export, never run on a device — see
   `src/README.md`'s Testing Options for the full explanation.
-- **No physical device or emulator has been used to verify this project
-  yet** — every mobile change so far was verified
-  via `npx tsc --noEmit` + `npx expo export --platform ios` (full Metro
-  module-graph resolution) + code review only. This setup guide is
-  necessarily unverified against a real running app; if a step here doesn't
-  match reality, `src/README.md`'s per-file notes on what's genuinely been
-  tested are the more trustworthy source for what's actually confirmed
-  working.
+- **Device testing so far is one iPhone in Expo Go** (since 2026-10-06):
+  every tab, the Simulator, Driver Detail, alerts with multi-select, swipe and
+  haptics. Android, the emulator, development builds and the standalone builds
+  in sections 2-4 have not been run yet. Changes are also checked with
+  `npx tsc --noEmit` and `npx expo export --platform ios`.

@@ -20,6 +20,7 @@ from backend.services.ml import tire_deg_model
 from backend.services.ml.pit_predictor import FEATURE_COLUMNS as PIT_FEATURE_COLUMNS
 from backend.services.ml.pit_predictor import _build_model
 from backend.services.ml.race_simulator import (
+    SC_BUNCHED_GAP_SECONDS,
     SC_LAP_TIME_MULTIPLIER,
     DriverPositionDistribution,
     DriverRaceState,
@@ -377,9 +378,43 @@ def test_advance_lap_ignores_baseline_on_an_sc_lap() -> None:
         30.0,  # sc_lap_time_seconds
     )
 
-    expected = 1000.0 + 30.0  # leader_time (min of the two) + sc_lap_time_seconds
-    assert cumulative_time[0, 0] == pytest.approx(expected)
-    assert cumulative_time[0, 1] == pytest.approx(expected)
+    leader = 1000.0 + 30.0  # leader_time (min of the two) + sc_lap_time_seconds
+    assert cumulative_time[0, 0] == pytest.approx(leader)
+    assert cumulative_time[0, 1] == pytest.approx(leader + SC_BUNCHED_GAP_SECONDS)
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_advance_lap_sc_keeps_the_running_order() -> None:
+    """An SC lap closes the gaps but keeps the order: before 2026-10-07 every car
+    got the same time, so positions after an SC lap came down to tie-breaking.
+    Drivers are deliberately not in race order in the array.
+    """
+    cumulative_time = np.array([[1090.0, 1000.0, 1045.0, 1300.0]])
+    tyre_age = np.array([[5, 5, 5, 5]], dtype=np.int64)
+    zeros = np.zeros((1, 4))
+    pit_flags = np.array([[False, False, True, False]])
+
+    _advance_lap(
+        cumulative_time,
+        tyre_age,
+        zeros,
+        np.full(4, 90.0),
+        np.zeros(4),
+        0.0,
+        pit_flags,
+        22.0,
+        np.array([True]),
+        30.0,
+    )
+
+    gap = SC_BUNCHED_GAP_SECONDS
+    # Order before the lap: driver 1, 2, 0, 3. Driver 2 pits under the SC.
+    assert cumulative_time[0, 1] == pytest.approx(1030.0)
+    assert cumulative_time[0, 2] == pytest.approx(1030.0 + gap + 22.0)
+    assert cumulative_time[0, 0] == pytest.approx(1030.0 + 2 * gap)
+    assert cumulative_time[0, 3] == pytest.approx(1030.0 + 3 * gap)
+    assert tyre_age[0, 2] == 0
 
 
 @pytest.mark.unit
@@ -596,10 +631,13 @@ def test_sc_lap_time_derived_from_field_median_baseline(
         rng_seed=1,
     )
 
+    # The leader runs every remaining lap at the SC lap time; since 2026-10-07
+    # the cars behind keep their order, one SC_BUNCHED_GAP_SECONDS apart.
     expected_finish_time = n_remaining_laps * (baseline * SC_LAP_TIME_MULTIPLIER)
-    for distribution in result.driver_distributions:
-        assert distribution.mean_finish_time_seconds == pytest.approx(
-            expected_finish_time, abs=1e-6
+    finish_times = sorted(d.mean_finish_time_seconds for d in result.driver_distributions)
+    for rank, finish_time in enumerate(finish_times):
+        assert finish_time == pytest.approx(
+            expected_finish_time + rank * SC_BUNCHED_GAP_SECONDS, abs=1e-6
         )
 
 
