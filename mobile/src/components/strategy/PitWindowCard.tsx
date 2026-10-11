@@ -10,7 +10,10 @@ interface PitWindowCardProps {
 
 // As web's formatHeadline: the window band when there is one, else the
 // single lap, with "~" when that lap is only pit_predictor's estimate.
+// "No further stop" (Day 6c) has no lap to show: the engine recommends
+// running the current tyre to the flag.
 function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLabel: string): string {
+  if (view.noFurtherStop) return windowLabel === "L" ? "No stop" : "No further stop"
   if (view.windowStart !== null && view.windowEnd !== null) {
     return `${windowLabel}${view.windowStart}–${view.windowEnd}`
   }
@@ -34,10 +37,8 @@ function formatCompactCaption(view: PitRecommendationView): string {
 // current lap while a live race or Demo Replay progresses, else the
 // on-demand /pit-window recompute. Mobile differences: the compact card with
 // no prediction keeps its shape (driver chip, "—", "No pit window
-// predicted"; owner's request 2026-10-07), and the full card's pit-predictor
-// line drops web's "lagging indicator" caption, which is out of date (the
-// model has given advance warning since 2026-09-04) and is being reworded in
-// Day 6c.
+// predicted"; owner's request 2026-10-07). Same pit-predictor caption as web
+// since Day 6c ("chance of a stop within 3 laps").
 export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardProps) {
   const { view, isLoading } = usePitRecommendation(sessionId, driverId)
 
@@ -83,8 +84,11 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
       </View>
       <Text className="text-2xl font-bold text-foreground">{formatHeadline(view, "Lap ", "Lap ")}</Text>
       <Text className="text-sm text-muted">
-        {view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap {view.pitLap}
-        {view.recommendedCompound ? ` — ${view.recommendedCompound}` : ""}
+        {view.noFurtherStop
+          ? `Stay out on ${view.recommendedCompound ?? "the current tyre"} to the flag`
+          : `${view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap ${view.pitLap}${
+              view.recommendedCompound ? ` — ${view.recommendedCompound}` : ""
+            }`}
       </Text>
       {view.isFallbackEstimate && (
         <Text className="text-[10px] text-muted">
@@ -94,7 +98,9 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
       {view.explanation && <Text className="text-sm text-muted">{view.explanation.narrative}</Text>}
       {view.asOfLapNumber !== null && <Text className="text-[10px] text-muted">As of lap {view.asOfLapNumber}</Text>}
       {view.pitProbability !== null && (
-        <Text className="text-[10px] text-muted">Pit predictor: {Math.round(view.pitProbability * 100)}%</Text>
+        <Text className="text-[10px] text-muted">
+          Pit predictor: {Math.round(view.pitProbability * 100)}% chance of a stop within 3 laps
+        </Text>
       )}
     </View>
   )

@@ -111,8 +111,15 @@ export function useCurrentLapHistoryEntry(
         prediction.lap_number !== null && prediction.lap_number <= currentLap,
     )
     if (eligible.length === 0) return null
+    // A lap can have several stored predictions (each replay or precompute
+    // adds its own); the newest wins. Before Day 6c the first one stored won,
+    // so a repeated replay kept showing the oldest prediction.
     return eligible.reduce((latest, prediction) =>
-      prediction.lap_number > latest.lap_number ? prediction : latest,
+      prediction.lap_number > latest.lap_number ||
+      (prediction.lap_number === latest.lap_number &&
+        Date.parse(prediction.created_at) > Date.parse(latest.created_at))
+        ? prediction
+        : latest,
     )
   }, [query.data, isReplayActive, liveEvent])
 
@@ -179,6 +186,9 @@ export interface PitRecommendationView {
   // against, so the honest fix is to surface that uncertainty rather than
   // render it with the same visual confidence as a real recommendation.
   isFallbackEstimate: boolean
+  // Run the current tyre to the flag rather than stop again (Day 6c): pitLap
+  // is then the last lap and recommendedCompound the current one.
+  noFurtherStop: boolean
 }
 
 function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommendationView | null {
@@ -193,6 +203,7 @@ function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommenda
     pitProbability: null,
     asOfLapNumber: null,
     isFallbackEstimate: false,
+    noFurtherStop: window.no_further_stop,
   }
 }
 
@@ -214,6 +225,7 @@ function viewFromHistoryEntry(
     pitProbability: entry.pit_probability,
     asOfLapNumber: entry.lap_number,
     isFallbackEstimate: !hasRecommendation,
+    noFurtherStop: hasRecommendation && entry.no_further_stop,
   }
 }
 

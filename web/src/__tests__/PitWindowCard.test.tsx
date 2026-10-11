@@ -31,6 +31,7 @@ function buildView(overrides: Partial<PitRecommendationView> = {}): PitRecommend
     pitProbability: null,
     asOfLapNumber: null,
     isFallbackEstimate: false,
+    noFurtherStop: false,
   }
   return { ...defaults, ...overrides }
 }
@@ -69,12 +70,33 @@ describe("PitWindowCard", () => {
     ).toBeInTheDocument()
   })
 
-  it("shows pit_predictor's own signal honestly labeled as a lagging indicator", () => {
+  it("labels pit_predictor's signal as the chance of a stop within 3 laps", () => {
     mockView(buildView({ pitProbability: 0.9999 }))
 
     render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
 
-    expect(screen.getByText(/Pit predictor: 100% \(lagging indicator/)).toBeInTheDocument()
+    expect(
+      screen.getByText("Pit predictor: 100% chance of a stop within 3 laps"),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/lagging indicator/)).not.toBeInTheDocument()
+  })
+
+  it("shows no further stop instead of a lap when the engine says stay out", () => {
+    mockView(buildView({ noFurtherStop: true, pitLap: 44, windowStart: 44, windowEnd: 44 }))
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+
+    expect(screen.getByText("No further stop")).toBeInTheDocument()
+    expect(screen.getByText("Stay out on MEDIUM to the flag")).toBeInTheDocument()
+    expect(screen.queryByText(/Lap 44/)).not.toBeInTheDocument()
+  })
+
+  it("shows no stop on the compact card when the engine says stay out", () => {
+    mockView(buildView({ noFurtherStop: true, pitLap: 44, windowStart: 44, windowEnd: 44 }))
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" compact />)
+
+    expect(screen.getByText("No stop")).toBeInTheDocument()
   })
 
   it("omits the pit_predictor caption when pitProbability is unavailable", () => {

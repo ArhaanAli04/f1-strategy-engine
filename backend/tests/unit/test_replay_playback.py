@@ -135,6 +135,53 @@ def test_a_slow_lap_drops_a_car_back_before_either_car_reaches_the_line() -> Non
 
 
 @pytest.mark.unit
+def test_pit_laps_are_found_from_a_tyre_age_drop_whatever_the_compound() -> None:
+    ages = {(A, 19): 10, (A, 20): 11, (A, 21): 12, (B, 19): 10, (B, 20): 11, (B, 21): 1}
+    assert pb.pit_laps(ages) == {(B, 20)}
+
+
+@pytest.mark.unit
+def test_pit_lane_points_bend_an_in_lap_late_and_an_out_lap_early() -> None:
+    # A 100 s pit lap against a 90 s normal lap: 85.5 s on track either way.
+    assert pb.pit_lane_points(20, 0.0, 100.0, 90.0, in_lap=True) == pytest.approx((85.5, 19.95))
+    assert pb.pit_lane_points(21, 0.0, 100.0, 90.0, in_lap=False) == pytest.approx((14.5, 20.05))
+    assert pb.pit_lane_points(20, 0.0, 90.0, 90.0, in_lap=True) is None
+
+
+def _b_pits_on_lap_20() -> pb.PlaybackData:
+    """B's in-lap 20 takes 95 s and its out-lap 21 113 s; A and C run 90-91 s laps."""
+    times = dict(TIMES)
+    times[(B, 20)] = (1002.0, 1097.0)
+    times[(B, 21)] = (1097.0, 1210.0)
+    ages = {(d, lap): lap - 10 for d in (A, C) for lap in (19, 20, 21, 22)}
+    ages |= {(B, 19): 9, (B, 20): 10, (B, 21): 1, (B, 22): 2}
+    return _data(lap_timings=_timings(times), tyre_ages=ages)
+
+
+@pytest.mark.unit
+def test_a_pit_stops_time_is_spent_in_the_pit_lane_not_spread_over_the_lap() -> None:
+    """The field ran lap 20 in 90.5 s (median of A and C), lap 21 in 91 s."""
+    car = pb.build_tower(_b_pits_on_lap_20(), 1000.0).cars[B]
+
+    # In-lap: normal pace (48 s into the lap) until the pit entry at 19.95 laps.
+    assert car.laps_at(50.0) == pytest.approx(19 + 0.95 * 48.0 / (0.95 * 90.5))
+    assert car.laps_at(2.0 + 0.95 * 90.5) == pytest.approx(19.95)
+    # Out-lap: the pit exit at 20.05 laps, 0.95 of a 91 s lap before the line.
+    assert car.laps_at(210.0 - 0.95 * 91.0) == pytest.approx(20.05)
+    assert car.laps_at(210.0) == pytest.approx(21.0)
+    # Past the window: the last whole lap's pace, not the pit lane's.
+    assert car.laps_at(323.0) == pytest.approx(22.0)
+
+
+@pytest.mark.unit
+def test_without_tyre_ages_a_slow_lap_stays_evenly_spread() -> None:
+    data = _b_pits_on_lap_20()
+    data.tyre_ages = {}
+    car = pb.build_tower(data, 1000.0).cars[B]
+    assert car.laps_at(50.0) == pytest.approx(19 + 48.0 / 95.0)
+
+
+@pytest.mark.unit
 def test_a_retired_car_leaves_the_tower_once_the_leader_completes_a_lap_it_never_did() -> None:
     times: dict[tuple[str, int], tuple[float | None, float | None]] = {
         k: v for k, v in TIMES.items() if k[0] != C

@@ -62,6 +62,7 @@ function buildHistoryEntry(
       tire_deg_shap: [],
       pit_predictor_shap: [],
     },
+    no_further_stop: false,
     ...overrides,
   }
 }
@@ -75,6 +76,7 @@ function buildPitWindow(overrides: Partial<PitWindowResponse> = {}): PitWindowRe
     recommended_compound: "SOFT",
     confidence_score: 0.8,
     explanation: null,
+    no_further_stop: false,
     ...overrides,
   }
 }
@@ -132,7 +134,37 @@ describe("usePitRecommendation", () => {
       pitProbability: 0.9999,
       asOfLapNumber: 24,
       isFallbackEstimate: false,
+      noFurtherStop: false,
     })
+  })
+
+  it("uses the newest stored prediction when a lap has several", () => {
+    setReplaying(24)
+    historyResult = {
+      data: {
+        predictions: [
+          buildHistoryEntry({ created_at: "2026-09-30T10:00:00Z", recommended_pit_lap: 31 }),
+          buildHistoryEntry({ created_at: "2026-10-10T10:00:00Z", recommended_pit_lap: 26 }),
+        ],
+      },
+      isLoading: false,
+    }
+
+    const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
+
+    expect(result.current.view?.pitLap).toBe(26)
+  })
+
+  it("carries no_further_stop through from a stored prediction", () => {
+    setReplaying(24)
+    historyResult = {
+      data: { predictions: [buildHistoryEntry({ no_further_stop: true, recommended_pit_lap: 44 })] },
+      isLoading: false,
+    }
+
+    const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
+
+    expect(result.current.view?.noFurtherStop).toBe(true)
   })
 
   it("falls back to predicted_pit_lap and null confidence/window when the row has no rich recommendation", () => {
@@ -190,7 +222,16 @@ describe("usePitRecommendation", () => {
       pitProbability: null,
       asOfLapNumber: null,
       isFallbackEstimate: false,
+      noFurtherStop: false,
     })
+  })
+
+  it("carries no_further_stop through from the REST /pit-window source", () => {
+    pitWindowResult = { data: [buildPitWindow({ no_further_stop: true })], isLoading: false }
+
+    const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
+
+    expect(result.current.view?.noFurtherStop).toBe(true)
   })
 
   it("returns a null view when the REST source has no candidates", () => {

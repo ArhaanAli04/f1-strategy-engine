@@ -70,8 +70,8 @@ class PitWindowResponse(BaseModel):
     """One ranked pit-lap candidate from strategy_service.build_pit_recommendation.
 
     window_start/window_end are identical across every candidate in one
-    response — a narrow band (see build_pit_recommendation's own docstring)
-    around the #1 (rank 0) candidate, not a per-candidate range.
+    response: the #1 (rank 0) candidate's lap plus or minus 2 laps
+    (strategy_service.PIT_WINDOW_HALF_WIDTH_LAPS), not a per-candidate range.
     recommended_compound is real per candidate (the stint-2 compound that won
     that pit_lap's own optimization). confidence_score and explanation are
     populated only on the #1 candidate — both answer "how sure/why for THIS
@@ -86,6 +86,10 @@ class PitWindowResponse(BaseModel):
     recommended_compound: str
     confidence_score: float | None = None
     explanation: PitRecommendationExplanation | None = None
+    # Run the current tyre to the flag instead of stopping again (Day 6c CP2,
+    # 2026-10-10). pit_lap is then the race's last lap and recommended_compound
+    # the current one; clients show "No further stop". Additive, default False.
+    no_further_stop: bool = False
 
 
 class UndercutThreatResponse(BaseModel):
@@ -144,6 +148,9 @@ class StrategyPredictionHistoryEntry(BaseModel):
     recommended_compound: str | None
     confidence_score: float
     explanation: PitRecommendationExplanation | None
+    # See PitWindowResponse.no_further_stop (Day 6c CP2). False for rows
+    # predicted before it existed.
+    no_further_stop: bool = False
 
 
 class StrategyPredictionHistoryResponse(BaseModel):

@@ -742,6 +742,28 @@ def predict_life_remaining_batch(
     return result
 
 
+# The first laps on a fresh tyre are mostly out-laps and warm-up laps, which
+# FastF1 marks invalid, so these models barely saw them and guess there: +5.2 s
+# for a HARD at age 1 and +3.8 s for a MEDIUM at age 2, against real laps
+# within a few tenths from age 2-3 on (measured 2026-10-10 on 2018-2025 races,
+# demo deployment Day 6c CP3). Projections over a stint (the pit window, the
+# undercut/overcut, the Simulator's plan explanation) use the model's value at
+# this age for any younger tyre: the out-lap's real cost is in the pit loss.
+SETTLED_TYRE_AGE = 3
+
+
+def settled_tyre_ages(ages: np.ndarray) -> np.ndarray:
+    """Tyre ages to feed these models in a stint projection: no younger than SETTLED_TYRE_AGE.
+
+    Args:
+        ages: Tyre ages in laps.
+    Returns:
+        The same ages, raised to SETTLED_TYRE_AGE where younger.
+    """
+    settled: np.ndarray = np.maximum(ages, float(SETTLED_TYRE_AGE))
+    return settled
+
+
 def project_stint_delta(
     pipeline: Any,
     compound_encoded: int,
@@ -799,7 +821,7 @@ def project_stint_delta(
         return 0.0
 
     laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
-    tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
+    tyre_age = settled_tyre_ages(start_tyre_age + np.arange(n_laps, dtype=np.float64))
     fuel_load_penalty = fuel_load_penalty_seconds(laps, float(total_laps))
     features = np.column_stack(
         [

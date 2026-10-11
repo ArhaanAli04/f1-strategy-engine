@@ -656,7 +656,9 @@ def _naive_stint_delta(
     project_stint_delta builds rather than a tautology against the shared helper.
     """
     laps = np.arange(start_lap, start_lap + n_laps, dtype=np.float64)
-    tyre_age = start_tyre_age + np.arange(n_laps, dtype=np.float64)
+    # Tyres younger than 3 laps count as 3 (SETTLED_TYRE_AGE, Day 6c CP3/CP5),
+    # written out here rather than calling settled_tyre_ages.
+    tyre_age = np.maximum(start_tyre_age + np.arange(n_laps, dtype=np.float64), 3.0)
     fuel_at_lap = ASSUMED_START_FUEL_KG * (1 - laps / max(total_laps, 1))
     fuel_load_penalty = FUEL_TIME_PENALTY_PER_KG * fuel_at_lap
     features = np.column_stack(
@@ -679,6 +681,27 @@ def test_project_stint_delta_matches_naive_reference() -> None:
     result = project_stint_delta(pipeline, 1, 5, 3, **kwargs)
     expected = _naive_stint_delta(pipeline, 1, 5, 3, **kwargs)
     assert result == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_project_stint_delta_feeds_settled_tyre_ages() -> None:
+    """A fresh stint (age 0) is projected from the settled age on: the model's
+    guesses for the first laps of a stint are not used (Day 6c CP5: they made
+    the undercut read 100% right after a car stopped)."""
+    pipeline = _fit_pipeline_with_slope(slope=0.4, seed=35)
+    seen: list[np.ndarray] = []
+    original_predict = pipeline.predict
+
+    def recording_predict(features: np.ndarray) -> np.ndarray:
+        seen.append(features)
+        result: np.ndarray = original_predict(features)
+        return result
+
+    pipeline.predict = recording_predict
+    project_stint_delta(pipeline, 1, 5, 3, start_lap=20, n_laps=5, start_tyre_age=0, total_laps=50)
+
+    age_column = FEATURE_COLUMNS.index("tyre_age_laps")
+    assert seen[0][:, age_column].tolist() == [3.0, 3.0, 3.0, 3.0, 4.0]
 
 
 @pytest.mark.unit

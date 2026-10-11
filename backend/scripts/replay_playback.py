@@ -11,8 +11,9 @@ today, to the same Redis keys and channels:
   by replay_lap_timings.lap_start_seconds;
 - gaps (the timing tower), every second, ranked by how far round the lap each
   car is, worked out from its stored line crossings (replay_lap_timings), so
-  the tower moves with the cars on the map instead of once per lap. See the
-  "timing tower" section below. replay_gap_snapshots gives the starting order
+  the tower moves with the cars on the map instead of once per lap; a pit
+  stop's time is placed in the pit lane, found from lap_data's tyre ages. See
+  the "timing tower" section below. replay_gap_snapshots gives the starting order
   and which cars are still running;
 - each driver's lap-completion event (the payload telemetry_worker.process_lap
   publishes) when that driver really finished the lap, from lap_data and
@@ -39,6 +40,7 @@ import json
 import logging
 import math
 import signal
+import statistics
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -131,6 +133,9 @@ class PlaybackData:
     alerts: list[AlertRow] = field(default_factory=list)
     # The lap-completion payloads, for the lap before the window and every lap in it.
     lap_events: list[dict[str, Any]] = field(default_factory=list)
+    # (driver, lap) -> lap_data.tyre_age_laps, from the lap before the window to
+    # the lap after it: a drop marks a pit stop (see pit_laps).
+    tyre_ages: dict[tuple[str, int], int] = field(default_factory=dict)
 
 
 def lap_event_payload(lap: LapData) -> dict[str, Any]:
@@ -242,14 +247,21 @@ async def load_playback_data(
         for a in alert_rows.scalars().all()
     ]
 
-    lap_rows = await db.execute(
-        select(LapData).where(
-            LapData.session_id == session_id,
-            LapData.lap_number >= start_lap - 1,
-            LapData.lap_number <= end_lap,
+    lap_rows = (
+        (
+            await db.execute(
+                select(LapData).where(
+                    LapData.session_id == session_id,
+                    LapData.lap_number >= start_lap - 1,
+                    LapData.lap_number <= end_lap + 1,
+                )
+            )
         )
+        .scalars()
+        .all()
     )
-    data.lap_events = [lap_event_payload(lap) for lap in lap_rows.scalars().all()]
+    data.lap_events = [lap_event_payload(lap) for lap in lap_rows if lap.lap_number <= end_lap]
+    data.tyre_ages = {(str(lap.driver_id), lap.lap_number): lap.tyre_age_laps for lap in lap_rows}
     return data
 
 
@@ -264,14 +276,31 @@ async def load_playback_data(
 # Instead the tower is recomputed every second from each car's progress in
 # laps: between two line crossings a car is assumed to cover the lap at an
 # even pace, so its progress is interpolated from the stored crossing times. A
-# car on a slow lap (a pit stop, a spin) falls behind as soon as that lap is
-# slower than the cars around it, not a lap later. Its known limit: a pit
-# stop's lost time is spread evenly over the lap, so a pass can show a few
-# seconds before or after the map shows it.
+# car on a slow lap (a spin, a slow lap under a safety car) falls behind as
+# soon as that lap is slower than the cars around it, not a lap later.
+#
+# A pit stop is the exception (Day 6c, 2026-10-10). Its time is lost in the
+# pit lane, which straddles the line: at the end of the in-lap and the start
+# of the out-lap. Spread evenly over those laps, it put VER behind LEC in the
+# tower 85 s before the map did at Belgium, and PIA and NOR 25-37 s after. So
+# each pit lap is run at that lap's normal pace on track and its extra time is
+# spent in the pit lane (see pit_lane_points). Which lap holds the stop itself
+# depends on where the timing line sits in the pit lane (after the boxes at
+# Spa, before them at Montreal); each lap's own extra time places it.
+#
+# Measured against the map's order (each car's position samples projected onto
+# a racing lap), adjacent tower pairs within 150 s of a pit stop agreed with
+# the map: Belgian window 80.8% -> 92.3%, Canada 96.7% -> 97.6%, British 88.6%
+# -> 88.5% (its stops are all behind a safety car, unchanged by this).
 
-# (seconds from the window's first moment, laps completed at that crossing),
-# in time order.
-LapLine = list[tuple[float, int]]
+# The share of a lap the pit lane covers on each side of the line. Pit lanes
+# are ~300-450 m from entry to the line and from the line to exit, on 4.3-7 km
+# laps; one value for every circuit, chosen on the curated races (2026-10-10).
+PIT_LANE_LAP_FRACTION = 0.05
+
+# (seconds from the window's first moment, laps completed at that moment), in
+# time order: every line crossing, plus the pit lane's ends on pit laps.
+LapLine = list[tuple[float, float]]
 
 
 def _interpolate(start: tuple[float, float], end: tuple[float, float], x: float) -> float:
@@ -279,6 +308,50 @@ def _interpolate(start: tuple[float, float], end: tuple[float, float], x: float)
     if x1 == x0:
         return y0
     return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+
+
+def pit_laps(tyre_ages: dict[tuple[str, int], int]) -> set[tuple[str, int]]:
+    """The in-laps: a driver's laps followed by a lap on younger tyres.
+
+    The tyre age falls at a stop whatever the compound fitted, so a stop onto
+    the same compound counts too.
+
+    Args:
+        tyre_ages: (driver, lap) -> lap_data.tyre_age_laps.
+    Returns:
+        (driver, in-lap number) pairs; the out-lap is the one after.
+    """
+    return {
+        (driver_id, lap)
+        for (driver_id, lap), age in tyre_ages.items()
+        if (after := tyre_ages.get((driver_id, lap + 1))) is not None and after < age
+    }
+
+
+def pit_lane_points(
+    lap_number: int, start: float, end: float, normal_lap: float, in_lap: bool
+) -> tuple[float, float] | None:
+    """Where a pit lap's progress line bends: the pit lane's end on that lap.
+
+    In-lap: normal pace up to the pit entry, then the rest of the lap's time to
+    the line. Out-lap: the stop and the pit lane up to the exit, then normal
+    pace to the line.
+
+    Args:
+        lap_number: The pit lap.
+        start, end: When the car started and finished it.
+        normal_lap: That lap's time away from the pits.
+        in_lap: True for the in-lap, False for the out-lap.
+    Returns:
+        (time, laps completed) of the bend, or None when the lap is no slower
+        than normal_lap (nothing to place in the pit lane).
+    """
+    if end - start <= normal_lap:
+        return None
+    on_track = normal_lap * (1.0 - PIT_LANE_LAP_FRACTION)
+    if in_lap:
+        return start + on_track, lap_number - PIT_LANE_LAP_FRACTION
+    return end - on_track, lap_number - 1 + PIT_LANE_LAP_FRACTION
 
 
 @dataclass(frozen=True)
@@ -291,6 +364,14 @@ class CarProgress:
     # no stored end time): it stays where it last crossed and the field passes.
     keeps_going: bool
 
+    def _last_lap(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        # The last two line crossings: their pace carries on past the window's
+        # end, whatever the pit lane did inside that lap.
+        whole = [(time, laps) for time, laps in self.crossings if float(laps).is_integer()]
+        return (
+            (whole[-2], whole[-1]) if len(whole) >= 2 else (self.crossings[-2], self.crossings[-1])
+        )
+
     def laps_at(self, t: float) -> float | None:
         """Laps completed at moment t, as a fraction (20.5 = halfway round lap 21).
 
@@ -299,7 +380,7 @@ class CarProgress:
         Returns:
             The interpolated progress, or None with no crossings at all.
         """
-        points = [(time, float(laps)) for time, laps in self.crossings]
+        points = self.crossings
         if not points:
             return None
         if len(points) == 1:
@@ -309,7 +390,7 @@ class CarProgress:
         for before, after in zip(points, points[1:], strict=False):
             if t <= after[0]:
                 return _interpolate(before, after, t)
-        return _interpolate(points[-2], points[-1], t) if self.keeps_going else points[-1][1]
+        return _interpolate(*self._last_lap(), t) if self.keeps_going else points[-1][1]
 
     def time_at(self, laps: float) -> float | None:
         """When this car reaches the given progress, at its own pace.
@@ -323,7 +404,7 @@ class CarProgress:
             Seconds from the window's first moment, or None with fewer than
             two crossings.
         """
-        points = [(float(lap), time) for time, lap in self.crossings]
+        points = [(lap, time) for time, lap in self.crossings]
         if len(points) < 2:
             return None
         if laps <= points[0][0]:
@@ -331,7 +412,8 @@ class CarProgress:
         for before, after in zip(points, points[1:], strict=False):
             if laps <= after[0]:
                 return _interpolate(before, after, laps)
-        return _interpolate(points[-2], points[-1], laps)
+        (t0, l0), (t1, l1) = self._last_lap()
+        return _interpolate((l0, t0), (l1, t1), laps)
 
 
 @dataclass(frozen=True)
@@ -355,7 +437,7 @@ def build_tower(data: PlaybackData, origin: float) -> Tower:
 
     The lap before the window ends when the car starts the window's first lap,
     so that start time is its first crossing; every stored lap end after it is
-    another.
+    another. On a pit lap the pit lane's end is added (pit_lane_points).
 
     Args:
         data: The loaded window.
@@ -364,18 +446,60 @@ def build_tower(data: PlaybackData, origin: float) -> Tower:
         The Tower.
     """
     lap_before = data.start_lap - 1
-    crossings: dict[str, set[tuple[float, int]]] = {}
+    in_laps = pit_laps(data.tyre_ages)
+    out_laps = {(driver_id, lap + 1) for driver_id, lap in in_laps}
+    # Laps away from the pits, by (driver, lap). A pit lap's normal pace is
+    # the field's median on that lap, so a stop under a safety car or VSC is
+    # measured against that lap's slower pace (failing that, the car's own
+    # median lap in the window). Measured against the map on the curated
+    # races, 2026-10-10: a car's own pace from other laps put a whole
+    # VSC-slowed in-lap into the pit lane (Canada).
+    clean_laps: dict[tuple[str, int], float] = {
+        (t.driver_id, t.lap_number): t.lap_end_seconds - t.lap_start_seconds
+        for t in data.lap_timings
+        if t.lap_start_seconds is not None
+        and t.lap_end_seconds is not None
+        and (t.driver_id, t.lap_number) not in in_laps
+        and (t.driver_id, t.lap_number) not in out_laps
+    }
+
+    def normal_lap(driver_id: str, lap_number: int) -> float | None:
+        field = [time for (_, lap), time in clean_laps.items() if lap == lap_number]
+        if field:
+            return statistics.median(field)
+        own = [time for (d, _), time in clean_laps.items() if d == driver_id]
+        return statistics.median(own) if own else None
+
+    crossings: dict[str, set[tuple[float, float]]] = {}
     finished_window: set[str] = set()
     for t in data.lap_timings:
+        points = crossings.setdefault(t.driver_id, set())
         if t.lap_number == data.start_lap and t.lap_start_seconds is not None:
-            crossings.setdefault(t.driver_id, set()).add((t.lap_start_seconds - origin, lap_before))
+            points.add((t.lap_start_seconds - origin, float(lap_before)))
         if t.lap_end_seconds is not None:
-            crossings.setdefault(t.driver_id, set()).add((t.lap_end_seconds - origin, t.lap_number))
+            points.add((t.lap_end_seconds - origin, float(t.lap_number)))
             if t.lap_number == data.end_lap:
                 finished_window.add(t.driver_id)
+        key = (t.driver_id, t.lap_number)
+        if (
+            (key in in_laps or key in out_laps)
+            and t.lap_start_seconds is not None
+            and t.lap_end_seconds is not None
+            and (normal := normal_lap(t.driver_id, t.lap_number)) is not None
+        ):
+            bend = pit_lane_points(
+                t.lap_number,
+                t.lap_start_seconds - origin,
+                t.lap_end_seconds - origin,
+                normal,
+                in_lap=key in in_laps,
+            )
+            if bend is not None:
+                points.add(bend)
     cars = {
         driver_id: CarProgress(sorted(points), driver_id in finished_window)
         for driver_id, points in crossings.items()
+        if points
     }
     members_by_lap = {
         lap_number: frozenset(str(gap["driver_id"]) for gap in payload.get("gaps", []))
