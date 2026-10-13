@@ -6,6 +6,8 @@
 export interface ScenarioPlan {
   pit_laps: number[]
   compounds: string[]
+  // See SimulateStrategyRequest.no_further_stop. Cannot be set with pit_laps.
+  no_further_stop?: boolean
   label?: string | null
 }
 
@@ -22,6 +24,10 @@ export interface SimulateStrategyRequest {
   // Must be the same length as pit_laps when pit_laps is non-empty; backend
   // validates each value against {HARD, INTERMEDIATE, MEDIUM, SOFT, WET}.
   compounds?: string[]
+  // true: the driver runs to the flag on the current tyre (the simulation
+  // makes no stop for them). Cannot be set with pit_laps or scenarios.
+  // Omitted with empty pit_laps: the simulation decides this driver's stops.
+  no_further_stop?: boolean
   // Undefined/omitted: single-plan request (pit_laps/compounds above), same
   // as before this field existed. 1-4 entries: multi-scenario compare — the
   // backend runs all of them against the identical field state in one
@@ -49,8 +55,10 @@ export interface OvertakingDriver {
   // This rival's own single most likely pit lap, from that rival's own
   // per-lap pit probability across all simulations, summarized to its peak.
   rival_projected_pit_lap: number | null
-  // The pit probability AT rival_projected_pit_lap — always present together
-  // with rival_projected_pit_lap (both null or both set).
+  // The share of simulations in which this rival stops at all (since Day 6d;
+  // before, the share at rival_projected_pit_lap) — always present together
+  // with rival_projected_pit_lap (both null or both set). Both are null when
+  // the rival stops in under 20% of simulations.
   rival_pit_probability: number | null
 }
 
@@ -76,6 +84,8 @@ export interface PositionProbability {
 export interface SimulatedRaceOutcome {
   pit_laps: number[]
   compounds: string[]
+  // The plan's no_further_stop, echoed back.
+  no_further_stop: boolean
   // Passed through verbatim from the matching ScenarioPlan.label in a
   // multi-scenario compare request; null for the single-plan path.
   label: string | null

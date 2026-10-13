@@ -44,6 +44,7 @@ def _build_request(
     pit_laps: list[int] | None = None,
     compounds: list[str] | None = None,
     scenarios: list[ScenarioPlan] | None = None,
+    no_further_stop: bool = False,
 ) -> SimulateStrategyRequest:
     return SimulateStrategyRequest(
         driver_id=uuid.uuid4(),
@@ -54,6 +55,7 @@ def _build_request(
         pit_laps=pit_laps if pit_laps is not None else [],
         compounds=compounds if compounds is not None else [],
         scenarios=scenarios,
+        no_further_stop=no_further_stop,
     )
 
 
@@ -136,6 +138,29 @@ def test_scenario_plan_accepts_empty_pit_laps_as_autonomous() -> None:
     # pit laps), not a malformed one.
     scenario = ScenarioPlan(pit_laps=[], compounds=[], label="No pit")
     assert scenario.pit_laps == []
+
+
+@pytest.mark.unit
+def test_no_further_stop_plan_is_accepted_without_pit_laps() -> None:
+    assert _build_request(no_further_stop=True).no_further_stop is True
+    assert ScenarioPlan(no_further_stop=True, label="No further stop").no_further_stop is True
+
+
+@pytest.mark.unit
+def test_no_further_stop_cannot_have_pit_laps() -> None:
+    with pytest.raises(ValidationError):
+        _build_request(no_further_stop=True, pit_laps=[20], compounds=["HARD"])
+    with pytest.raises(ValidationError):
+        ScenarioPlan(no_further_stop=True, pit_laps=[30], compounds=["HARD"])
+
+
+@pytest.mark.unit
+def test_simulate_request_rejects_no_further_stop_alongside_scenarios() -> None:
+    with pytest.raises(ValidationError):
+        _build_request(
+            no_further_stop=True,
+            scenarios=[ScenarioPlan(pit_laps=[30], compounds=["HARD"])],
+        )
 
 
 @pytest.mark.unit

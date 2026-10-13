@@ -51,6 +51,18 @@ describe("PitWindowCard", () => {
     expect(screen.getByText("71% confidence")).toBeInTheDocument()
   })
 
+  it("says where a stop's compound comes from, and not for no further stop", () => {
+    const note = "MEDIUM is what most teams fit with that many laps left; the models decide when to stop."
+    mockView(buildView())
+    const { unmount } = render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+    expect(screen.getByText(note)).toBeInTheDocument()
+    unmount()
+
+    mockView(buildView({ noFurtherStop: true, pitLap: 44, windowStart: 44, windowEnd: 44 }))
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+    expect(screen.queryByText(note)).not.toBeInTheDocument()
+  })
+
   it("shows the server-built plain-English narrative when present", () => {
     mockView(
       buildView({

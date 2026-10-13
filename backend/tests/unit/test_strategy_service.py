@@ -406,12 +406,15 @@ async def test_optimal_pit_window_returns_sorted_by_time(
 # plausible-looking number" — a genuine numerical regression test of the
 # batched cumsum/2D-grid math, not just a structural "did it run" check.
 #
-# current_lap=10, tyre_age_laps=10, total_laps=30 -> 15 candidates,
-# pit_laps 11..25 (i=0..14, pit_lap = 11+i):
+# current_lap=10, tyre_age_laps=10, total_laps=24 -> 14 candidates,
+# pit_laps 11..24 (i=0..13, pit_lap = 11+i):
 #   stint1_delta[i] = 0.1*(i+1)                       (cumsum of MEDIUM's 0.1/lap)
-#   stint2 best (always SOFT) delta[i] = -0.5*(19-i)  (laps_remaining = 30-(11+i) = 19-i)
-#   total_delta[i] = 0.1*(i+1) + 22.0 (PIT_STOP_SECONDS) - 0.5*(19-i)
-#                  = 0.6*i + 12.6  — strictly increasing, so i=0 (pit_lap=11) wins.
+#   stint2 delta[i] = -0.5*(13-i)                     (laps_remaining = 24-(11+i) = 13-i)
+#     on SOFT, which race_simulator.dry_compound_for_stop gives for under 15
+#     laps left (since Day 6d the stint-2 compound comes from that table, not
+#     the fastest projection; in a 24-lap race every stop here is onto SOFT)
+#   total_delta[i] = 0.1*(i+1) + 22.0 (PIT_STOP_SECONDS) - 0.5*(13-i)
+#                  = 0.6*i + 15.6  — strictly increasing, so i=0 (pit_lap=11) wins.
 
 
 def _constant_delta_pipeline(value: float) -> MagicMock:
@@ -439,7 +442,7 @@ async def test_build_pit_recommendation_batches_predict_and_keeps_winning_compou
     circuit_id = uuid.uuid4()
     lap = _fake_lap(lap_number=10, compound="MEDIUM", tyre_age_laps=10, position=3)
     mock_db_session.execute.side_effect = _pit_window_side_effects(
-        lap, total_laps=30, circuit_id=circuit_id
+        lap, total_laps=24, circuit_id=circuit_id
     )
 
     models = _constant_delta_models()
@@ -450,10 +453,10 @@ async def test_build_pit_recommendation_batches_predict_and_keeps_winning_compou
     )
 
     assert candidates[0]["pit_lap"] == 11
-    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(12.6)
-    # Every returned candidate's recommended_compound is SOFT (it wins the
-    # stint-2 argmin at every pit_lap, not just the top-ranked one) — the
-    # value the original loop computed then discarded entirely.
+    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(15.6)
+    # Every returned candidate keeps its stint-2 compound (SOFT at every
+    # pit_lap here, not just the top-ranked one) — the value the original
+    # loop computed then discarded entirely.
     assert all(c["recommended_compound"] == "SOFT" for c in candidates)
 
     # The batching claim itself: 1 call for stint 1 (current compound, MEDIUM,
@@ -483,7 +486,7 @@ def test_compute_pit_recommendation_matches_build_pit_recommendation_with_inject
         "compound": "MEDIUM",
         "tyre_age_laps": 10,
         "lap_number": 10,
-        "total_laps": 30,
+        "total_laps": 24,
         "circuit_name": "Test Circuit",
         # One dry compound used: the two-compound rule requires a stop, as in
         # the batching test above (see _pit_window_side_effects).
@@ -493,19 +496,19 @@ def test_compute_pit_recommendation_matches_build_pit_recommendation_with_inject
     candidates = strategy_service.compute_pit_recommendation(models, {}, {}, driver_id, state)
 
     assert candidates[0]["pit_lap"] == 11
-    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(12.6)
+    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(15.6)
     assert candidates[0]["recommended_compound"] == "SOFT"
 
 
 # --- "No further stop" and F1's two-compound rule (Day 6c CP2, 2026-10-10) ---
 
 
-def _state(compounds_used: list[str] | None) -> dict[str, Any]:
+def _state(compounds_used: list[str] | None, total_laps: int = 30) -> dict[str, Any]:
     state: dict[str, Any] = {
         "compound": "MEDIUM",
         "tyre_age_laps": 10,
         "lap_number": 10,
-        "total_laps": 30,
+        "total_laps": total_laps,
         "circuit_name": "Test Circuit",
     }
     if compounds_used is not None:
@@ -550,9 +553,9 @@ def test_compute_pit_recommendation_recommends_no_further_stop_when_staying_out_
 
 @pytest.mark.unit
 def test_compute_pit_recommendation_recommends_a_stop_when_the_tyre_is_finished() -> None:
-    """The same choice the other way: MEDIUMs losing 3 s a lap make 20 laps to
-    the flag cost 60 s, so a stop (3 + 22 - 9.5 = 15.5 s) wins and "no further
-    stop" ranks behind it."""
+    """The same choice the other way: MEDIUMs losing 3 s a lap make 14 laps to
+    the flag cost 42 s, so a stop onto SOFT (3 + 22 - 6.5 = 18.5 s) wins and
+    "no further stop" ranks behind it."""
     models = {
         "tire_deg_soft.pkl": _constant_delta_pipeline(-0.5),
         "tire_deg_medium.pkl": _constant_delta_pipeline(3.0),
@@ -560,12 +563,12 @@ def test_compute_pit_recommendation_recommends_a_stop_when_the_tyre_is_finished(
     }
 
     candidates = strategy_service.compute_pit_recommendation(
-        models, {}, {}, uuid.uuid4(), _state(["MEDIUM", "SOFT"])
+        models, {}, {}, uuid.uuid4(), _state(["MEDIUM", "SOFT"], total_laps=24)
     )
 
     assert candidates[0]["no_further_stop"] is False
     assert candidates[0]["pit_lap"] == 11
-    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(15.5)
+    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(18.5)
 
 
 @pytest.mark.unit
@@ -636,11 +639,11 @@ def test_settled_tyre_ages_raise_only_young_tyres() -> None:
         (None, 1.0),
         ("1", 1.0),
         ("12", 1.0),  # yellow flags only
-        ("14", strategy_service.SC_PIT_LOSS_FACTOR),  # safety car during the lap
-        ("124", strategy_service.SC_PIT_LOSS_FACTOR),
+        ("14", race_simulator.SC_PIT_LOSS_FACTOR),  # safety car during the lap
+        ("124", race_simulator.SC_PIT_LOSS_FACTOR),
         ("16", strategy_service.VSC_PIT_LOSS_FACTOR),  # VSC deployed
         ("7", strategy_service.VSC_PIT_LOSS_FACTOR),  # VSC ending
-        ("46", strategy_service.SC_PIT_LOSS_FACTOR),  # both: the safety car wins
+        ("46", race_simulator.SC_PIT_LOSS_FACTOR),  # both: the safety car wins
     ],
 )
 def test_pit_loss_after_lap(track_status: str | None, factor: float) -> None:
@@ -662,10 +665,11 @@ def _fresh_tyre_spike_pipeline(settled: float, spike: float) -> MagicMock:
 
 @pytest.mark.unit
 def test_compute_pit_recommendation_ignores_the_fresh_tyre_spike() -> None:
-    """HARD is the better stint-2 tyre once settled (-0.6 s a lap against
-    SOFT's -0.5), but its model adds +5 s on the first laps of a stint. Those
-    laps are mostly out-laps the models barely saw, and their real cost is in
-    the pit loss, so the engine must not count the spike: HARD wins."""
+    """The HARD model adds +5 s on the first laps of a stint (tyre age 1-2).
+    Those laps are mostly out-laps the models barely saw, and their real cost
+    is in the pit loss, so the engine must not count the spike. A stop on lap
+    11 of 40 leaves 29 laps, a HARD stint (dry_compound_for_stop): 3.0 + 22 -
+    0.6 x 29 = 7.6 s, not 7.6 + 2 x 5.6 with the spike."""
     models = {
         "tire_deg_soft.pkl": _constant_delta_pipeline(-0.5),
         "tire_deg_medium.pkl": _constant_delta_pipeline(3.0),
@@ -673,25 +677,47 @@ def test_compute_pit_recommendation_ignores_the_fresh_tyre_spike() -> None:
     }
 
     candidates = strategy_service.compute_pit_recommendation(
-        models, {}, {}, uuid.uuid4(), _state(["MEDIUM", "SOFT"])
+        models, {}, {}, uuid.uuid4(), _state(["MEDIUM", "SOFT"], total_laps=40)
     )
 
     assert candidates[0]["no_further_stop"] is False
     assert candidates[0]["recommended_compound"] == "HARD"
+    assert candidates[0]["pit_lap"] == 11
+    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(7.6)
+
+
+@pytest.mark.unit
+def test_compute_pit_recommendation_fits_what_teams_fit_not_the_fastest_projection() -> None:
+    """Day 6d: HARD is projected fastest at every stop, but a stop with under
+    15 laps left fits SOFT, as most real stops do (race_simulator.
+    dry_compound_for_stop), and the timing is judged on that SOFT stint."""
+    models = {
+        "tire_deg_soft.pkl": _constant_delta_pipeline(-0.5),
+        "tire_deg_medium.pkl": _constant_delta_pipeline(3.0),
+        "tire_deg_hard.pkl": _constant_delta_pipeline(-2.0),
+    }
+
+    candidates = strategy_service.compute_pit_recommendation(
+        models, {}, {}, uuid.uuid4(), _state(["MEDIUM", "HARD"], total_laps=24)
+    )
+
+    assert all(c["recommended_compound"] == "SOFT" for c in candidates)
+    # Lap 11 onto SOFT: 3.0 + 22 - 0.5 x 13 = 18.5 s (on HARD it would be -1.0).
+    assert candidates[0]["projected_total_delta_seconds"] == pytest.approx(18.5)
 
 
 @pytest.mark.unit
 def test_compute_pit_recommendation_stops_cheaply_after_a_safety_car_lap() -> None:
-    """MEDIUMs losing 0.6 s a lap, SOFT gaining 0.5: 20 laps to the flag cost
-    12 s; a green-flag stop on lap 11 costs 0.6 + 22 - 9.5 = 13.1 s, so the
-    engine stays out. Under a safety car the same stop costs 0.6 + 11 - 9.5 =
-    2.1 s and wins."""
+    """MEDIUMs losing 0.6 s a lap, SOFT gaining 0.5: 14 laps to the flag cost
+    8.4 s; a green-flag stop on lap 11 onto SOFT costs 0.6 + 22 - 6.5 = 16.1 s,
+    so the engine stays out. Under a safety car the same stop costs 0.6 + 11 -
+    6.5 = 5.1 s and wins."""
     models = {
         "tire_deg_soft.pkl": _constant_delta_pipeline(-0.5),
         "tire_deg_medium.pkl": _constant_delta_pipeline(0.6),
         "tire_deg_hard.pkl": _constant_delta_pipeline(0.5),
     }
-    green = _state(["MEDIUM", "SOFT"])
+    green = _state(["MEDIUM", "SOFT"], total_laps=24)
     green["track_status"] = "1"
     safety_car = {**green, "track_status": "14"}
 
@@ -703,7 +729,7 @@ def test_compute_pit_recommendation_stops_cheaply_after_a_safety_car_lap() -> No
     )[0]
     assert under_safety_car["no_further_stop"] is False
     assert under_safety_car["pit_lap"] == 11
-    assert under_safety_car["projected_total_delta_seconds"] == pytest.approx(2.1)
+    assert under_safety_car["projected_total_delta_seconds"] == pytest.approx(5.1)
 
 
 @pytest.mark.unit
@@ -717,7 +743,7 @@ async def test_build_pit_recommendation_window_is_narrow_not_full_horizon(
     circuit_id = uuid.uuid4()
     lap = _fake_lap(lap_number=10, compound="MEDIUM", tyre_age_laps=10, position=3)
     mock_db_session.execute.side_effect = _pit_window_side_effects(
-        lap, total_laps=30, circuit_id=circuit_id
+        lap, total_laps=24, circuit_id=circuit_id
     )
     monkeypatch.setattr(strategy_service, "_load_models", _constant_delta_models)
 
@@ -729,7 +755,7 @@ async def test_build_pit_recommendation_window_is_narrow_not_full_horizon(
     # +/- PIT_WINDOW_HALF_WIDTH_LAPS (2) band is clipped to 11-13.
     assert candidates[0]["window_start"] == 11
     assert candidates[0]["window_end"] == 13
-    # Not the full 11-25 PIT_WINDOW_LOOKAHEAD_LAPS search horizon — and every
+    # Not the full 11-24 PIT_WINDOW_LOOKAHEAD_LAPS search horizon — and every
     # returned candidate shares the SAME window (a property of the #1
     # recommendation, not computed per-candidate).
     assert all(c["window_start"] == 11 and c["window_end"] == 13 for c in candidates)

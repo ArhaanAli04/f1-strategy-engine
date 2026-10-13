@@ -48,8 +48,12 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   2026-09-03. A caller that omits baseline_lap_time_seconds (defaults to 0.0)
   gets the relative-delta-only behaviour for that driver, and no fuel term is
   applied to it — there is no absolute lap time to correct.
-- After a pit stop, compound is assumed unchanged (no compound-choice model exists
-  yet) and tyre age resets to 0.
+- After a pit stop tyre age resets to 0, and a car the simulation stops on its own
+  fits the dry compound most cars fitted with that many laps left
+  (_compound_after_stop, from 2018-2025 races). A forced stop fits the plan's compound.
+  Compounds are tracked per (sim, driver), since a car's own stops differ between
+  runs. Before Day 6d (2026-10-11) the compound never changed after an unplanned
+  stop, so a rival ran its old compound's wear curve from a fresh start.
 - A safety car lap "neutralises gaps" by collapsing every driver's cumulative time to
   the simulation's current leader time plus an SC lap time — the exact value is
   inconsequential to relative standings since it's applied uniformly, but now that
@@ -65,6 +69,16 @@ batch evaluation) into a forward simulation that has no ground-truth lap times y
   tire_deg_model.ASSUMED_START_FUEL_KG.
 - MIN_LAPS_BETWEEN_PITS guards against the pit_predictor's per-lap threshold decision
   triggering unrealistic back-to-back pit stops near the threshold boundary.
+- The pit model doesn't know how many stops a car has made. A car that has met F1's
+  two-compound rule (DriverRaceState.two_compound_rule_met, or any stop in the
+  simulation, since a stop fits a different compound in practice) only stops on its
+  own when its tyre won't last to the flag (_autonomous_pit_flags). Before Day 6d
+  (2026-10-11) the model stopped cars that had already made their stop again: from
+  Belgian GP 2026 lap 24 OCO, COL, GAS, ANT and SAI stopped in every run, though all
+  five ran to the flag.
+- The pit model answers "stop within the next 3 laps", so a car it decides to stop
+  stops on a lap drawn within that window, per run (_schedule_own_stops). Before
+  Day 6d it stopped on the deciding lap, early and on the same lap in every run.
 """
 
 from __future__ import annotations
@@ -102,6 +116,32 @@ SC_LAP_TIME_MULTIPLIER = 1.4
 # came down to tie-breaking (found when a P9 driver finished P22 in one run).
 SC_BUNCHED_GAP_SECONDS = 1.0
 MIN_LAPS_BETWEEN_PITS = 5
+# A stop under a safety car costs this share of PIT_STOP_SECONDS: the field is
+# slow, so the car loses less to it in the pit lane. Assumed (no pit-loss
+# measurements exist in the data); the pit-window engine uses the same value
+# (strategy_service.pit_loss_after_lap). Applied here since Day 6d (2026-10-11),
+# when a stop on a simulated safety-car lap still cost the full 22 s.
+SC_PIT_LOSS_FACTOR = 0.5
+# The integer codes the tire_deg models were trained with (train_models.py's
+# pd.Categorical over the compound names, alphabetical). prediction_worker and
+# strategy_service use this table too.
+COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
+_DRY_COMPOUND_CODES = (
+    COMPOUND_ENCODING["SOFT"],
+    COMPOUND_ENCODING["MEDIUM"],
+    COMPOUND_ENCODING["HARD"],
+)
+# What a car fits at a stop with this many laps still to run after it, first
+# choice then the one used when the first is its current compound and it still
+# needs a second dry compound. Most common fitted compounds at 3,917 stops in
+# dry races 2018-2025 (lap_data, measured 2026-10-11): 25+ laps left HARD
+# 57-62% (MEDIUM 30-32%); 15-24 MEDIUM 35%, SOFT 33%, HARD 32%; under 15 SOFT
+# 58-93%.
+_COMPOUND_BY_LAPS_LEFT = (
+    (25, COMPOUND_ENCODING["HARD"], COMPOUND_ENCODING["MEDIUM"]),
+    (15, COMPOUND_ENCODING["MEDIUM"], COMPOUND_ENCODING["HARD"]),
+    (0, COMPOUND_ENCODING["SOFT"], COMPOUND_ENCODING["MEDIUM"]),
+)
 
 
 @dataclass(frozen=True)
@@ -139,6 +179,11 @@ class DriverRaceState:
     # fixture) gets the pre-existing relative-delta-only behaviour for that
     # driver, unchanged.
     baseline_lap_time_seconds: float = 0.0
+    # True once the driver has run two dry compounds, or a wet one, by the
+    # start lap (strategy_service.dry_compound_obligation is None). Such a car
+    # stops on its own only when its tyre won't last (see the module
+    # docstring). Default False: the pit model alone decides, as before.
+    two_compound_rule_met: bool = False
 
 
 @dataclass(frozen=True)
@@ -222,8 +267,8 @@ def _advance_lap(
     in that simulation is bunched behind its current leader in its current order,
     SC_BUNCHED_GAP_SECONDS apart (gaps neutralised, order kept), instead of each
     driver receiving their individually predicted pace. Pit stops
-    add pit_stop_seconds and reset tyre age to 0, applied after the lap's time/age
-    update on both the racing and safety-car branches.
+    add pit_stop_seconds (SC_PIT_LOSS_FACTOR of it on a safety-car lap) and reset
+    tyre age to 0, applied after the lap's time/age update on both branches.
 
     Args:
         cumulative_time: (n_sims, n_drivers) elapsed race time in seconds, mutated.
@@ -260,7 +305,7 @@ def _advance_lap(
                 cumulative_time[s, d] = sc_time + rank * SC_BUNCHED_GAP_SECONDS
                 tyre_age[s, d] += 1
                 if pit_flags[s, d]:
-                    cumulative_time[s, d] += pit_stop_seconds
+                    cumulative_time[s, d] += pit_stop_seconds * SC_PIT_LOSS_FACTOR
                     tyre_age[s, d] = 0
         else:
             for d in range(n_drivers):
@@ -281,8 +326,8 @@ def _seed_numba_rng(seed: int) -> None:
 
 def _tire_deg_predictions(
     race_state: RaceSimulationInput,
-    compound_groups: dict[str, npt.NDArray[np.intp]],
-    compound_encoded_by_driver: npt.NDArray[np.int64],
+    compound_code: npt.NDArray[np.int64],
+    compound_names: dict[int, str],
     tire_deg_pipelines: dict[str, Any],
     lap_number: int,
     tyre_age: npt.NDArray[np.int64],
@@ -298,11 +343,11 @@ def _tire_deg_predictions(
 
     Args:
         race_state: The simulation's static race context.
-        compound_groups: compound -> array of driver column indices with that compound.
-        compound_encoded_by_driver: (n_drivers,) current encoded compound per driver.
-            Mutable across laps (unlike race_state.drivers[i].compound_encoded, which is
-            each driver's *starting* value) — see simulate_race's forced_pit_laps, which
-            is the only thing that ever changes it after lap 1.
+        compound_code: (n_sims, n_drivers) encoded compound each car is on, per run.
+            Starts from race_state.drivers[i].compound_encoded and changes at stops
+            (see simulate_race), so the same car can be on different compounds in
+            different runs.
+        compound_names: encoded compound -> name, to pick the pipeline.
         tire_deg_pipelines: Fitted tire_deg pipelines, keyed by compound.
         lap_number: Lap being predicted for.
         tyre_age: (n_sims, n_drivers) current tyre age.
@@ -348,16 +393,24 @@ def _tire_deg_predictions(
         (n_sims, n_drivers), float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
     )
 
-    for compound, idx in compound_groups.items():
+    for code in np.unique(compound_code):
+        compound = compound_names.get(int(code), "")
         pipeline = tire_deg_pipelines.get(compound)
         if pipeline is None:
             continue
 
-        group_tyre_age = tyre_age[:, idx]
-        flat_shape = group_tyre_age.shape
-        tyre_age_flat = group_tyre_age.ravel().astype(np.int64)
-        compound_encoded_flat = np.tile(compound_encoded_by_driver[idx], n_sims)
-        driver_id_encoded_flat = np.tile(driver_id_encoded[idx], n_sims)
+        # Every (sim, driver) cell on this compound this lap, in row-major
+        # order (boolean indexing and np.nonzero agree on it).
+        cells = compound_code == code
+        _, driver_index = np.nonzero(cells)
+        # Settled ages (tire_deg_model.SETTLED_TYRE_AGE): the models guess wildly
+        # on a fresh tyre's first laps (+5.2 s for a HARD at age 1), which the
+        # pit-window engine stopped feeding them in Day 6c. Since Day 6d
+        # (2026-10-11) the simulator does too. The pit model still gets the raw
+        # age (_pit_scores), as in its training.
+        tyre_age_flat = tire_deg_model.settled_tyre_ages(tyre_age[cells]).astype(np.int64)
+        compound_encoded_flat = np.full(tyre_age_flat.shape[0], int(code), dtype=np.int64)
+        driver_id_encoded_flat = driver_id_encoded[driver_index]
 
         # Dedup key: tyre_age is the only column that varies per (sim,
         # driver) row; compound_encoded/driver_id_encoded are included too
@@ -420,8 +473,8 @@ def _tire_deg_predictions(
             # Scatter each unique row's prediction back to every (sim,
             # driver) position that shared its (tyre_age, driver_id_encoded,
             # compound_encoded) combination — exact, see docstring above.
-            predicted_delta[:, idx] = unique_delta[inverse].reshape(flat_shape)
-            predicted_life_remaining[:, idx] = unique_life[inverse].reshape(flat_shape)
+            predicted_delta[cells] = unique_delta[inverse.ravel()]
+            predicted_life_remaining[cells] = unique_life[inverse.ravel()]
         except Exception:  # noqa: BLE001 — degrade this compound group, never crash the task
             logger.warning(
                 "tire_deg inference failed for compound %s at lap %d — "
@@ -430,8 +483,8 @@ def _tire_deg_predictions(
                 lap_number,
                 exc_info=True,
             )
-            predicted_delta[:, idx] = 0.0
-            predicted_life_remaining[:, idx] = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
+            predicted_delta[cells] = 0.0
+            predicted_life_remaining[cells] = float(tire_deg_model.MAX_LOOKAHEAD_LAPS)
 
     return predicted_delta, predicted_life_remaining
 
@@ -511,6 +564,120 @@ def _pit_scores(
     return scores
 
 
+def _autonomous_pit_flags(
+    pit_scores: npt.NDArray[np.float64],
+    tyre_age: npt.NDArray[np.int64],
+    rule_met: npt.NDArray[np.bool_],
+    predicted_life_remaining: npt.NDArray[np.float64],
+    laps_to_race_end: int,
+) -> npt.NDArray[np.bool_]:
+    """Which (sim, driver) pairs the pit model stops this lap, before any forced plan.
+
+    Args:
+        pit_scores: (n_sims, n_drivers) pit_predictor probabilities.
+        tyre_age: (n_sims, n_drivers) laps on the current tyre.
+        rule_met: (n_sims, n_drivers) whether the car has met the two-compound
+            rule (from the start lap, or by a simulated stop).
+        predicted_life_remaining: (n_sims, n_drivers) laps until the tyre's
+            predicted delta crosses tire_deg_model's degradation threshold,
+            capped at tire_deg_model.MAX_LOOKAHEAD_LAPS: a tyre at the cap
+            counts as lasting however many laps are left.
+        laps_to_race_end: Laps still to run after this one.
+    Returns:
+        (n_sims, n_drivers) bool: the pit model's stops, with a car that has met
+        the rule kept out unless its tyre won't last to the flag.
+    """
+    stops: npt.NDArray[np.bool_] = (pit_scores > pit_predictor.ALERT_THRESHOLD) & (
+        tyre_age >= MIN_LAPS_BETWEEN_PITS
+    )
+    tyre_lasts = predicted_life_remaining >= min(
+        laps_to_race_end, tire_deg_model.MAX_LOOKAHEAD_LAPS
+    )
+    return stops & ~(rule_met & tyre_lasts)
+
+
+def _schedule_own_stops(
+    decided: npt.NDArray[np.bool_],
+    planned_stop_lap: npt.NDArray[np.int64],
+    delay: npt.NDArray[np.int64],
+    lap_number: int,
+    laps_to_race_end: int,
+) -> tuple[npt.NDArray[np.bool_], npt.NDArray[np.int64]]:
+    """Turn the pit model's decisions into stops within its 3-lap window.
+
+    pit_predictor's label is "stops within PIT_LABEL_HORIZON_LAPS laps,
+    this one included", so a decision on lap t schedules the stop on lap
+    t + delay, delay drawn per (sim, driver) in [0, horizon). Before Day 6d
+    (2026-10-11) the stop came on lap t itself, which pulled every simulated
+    stop early and made all runs agree on one lap (NOR, Belgian GP 2026 lap 25:
+    lap 26 in 100% of runs; he stopped on lap 31). A decision while a stop is
+    already scheduled is ignored.
+
+    Args:
+        decided: (n_sims, n_drivers) the model's stop decisions this lap
+            (_autonomous_pit_flags), forced drivers excluded by the caller.
+        planned_stop_lap: (n_sims, n_drivers) the lap a scheduled stop falls
+            on, 0 for none.
+        delay: (n_sims, n_drivers) drawn delays, each in [0, horizon).
+        lap_number: This lap.
+        laps_to_race_end: Laps still to run after this one; a delay is capped
+            so the stop falls by the last lap.
+    Returns:
+        (stops this lap, the updated planned_stop_lap with those stops cleared).
+    """
+    new = decided & (planned_stop_lap == 0)
+    capped = np.minimum(delay, laps_to_race_end)
+    planned = np.where(new, lap_number + capped, planned_stop_lap)
+    stops: npt.NDArray[np.bool_] = planned == lap_number
+    remaining: npt.NDArray[np.int64] = np.where(stops, 0, planned).astype(np.int64)
+    return stops, remaining
+
+
+def dry_compound_for_stop(current: str, rule_met: bool, laps_left: int) -> str:
+    """The dry compound most cars fit at a stop with this many laps left after it.
+
+    One car's case of _compound_after_stop, by name. The pit-window engine
+    (strategy_service.compute_pit_recommendation) uses it too, since Day 6d
+    (2026-10-11): the tyre models misjudge the compounds' pace against each
+    other, so their own choice rarely matched the real one.
+
+    Args:
+        current: The compound the car is on.
+        rule_met: Whether the car has met the two-compound rule (or needs no
+            dry change, e.g. after running a wet compound).
+        laps_left: Laps still to run after the stop.
+    Returns:
+        "SOFT", "MEDIUM" or "HARD": the table's first choice, or its second
+        when the first is the car's compound and it still needs a second dry one.
+    """
+    _, first, second = next(row for row in _COMPOUND_BY_LAPS_LEFT if laps_left >= row[0])
+    names = {code: name for name, code in COMPOUND_ENCODING.items()}
+    code = second if names[first] == current and not rule_met else first
+    return names[code]
+
+
+def _compound_after_stop(
+    compound_code: npt.NDArray[np.int64],
+    rule_met: npt.NDArray[np.bool_],
+    laps_left: int,
+) -> npt.NDArray[np.int64]:
+    """The compound a car fits when the simulation stops it on its own.
+
+    Args:
+        compound_code: Encoded compound each car is on (any shape).
+        rule_met: Whether each car has met the two-compound rule (same shape).
+        laps_left: Laps still to run after the stop.
+    Returns:
+        The encoded compound to fit, same shape. A car on a wet compound keeps
+        it: nothing here models the track drying or getting wetter.
+    """
+    _, first, second = next(row for row in _COMPOUND_BY_LAPS_LEFT if laps_left >= row[0])
+    fitted = np.where((compound_code == first) & ~rule_met, second, first)
+    is_dry = np.isin(compound_code, _DRY_COMPOUND_CODES)
+    result: npt.NDArray[np.int64] = np.where(is_dry, fitted, compound_code).astype(np.int64)
+    return result
+
+
 def simulate_race(
     race_state: RaceSimulationInput,
     tire_deg_pipelines: dict[str, Any],
@@ -532,15 +699,16 @@ def simulate_race(
         rng_seed: Optional seed for reproducibility (seeds both the Python-level RNG
             used for safety car sampling and the Numba-level RNG used for lap noise).
         forced_pit_laps: Optional what-if override, driver_id -> {lap_number:
-            (compound_name, compound_encoded)}. On a forced lap, that driver pits
-            regardless of the model's own decision — bypassing MIN_LAPS_BETWEEN_PITS
-            too, since an explicit what-if lap should be honored even if
-            unrealistically soon — and their compound switches to the given one
-            from the following lap onward (pipeline selection and the encoded
-            feature both change; the pre-existing "compound unchanged after any
-            pit" simplification still applies to every other, non-forced driver).
-            None or empty: every driver's pit timing and compound stay fully
-            model-driven/static, identical to before this parameter existed.
+            (compound_name, compound_encoded)}. A driver listed here stops on
+            exactly those laps and no others: the plan is the whole plan
+            (owner's decision, Day 6d, 2026-10-11; before it the pit model could
+            add stops of its own), and an empty schedule means no stop at all.
+            A forced lap bypasses MIN_LAPS_BETWEEN_PITS too, since an explicit
+            what-if lap should be honored even if unrealistically soon, and the
+            compound switches to the given one from the following lap onward
+            (pipeline selection and the encoded feature both change). A stop
+            the simulation makes on its own fits _compound_after_stop's
+            compound. None or empty: every driver's pit timing is model-driven.
     Returns:
         RaceSimulationResult with a finishing-position probability distribution
         and finish-time distribution per driver.
@@ -598,11 +766,19 @@ def simulate_race(
     has_baseline = baseline_lap_time > 0
 
     driver_index_by_id = {d.driver_id: i for i, d in enumerate(race_state.drivers)}
-    # Mutable per-lap state — unlike everything else derived from race_state
-    # above, these two can change mid-race via forced_pit_laps (see docstring).
-    current_compounds = [d.compound for d in race_state.drivers]
-    compound_encoded_by_driver = np.array(
-        [d.compound_encoded for d in race_state.drivers], dtype=np.int64
+    # Mutable per (sim, driver): the compound changes at stops, and a car's
+    # own stops differ between runs (see the module docstring).
+    compound_code = np.tile(
+        np.array([d.compound_encoded for d in race_state.drivers], dtype=np.int64),
+        (n_simulations, 1),
+    )
+    compound_names = {code: name for name, code in COMPOUND_ENCODING.items()}
+    compound_names.update({d.compound_encoded: d.compound for d in race_state.drivers})
+    for schedule in (forced_pit_laps or {}).values():
+        compound_names.update({code: name for name, code in schedule.values()})
+    # Drivers on a forced plan: their stops and compounds come from the plan.
+    forced_columns = np.array(
+        [d.driver_id in (forced_pit_laps or {}) for d in race_state.drivers], dtype=np.bool_
     )
     # Per-lap, per-driver pit probability across all n_simulations — What-If
     # Simulator rebuild part (b) (see docs/internal/core-feature-rebuild-whatif-
@@ -610,16 +786,16 @@ def simulate_race(
     # own docstring). O(n_laps x n_drivers) floats, negligible next to the
     # (n_sims x n_drivers) arrays already held for the whole loop.
     pit_probability_by_lap: dict[int, npt.NDArray[np.float64]] = {}
+    # Mutable per (sim, driver): a stop in the simulation meets the rule too.
+    rule_met = np.tile(
+        np.array([d.two_compound_rule_met for d in race_state.drivers], dtype=np.bool_),
+        (n_simulations, 1),
+    )
+    # The lap each car's scheduled own stop falls on, 0 for none (see
+    # _schedule_own_stops).
+    planned_stop_lap = np.zeros((n_simulations, n_drivers), dtype=np.int64)
 
     for lap_number in range(race_state.current_lap + 1, race_state.total_laps + 1):
-        # Rebuilt every lap (not once) so a forced compound change is picked up
-        # for pipeline selection from the following lap onward. O(n_drivers),
-        # negligible next to the O(n_sims x n_drivers) work below.
-        compound_groups: dict[str, npt.NDArray[np.intp]] = {
-            compound: np.array([i for i, c in enumerate(current_compounds) if c == compound])
-            for compound in set(current_compounds)
-        }
-
         fuel_load_penalty = float(
             tire_deg_model.fuel_load_penalty_seconds(lap_number, float(race_state.total_laps))
         )
@@ -632,8 +808,8 @@ def simulate_race(
 
         predicted_delta, predicted_life_remaining = _tire_deg_predictions(
             race_state,
-            compound_groups,
-            compound_encoded_by_driver,
+            compound_code,
+            compound_names,
             tire_deg_pipelines,
             lap_number,
             tyre_age,
@@ -662,15 +838,22 @@ def simulate_race(
             position,
             fuel_load_est,
         )
-        pit_flags = (pit_scores > pit_predictor.ALERT_THRESHOLD) & (
-            tyre_age >= MIN_LAPS_BETWEEN_PITS
+        decided = _autonomous_pit_flags(
+            pit_scores, tyre_age, rule_met, predicted_life_remaining, laps_to_race_end
+        )
+        # Drawn for every cell every lap, whatever was decided, so the number
+        # of draws per lap is fixed and scenarios sharing a seed stay on the
+        # same random numbers (prediction_worker._run_one_scenario).
+        delay = rng.integers(0, pit_predictor.PIT_LABEL_HORIZON_LAPS, size=decided.shape)
+        pit_flags, planned_stop_lap = _schedule_own_stops(
+            decided & ~forced_columns, planned_stop_lap, delay, lap_number, laps_to_race_end
         )
 
         if forced_pit_laps:
             for forced_driver_id, schedule in forced_pit_laps.items():
                 idx = driver_index_by_id.get(forced_driver_id)
-                if idx is not None and lap_number in schedule:
-                    pit_flags[:, idx] = True
+                if idx is not None:
+                    pit_flags[:, idx] = lap_number in schedule
 
         # Captured AFTER the forced-pit override above, so a what-if's forced
         # pit lap shows probability 1.0 for the requesting driver at that lap
@@ -691,6 +874,16 @@ def simulate_race(
             sc_active,
             sc_lap_time_seconds,
         )
+        # The new tyres, for the stops just made: the simulation's own choice
+        # (taken before rule_met updates, since it depends on whether the car
+        # still needed a second compound), then each plan's.
+        own_stops = pit_flags & ~forced_columns
+        compound_code = np.where(
+            own_stops,
+            _compound_after_stop(compound_code, rule_met, laps_to_race_end),
+            compound_code,
+        )
+        rule_met |= pit_flags
 
         if forced_pit_laps:
             for forced_driver_id, schedule in forced_pit_laps.items():
@@ -699,9 +892,7 @@ def simulate_race(
                     continue
                 forced = schedule.get(lap_number)
                 if forced is not None:
-                    new_compound, new_compound_encoded = forced
-                    current_compounds[idx] = new_compound
-                    compound_encoded_by_driver[idx] = new_compound_encoded
+                    compound_code[:, idx] = forced[1]
 
     order = np.argsort(cumulative_time, axis=1)
     finishing_positions = np.argsort(order, axis=1) + 1

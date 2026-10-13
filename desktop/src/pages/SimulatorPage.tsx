@@ -24,7 +24,7 @@ import { CHART_TOOLTIP_STYLE, FALLBACK_TEAM_COLOR, SCENARIO_SERIES_COLORS } from
 import { exportStrategiesAsCsv } from "@/utils/csvExport"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
-import { formatRaceTime } from "@/utils/formatters"
+import { formatRaceTime, formatStrategyName } from "@/utils/formatters"
 import type {
   DriverResponse,
   OvertakingDriver,
@@ -50,10 +50,13 @@ interface PitStopRow {
 
 // One candidate scenario in Compare mode — always a SINGLE pit lap (unlike
 // PitStopRow's sequential multi-stop plan). Mirrors web's ScenarioRow.
+// noFurtherStop: the "No further stop" scenario (stay out to the flag),
+// whose lap and compound are unused.
 interface ScenarioRow {
   lap: number
   compound: string
   label: string
+  noFurtherStop: boolean
 }
 
 // Matches backend/schemas/simulate_schema.py's _MAX_SCENARIOS.
@@ -152,7 +155,7 @@ function formatOvertakingEnrichment(entry: OvertakingDriver): string {
   }
   if (entry.rival_projected_pit_lap != null && entry.rival_pit_probability != null) {
     parts.push(
-      `pits ~lap ${entry.rival_projected_pit_lap} (${Math.round(entry.rival_pit_probability * 100)}%)`,
+      `pits in ${Math.round(entry.rival_pit_probability * 100)}% of simulations, most likely lap ${entry.rival_projected_pit_lap}`,
     )
   }
   return parts.join(" · ")
@@ -178,7 +181,7 @@ interface PlanExplanationCardProps {
 // position, thin team-color bar, semibold code) rather than DriverChip's
 // pill style, per the "matching timing tower aesthetic" request.
 function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanationCardProps) {
-  const { position_gain_loss, explanation } = strategy
+  const { position_gain_loss, explanation, no_further_stop } = strategy
   const isGain = position_gain_loss > 0
   const isLoss = position_gain_loss < 0
   const freshCompound = strategy.compounds.at(-1)
@@ -214,12 +217,18 @@ function PlanExplanationCard({ planLabel, strategy, driversById }: PlanExplanati
         {heading}
       </p>
 
-      <p className="text-xs text-muted-foreground">
-        Pit stop cost:{" "}
-        <span className="font-mono tabular-nums text-foreground">
-          {explanation.pit_cost_seconds.toFixed(1)}s
-        </span>
-      </p>
+      {no_further_stop ? (
+        <p className="text-xs text-muted-foreground">
+          No pit stop: stays out on the current tyre to the flag.
+        </p>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Pit stop cost:{" "}
+          <span className="font-mono tabular-nums text-foreground">
+            {explanation.pit_cost_seconds.toFixed(1)}s
+          </span>
+        </p>
+      )}
 
       {explanation.drivers_overtaken.length === 0 ? (
         <p className="text-xs text-muted-foreground">
@@ -336,10 +345,12 @@ export function SimulatorPage() {
   const [currentTyreAge, setCurrentTyreAge] = useState(0)
   const [remainingLaps, setRemainingLaps] = useState(20)
   const [pitStops, setPitStops] = useState<PitStopRow[]>([{ lap: 15, compound: "HARD" }])
+  // Single Plan's "No further stop": the driver stays out to the flag.
+  const [noFurtherStop, setNoFurtherStop] = useState(false)
   const [mode, setMode] = useState<SimulationMode>("single")
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([
-    { lap: 30, compound: "HARD", label: "" },
-    { lap: 33, compound: "HARD", label: "" },
+    { lap: 30, compound: "HARD", label: "", noFurtherStop: false },
+    { lap: 33, compound: "HARD", label: "", noFurtherStop: false },
   ])
   const [taskId, setTaskId] = useState<string | null>(null)
   const [isExporting, setIsExporting] = useState(false)
@@ -389,7 +400,16 @@ export function SimulatorPage() {
     setScenarios((rows) =>
       rows.length >= MAX_SCENARIOS
         ? rows
-        : [...rows, { lap: remainingLaps, compound: "HARD", label: "" }],
+        : [...rows, { lap: remainingLaps, compound: "HARD", label: "", noFurtherStop: false }],
+    )
+  }
+
+  // At most one: two "No further stop" scenarios would be the same plan.
+  function addNoFurtherStopScenario() {
+    setScenarios((rows) =>
+      rows.length >= MAX_SCENARIOS || rows.some((row) => row.noFurtherStop)
+        ? rows
+        : [...rows, { lap: remainingLaps, compound: "HARD", label: "", noFurtherStop: true }],
     )
   }
 
@@ -416,17 +436,28 @@ export function SimulatorPage() {
       mode === "compare"
         ? {
             ...basePayload,
-            scenarios: scenarios.map((row) => ({
-              pit_laps: [row.lap],
-              compounds: [row.compound],
-              label: row.label.trim() || `Pit lap ${row.lap}`,
-            })),
+            scenarios: scenarios.map((row) =>
+              row.noFurtherStop
+                ? {
+                    pit_laps: [],
+                    compounds: [],
+                    no_further_stop: true,
+                    label: row.label.trim() || "No further stop",
+                  }
+                : {
+                    pit_laps: [row.lap],
+                    compounds: [row.compound],
+                    label: row.label.trim() || `Pit lap ${row.lap}`,
+                  },
+            ),
           }
-        : {
-            ...basePayload,
-            pit_laps: pitStops.map((row) => row.lap),
-            compounds: pitStops.map((row) => row.compound),
-          }
+        : noFurtherStop
+          ? { ...basePayload, no_further_stop: true }
+          : {
+              ...basePayload,
+              pit_laps: pitStops.map((row) => row.lap),
+              compounds: pitStops.map((row) => row.compound),
+            }
     // A bad current_lap (validate_current_lap, see CLAUDE.md's Deferred
     // Wiring) rejects synchronously here with a 404/422 — stay on step 2 and
     // surface it via simulateMutation.error below instead of advancing to
@@ -472,9 +503,9 @@ export function SimulatorPage() {
   const strategies = simulationResult.data?.result?.strategies ?? []
   const startingPosition = simulationResult.data?.result?.starting_position ?? 0
   const chartData = strategies.map((strategy, index) => ({
-    // Compare mode's scenario label ("Pit lap 30") when present, same
-    // fallback naming as before for the single-plan path.
-    name: strategy.label ?? `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`,
+    // Compare mode's scenario label ("Pit lap 30") when present, else what
+    // the single plan was.
+    name: formatStrategyName(strategy, index),
     positionChange: strategy.position_gain_loss,
     finishTime: strategy.predicted_finish_time,
     confidenceInterval: strategy.confidence_interval,
@@ -627,59 +658,73 @@ export function SimulatorPage() {
 
             {mode === "single" ? (
               <>
-                <p className="text-xs text-muted-foreground">
-                  Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo
-                  simulation decide pit timing autonomously.
-                </p>
-                <div className="space-y-2">
-                  {pitStops.map((row, index) => (
-                    <div key={index} className="flex items-center gap-2">
-                      <Input
-                        type="number"
-                        min={1}
-                        value={row.lap}
-                        onChange={(e) => updatePitStop(index, { lap: Number(e.target.value) })}
-                        className="w-24"
-                        aria-label={`Pit stop ${index + 1} lap`}
-                      />
-                      <Select
-                        value={row.compound}
-                        onValueChange={(value) => updatePitStop(index, { compound: value })}
-                      >
-                        <SelectTrigger
-                          className="flex-1"
-                          aria-label={`Pit stop ${index + 1} compound`}
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {COMPOUNDS.map((compound) => (
-                            <SelectItem key={compound} value={compound}>
-                              {compound}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="icon"
-                        onClick={() => removePitStop(index)}
-                        aria-label={`Remove pit stop ${index + 1}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 accent-primary"
+                    checked={noFurtherStop}
+                    onChange={(e) => setNoFurtherStop(e.target.checked)}
+                  />
+                  No further stop: stay out on {currentCompound} to the flag
+                </label>
+                {!noFurtherStop && (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo
+                      simulation decide pit timing autonomously.
+                    </p>
+                    <div className="space-y-2">
+                      {pitStops.map((row, index) => (
+                        <div key={index} className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            min={1}
+                            value={row.lap}
+                            onChange={(e) => updatePitStop(index, { lap: Number(e.target.value) })}
+                            className="w-24"
+                            aria-label={`Pit stop ${index + 1} lap`}
+                          />
+                          <Select
+                            value={row.compound}
+                            onValueChange={(value) => updatePitStop(index, { compound: value })}
+                          >
+                            <SelectTrigger
+                              className="flex-1"
+                              aria-label={`Pit stop ${index + 1} compound`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {COMPOUNDS.map((compound) => (
+                                <SelectItem key={compound} value={compound}>
+                                  {compound}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon"
+                            onClick={() => removePitStop(index)}
+                            aria-label={`Remove pit stop ${index + 1}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-                <Button type="button" variant="outline" size="sm" onClick={addPitStop}>
-                  + Add Pit Stop
-                </Button>
+                    <Button type="button" variant="outline" size="sm" onClick={addPitStop}>
+                      + Add Pit Stop
+                    </Button>
+                  </>
+                )}
               </>
             ) : (
               <>
                 <p className="text-xs text-muted-foreground">
-                  Compare up to {MAX_SCENARIOS} candidate pit laps side by side. Each scenario
+                  Compare up to {MAX_SCENARIOS} candidate pit laps, or staying out to the flag,
+                  side by side. Each scenario
                   shares the same random race conditions (safety cars, lap-time variance), so
                   any difference between them reflects the pit-lap decision alone, not chance.
                 </p>
@@ -694,35 +739,43 @@ export function SimulatorPage() {
                         }}
                         aria-hidden="true"
                       />
-                      <Input
-                        type="number"
-                        min={1}
-                        value={row.lap}
-                        onChange={(e) => updateScenario(index, { lap: Number(e.target.value) })}
-                        className="w-20"
-                        aria-label={`Scenario ${index + 1} pit lap`}
-                      />
-                      <Select
-                        value={row.compound}
-                        onValueChange={(value) => updateScenario(index, { compound: value })}
-                      >
-                        <SelectTrigger
-                          className="w-28"
-                          aria-label={`Scenario ${index + 1} compound`}
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {COMPOUNDS.map((compound) => (
-                            <SelectItem key={compound} value={compound}>
-                              {compound}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      {row.noFurtherStop ? (
+                        <span className="flex h-9 w-[12.5rem] flex-shrink-0 items-center rounded-md border bg-muted/30 px-3 text-xs text-muted-foreground">
+                          No stop, {currentCompound} to the flag
+                        </span>
+                      ) : (
+                        <>
+                          <Input
+                            type="number"
+                            min={1}
+                            value={row.lap}
+                            onChange={(e) => updateScenario(index, { lap: Number(e.target.value) })}
+                            className="w-20"
+                            aria-label={`Scenario ${index + 1} pit lap`}
+                          />
+                          <Select
+                            value={row.compound}
+                            onValueChange={(value) => updateScenario(index, { compound: value })}
+                          >
+                            <SelectTrigger
+                              className="w-28"
+                              aria-label={`Scenario ${index + 1} compound`}
+                            >
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {COMPOUNDS.map((compound) => (
+                                <SelectItem key={compound} value={compound}>
+                                  {compound}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </>
+                      )}
                       <Input
                         type="text"
-                        placeholder={`Pit lap ${row.lap}`}
+                        placeholder={row.noFurtherStop ? "No further stop" : `Pit lap ${row.lap}`}
                         value={row.label}
                         onChange={(e) => updateScenario(index, { label: e.target.value })}
                         className="flex-1"
@@ -748,6 +801,18 @@ export function SimulatorPage() {
                   disabled={scenarios.length >= MAX_SCENARIOS}
                 >
                   + Add Scenario ({scenarios.length}/{MAX_SCENARIOS})
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="ml-2"
+                  onClick={addNoFurtherStopScenario}
+                  disabled={
+                    scenarios.length >= MAX_SCENARIOS || scenarios.some((row) => row.noFurtherStop)
+                  }
+                >
+                  + Add No Further Stop
                 </Button>
               </>
             )}
@@ -932,7 +997,9 @@ export function SimulatorPage() {
                 {strategies.map((strategy, index) => (
                   <PlanExplanationCard
                     key={index}
-                    planLabel={strategy.label ?? `Plan ${index + 1}`}
+                    planLabel={
+                      strategy.label ?? (strategy.no_further_stop ? "No further stop" : `Plan ${index + 1}`)
+                    }
                     strategy={strategy}
                     driversById={driversById}
                   />

@@ -1,6 +1,6 @@
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
 import { CHART_TOOLTIP_STYLE, SCENARIO_SERIES_COLORS } from "@/utils/constants"
-import { formatRaceTime } from "@/utils/formatters"
+import { formatRaceTime, formatStrategyName } from "@/utils/formatters"
 import type { SimulatedRaceOutcome } from "@/types"
 
 interface PositionDistributionChartProps {
@@ -24,7 +24,7 @@ function buildSeries(strategies: SimulatedRaceOutcome[]): StrategySeries[] {
     // scenarios can share a label, e.g. both left blank) — recharts'
     // `name` prop carries the display text separately.
     key: `s${index}`,
-    label: strategy.label ?? `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`,
+    label: formatStrategyName(strategy, index),
     color: SCENARIO_SERIES_COLORS[index % SCENARIO_SERIES_COLORS.length],
   }))
 }
