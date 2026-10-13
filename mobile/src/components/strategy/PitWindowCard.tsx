@@ -95,6 +95,14 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
           Unconfirmed estimate — not yet bounded by a real pit-window search.
         </Text>
       )}
+      {/* Same note as web's PitWindowCard (Day 6d): the compound is the one
+          most teams fit with that many laps left, not a model output. */}
+      {!view.noFurtherStop && view.recommendedCompound && (
+        <Text className="text-[10px] text-muted">
+          {view.recommendedCompound} is what most teams fit with that many laps left; the models decide
+          when to stop.
+        </Text>
+      )}
       {view.explanation && <Text className="text-sm text-muted">{view.explanation.narrative}</Text>}
       {view.asOfLapNumber !== null && <Text className="text-[10px] text-muted">As of lap {view.asOfLapNumber}</Text>}
       {view.pitProbability !== null && (

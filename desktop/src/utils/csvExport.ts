@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core"
 import { save } from "@tauri-apps/plugin-dialog"
 import { writeTextFile } from "@tauri-apps/plugin-fs"
 import type { SimulatedRaceOutcome } from "@/types"
+import { formatStrategyName } from "@/utils/formatters"
 
 // Mean Position/P(Gain)/P(Hold)/P(Lose) added alongside the What-If
 // Simulator multi-scenario rebuild (see
@@ -49,7 +50,7 @@ function buildCsv(strategies: SimulatedRaceOutcome[], startingPosition: number):
   const rows = strategies.map((strategy, index) => {
     const { gain, hold, lose } = splitGainHoldLose(strategy, startingPosition)
     return [
-      strategy.label ?? `Plan ${index + 1}`,
+      formatStrategyName(strategy, index),
       strategy.pit_laps.join(" | "),
       String(strategy.position_gain_loss),
       strategy.mean_position.toFixed(2),

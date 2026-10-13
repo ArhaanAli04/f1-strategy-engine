@@ -27,7 +27,7 @@ function formatOvertakingEnrichment(entry: OvertakingDriver): string {
   }
   if (entry.rival_projected_pit_lap != null && entry.rival_pit_probability != null) {
     parts.push(
-      `pits ~lap ${entry.rival_projected_pit_lap} (${Math.round(entry.rival_pit_probability * 100)}%)`,
+      `pits in ${Math.round(entry.rival_pit_probability * 100)}% of simulations, most likely lap ${entry.rival_projected_pit_lap}`,
     )
   }
   return parts.join(" · ")
@@ -56,7 +56,7 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
   const driversById = new Map<string, DriverResponse>()
   for (const driver of drivers ?? []) driversById.set(driver.id, driver)
 
-  const { position_gain_loss, explanation } = strategy
+  const { position_gain_loss, explanation, no_further_stop } = strategy
   const isGain = position_gain_loss > 0
   const isLoss = position_gain_loss < 0
   const freshCompound = strategy.compounds.at(-1)
@@ -89,10 +89,14 @@ export function PlanExplanationCard({ planLabel, strategy }: PlanExplanationCard
         {heading}
       </Text>
 
-      <Text className="text-xs text-muted">
-        Pit stop cost:{" "}
-        <Text className="font-mono text-foreground">{explanation.pit_cost_seconds.toFixed(1)}s</Text>
-      </Text>
+      {no_further_stop ? (
+        <Text className="text-xs text-muted">No pit stop: stays out on the current tyre to the flag.</Text>
+      ) : (
+        <Text className="text-xs text-muted">
+          Pit stop cost:{" "}
+          <Text className="font-mono text-foreground">{explanation.pit_cost_seconds.toFixed(1)}s</Text>
+        </Text>
+      )}
 
       {explanation.drivers_overtaken.length === 0 ? (
         <Text className="text-xs text-muted">

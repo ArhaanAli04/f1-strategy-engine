@@ -4,6 +4,7 @@ import { useState } from "react"
 import { Text, View } from "react-native"
 import { BarGroup, CartesianChart } from "victory-native"
 import { SCENARIO_SERIES_COLORS } from "@/utils/constants"
+import { formatStrategyName } from "@/utils/formatters"
 import type { SimulatedRaceOutcome } from "@/types"
 
 interface PositionDistributionChartProps {
@@ -46,9 +47,6 @@ const LOSS_COLOR = "#EF4444"
 const MEAN_COLUMN_STYLE = { width: 56 }
 const PERCENT_COLUMN_STYLE = { width: 48 }
 
-export function strategyLabel(strategy: SimulatedRaceOutcome, index: number): string {
-  return strategy.label ?? `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`
-}
 
 function LegendSwatch({ color, label }: { color: string; label: string }) {
   return (
@@ -76,7 +74,7 @@ export function PositionDistributionChart({ strategies, startingPosition }: Posi
 
   const series = strategies.slice(0, SERIES_KEYS.length).map((strategy, index) => ({
     key: SERIES_KEYS[index],
-    label: strategyLabel(strategy, index),
+    label: formatStrategyName(strategy, index),
     color: SCENARIO_SERIES_COLORS[index % SCENARIO_SERIES_COLORS.length],
   }))
 
@@ -167,7 +165,7 @@ export function PositionDistributionChart({ strategies, startingPosition }: Posi
               <View className="flex-1 flex-row items-center gap-2">
                 <View className="h-3 w-1 rounded-full" style={{ backgroundColor: color }} />
                 <Text numberOfLines={1} className="flex-1 text-xs text-foreground">
-                  {strategyLabel(strategy, index)}
+                  {formatStrategyName(strategy, index)}
                 </Text>
               </View>
               <Text style={MEAN_COLUMN_STYLE} className="text-right font-mono text-xs text-foreground">

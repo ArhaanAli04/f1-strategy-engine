@@ -222,6 +222,30 @@ describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
     expect(screen.queryByLabelText("Scenario 1 pit lap")).not.toBeInTheDocument()
   })
 
+  it("sends no_further_stop instead of pit laps when Single Plan's No further stop is ticked", async () => {
+    baseSetup()
+    const resolvingMutateAsync = vi.fn().mockResolvedValue({ task_id: "task-1", status: "PENDING" })
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(resolvingMutateAsync),
+    )
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("checkbox", { name: /No further stop/ }))
+
+    expect(screen.queryByLabelText("Pit stop 1 lap")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Run Simulation" }))
+
+    await waitFor(() => expect(resolvingMutateAsync).toHaveBeenCalledTimes(1))
+    const payload = resolvingMutateAsync.mock.calls[0][0] as SimulateStrategyRequest
+    expect(payload.no_further_stop).toBe(true)
+    expect(payload.pit_laps).toBeUndefined()
+    expect(payload.scenarios).toBeUndefined()
+  })
+
   it("switching to Compare Scenarios shows scenario rows instead of the pit-stop builder", async () => {
     baseSetup()
     vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
@@ -266,6 +290,36 @@ describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
     ])
   })
 
+  it("adds one No Further Stop scenario and sends it without pit laps", async () => {
+    baseSetup()
+    const resolvingMutateAsync = vi.fn().mockResolvedValue({ task_id: "task-1", status: "PENDING" })
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(resolvingMutateAsync),
+    )
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: undefined,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    await goToDesignStrategyStep()
+    fireEvent.click(screen.getByRole("button", { name: "Compare Scenarios" }))
+    fireEvent.click(screen.getByRole("button", { name: "+ Add No Further Stop" }))
+
+    // Only one: a second would be the same plan.
+    expect(screen.getByRole("button", { name: "+ Add No Further Stop" })).toBeDisabled()
+    expect(screen.queryByLabelText("Scenario 3 pit lap")).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Run Simulation" }))
+
+    await waitFor(() => expect(resolvingMutateAsync).toHaveBeenCalledTimes(1))
+    const payload = resolvingMutateAsync.mock.calls[0][0] as SimulateStrategyRequest
+    expect(payload.scenarios?.[2]).toEqual({
+      pit_laps: [],
+      compounds: [],
+      no_further_stop: true,
+      label: "No further stop",
+    })
+  })
+
   it("caps scenarios at 4 and disables Add Scenario once the cap is reached", async () => {
     baseSetup()
     vi.mocked(useSimulateStrategy).mockImplementation(() => useFakeSimulateStrategy(vi.fn()))
@@ -299,6 +353,75 @@ describe("SimulatorPage — Compare Scenarios mode (Checkpoint 4)", () => {
     fireEvent.click(screen.getByLabelText("Remove scenario 1"))
 
     expect(screen.getByRole("button", { name: "Run Simulation" })).toBeDisabled()
+  })
+})
+
+// A rival's projected stop (Day 6d): the chance it stops at all, then its
+// most likely lap.
+describe("SimulatorPage — results", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    baseSetup()
+  })
+
+  it("shows a rival's chance of stopping and its most likely lap", async () => {
+    vi.mocked(useSimulateStrategy).mockImplementation(() =>
+      useFakeSimulateStrategy(vi.fn().mockResolvedValue({ task_id: "task-1", status: "PENDING" })),
+    )
+    const done: SimulateTaskStatusResponse = {
+      task_id: "task-1",
+      status: "SUCCESS",
+      error: null,
+      result: {
+        driver_id: "driver-2",
+        starting_position: 3,
+        strategies: [
+          {
+            pit_laps: [],
+            compounds: [],
+            no_further_stop: true,
+            label: null,
+            predicted_finish_time: 5000,
+            position_gain_loss: 1,
+            mean_position: 2.1,
+            position_probabilities: [{ position: 2, probability: 1 }],
+            confidence_interval: [4990, 5010],
+            explanation: {
+              pit_cost_seconds: 22,
+              drivers_overtaken: [
+                {
+                  position: 2,
+                  driver_id: "driver-1",
+                  gap_seconds: -0.4,
+                  finish_ahead_probability: 1,
+                  rival_projected_pit_lap: 26,
+                  rival_pit_probability: 1,
+                },
+              ],
+              remaining_laps: 19,
+              fresh_tyre_gain_per_lap: 0,
+              total_recoverable_seconds: 0,
+            },
+          },
+        ],
+      },
+    }
+    vi.mocked(useSimulationResult).mockReturnValue({
+      data: done,
+      timedOut: false,
+    } as unknown as ReturnType<typeof useSimulationResult>)
+
+    // A SUCCESS result moves the page straight to its results step.
+    render(<SimulatorPage />)
+
+    expect(
+      await screen.findByText(
+        "100% chance you finish ahead · pits in 100% of simulations, most likely lap 26",
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText("No pit stop: stays out on the current tyre to the flag."),
+    ).toBeInTheDocument()
   })
 })
 

@@ -1,4 +1,5 @@
 import { COMPOUND_COLORS } from "./constants"
+import type { SimulatedRaceOutcome } from "@/types"
 
 // Formats seconds as F1 broadcast-style lap/sector time: "1:31.234" once
 // past a minute, "31.234" below it. null/undefined (no time set) -> "—".
@@ -49,4 +50,13 @@ const COMPOUND_LABELS: Record<string, string> = {
 
 export function getCompoundLabel(compound: string): string {
   return COMPOUND_LABELS[compound.toUpperCase()] ?? "?"
+}
+
+// A Simulator result's display name: the scenario's own label, else what the
+// plan was ("No further stop", the simulation deciding, or its pit laps).
+export function formatStrategyName(strategy: SimulatedRaceOutcome, index: number): string {
+  if (strategy.label != null) return strategy.label
+  if (strategy.no_further_stop) return "No further stop"
+  if (strategy.pit_laps.length === 0) return "Simulation decides"
+  return `Plan ${index + 1} (L${strategy.pit_laps.join(", L")})`
 }

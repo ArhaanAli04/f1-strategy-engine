@@ -9,13 +9,14 @@ import {
   FlatList,
   Pressable,
   ScrollView,
+  Switch,
   Text,
   TextInput,
   View,
 } from "react-native"
 import { CartesianChart, HorizontalBar } from "victory-native"
 import { PlanExplanationCard } from "@/components/strategy/PlanExplanationCard"
-import { PositionDistributionChart, strategyLabel } from "@/components/strategy/PositionDistributionChart"
+import { PositionDistributionChart } from "@/components/strategy/PositionDistributionChart"
 import { useCurrentRace } from "@/hooks/useCurrentRace"
 import { useDriverLaps } from "@/hooks/useDriverLaps"
 import { useDrivers } from "@/hooks/useDrivers"
@@ -26,7 +27,7 @@ import { useSimulateStrategy, useSimulationQuota, useSimulationResult } from "@/
 import { SCENARIO_SERIES_COLORS } from "@/utils/constants"
 import { isActiveDriver } from "@/utils/drivers"
 import { getApiErrorMessage } from "@/utils/errors"
-import { formatRaceTime } from "@/utils/formatters"
+import { formatRaceTime, formatStrategyName } from "@/utils/formatters"
 import * as haptics from "@/utils/haptics"
 import type { SimulateStrategyRequest } from "@/types"
 
@@ -42,10 +43,13 @@ interface PitStopRow {
   compound: string
 }
 
+// noFurtherStop: the "No further stop" scenario (stay out to the flag),
+// whose lap and compound are unused.
 interface ScenarioRow {
   lap: number
   compound: string
   label: string
+  noFurtherStop: boolean
 }
 
 // Backend validates each compounds[] entry against exactly this set
@@ -216,9 +220,11 @@ export default function SimulatorScreen() {
   const [remainingLaps, setRemainingLaps] = useState("20")
   const [mode, setMode] = useState<SimulationMode>("single")
   const [pitStops, setPitStops] = useState<PitStopRow[]>([{ lap: 15, compound: "HARD" }])
+  // Single Plan's "No further stop": the driver stays out to the flag.
+  const [noFurtherStop, setNoFurtherStop] = useState(false)
   const [scenarios, setScenarios] = useState<ScenarioRow[]>([
-    { lap: 30, compound: "HARD", label: "" },
-    { lap: 33, compound: "HARD", label: "" },
+    { lap: 30, compound: "HARD", label: "", noFurtherStop: false },
+    { lap: 33, compound: "HARD", label: "", noFurtherStop: false },
   ])
   const [taskId, setTaskId] = useState<string | null>(null)
 
@@ -286,7 +292,18 @@ export default function SimulatorScreen() {
 
   function addScenario() {
     setScenarios((rows) =>
-      rows.length >= MAX_SCENARIOS ? rows : [...rows, { lap: Number(remainingLaps) || 1, compound: "HARD", label: "" }],
+      rows.length >= MAX_SCENARIOS
+        ? rows
+        : [...rows, { lap: Number(remainingLaps) || 1, compound: "HARD", label: "", noFurtherStop: false }],
+    )
+  }
+
+  // At most one: two "No further stop" scenarios would be the same plan.
+  function addNoFurtherStopScenario() {
+    setScenarios((rows) =>
+      rows.length >= MAX_SCENARIOS || rows.some((row) => row.noFurtherStop)
+        ? rows
+        : [...rows, { lap: Number(remainingLaps) || 1, compound: "HARD", label: "", noFurtherStop: true }],
     )
   }
 
@@ -313,17 +330,28 @@ export default function SimulatorScreen() {
       mode === "compare"
         ? {
             ...basePayload,
-            scenarios: scenarios.map((row) => ({
-              pit_laps: [row.lap],
-              compounds: [row.compound],
-              label: row.label.trim() || `Pit lap ${row.lap}`,
-            })),
+            scenarios: scenarios.map((row) =>
+              row.noFurtherStop
+                ? {
+                    pit_laps: [],
+                    compounds: [],
+                    no_further_stop: true,
+                    label: row.label.trim() || "No further stop",
+                  }
+                : {
+                    pit_laps: [row.lap],
+                    compounds: [row.compound],
+                    label: row.label.trim() || `Pit lap ${row.lap}`,
+                  },
+            ),
           }
-        : {
-            ...basePayload,
-            pit_laps: pitStops.map((row) => row.lap),
-            compounds: pitStops.map((row) => row.compound),
-          }
+        : noFurtherStop
+          ? { ...basePayload, no_further_stop: true }
+          : {
+              ...basePayload,
+              pit_laps: pitStops.map((row) => row.lap),
+              compounds: pitStops.map((row) => row.compound),
+            }
     // A bad current_lap (validate_current_lap, see CLAUDE.md's Deferred
     // Wiring) rejects synchronously here with a 404/422 — stay on step 2 and
     // surface it via simulateMutation.error below instead of advancing to
@@ -352,11 +380,13 @@ export default function SimulatorScreen() {
   // The backend rejects an empty scenarios list; an empty single plan is the
   // valid "let the simulation decide" case.
   const step2Valid = mode === "single" || scenarios.length > 0
+  const noFurtherStopDisabled =
+    scenarios.length >= MAX_SCENARIOS || scenarios.some((row) => row.noFurtherStop)
 
   const strategies = simulationResult.data?.result?.strategies ?? []
   const startingPosition = simulationResult.data?.result?.starting_position ?? 0
   const chartData = strategies.map((strategy, index) => ({
-    name: strategyLabel(strategy, index),
+    name: formatStrategyName(strategy, index),
     gain: strategy.position_gain_loss > 0 ? strategy.position_gain_loss : 0,
     loss: strategy.position_gain_loss < 0 ? strategy.position_gain_loss : 0,
   }))
@@ -470,42 +500,56 @@ export default function SimulatorScreen() {
 
           {mode === "single" ? (
             <>
-              <Text className="text-xs text-muted">
-                Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo simulation
-                decide pit timing autonomously.
-              </Text>
-              <FlatList
-                data={pitStops}
-                keyExtractor={(_, index) => String(index)}
-                scrollEnabled={false}
-                ItemSeparatorComponent={() => <View className="h-2" />}
-                renderItem={({ item: row, index }) => (
-                  <View className="flex-row items-center gap-2">
-                    <TextInput
-                      value={String(row.lap)}
-                      onChangeText={(text) => updatePitStop(index, { lap: Number(text) || 0 })}
-                      keyboardType="number-pad"
-                      className={`${inputClassName} w-20`}
-                    />
-                    <View className="flex-1">
-                      <CompoundPicker
-                        value={row.compound}
-                        onChange={(value) => updatePitStop(index, { compound: value })}
-                      />
-                    </View>
-                    <RemoveButton label={`Remove pit stop ${index + 1}`} onPress={() => removePitStop(index)} />
-                  </View>
-                )}
-              />
-              <Pressable onPress={addPitStop} className="items-center rounded-md border border-white/10 py-2.5">
-                <Text className="text-sm font-medium text-foreground">+ Add Pit Stop</Text>
-              </Pressable>
+              <View className="flex-row items-center justify-between rounded-md border border-white/10 px-3 py-2.5">
+                <Text className="flex-1 text-sm text-foreground">
+                  No further stop: stay out on {currentCompound} to the flag
+                </Text>
+                <Switch
+                  value={noFurtherStop}
+                  onValueChange={setNoFurtherStop}
+                  accessibilityLabel="No further stop"
+                />
+              </View>
+              {!noFurtherStop && (
+                <>
+                  <Text className="text-xs text-muted">
+                    Add planned pit stops (lap + compound). Leave empty to let the Monte Carlo simulation
+                    decide pit timing autonomously.
+                  </Text>
+                  <FlatList
+                    data={pitStops}
+                    keyExtractor={(_, index) => String(index)}
+                    scrollEnabled={false}
+                    ItemSeparatorComponent={() => <View className="h-2" />}
+                    renderItem={({ item: row, index }) => (
+                      <View className="flex-row items-center gap-2">
+                        <TextInput
+                          value={String(row.lap)}
+                          onChangeText={(text) => updatePitStop(index, { lap: Number(text) || 0 })}
+                          keyboardType="number-pad"
+                          className={`${inputClassName} w-20`}
+                        />
+                        <View className="flex-1">
+                          <CompoundPicker
+                            value={row.compound}
+                            onChange={(value) => updatePitStop(index, { compound: value })}
+                          />
+                        </View>
+                        <RemoveButton label={`Remove pit stop ${index + 1}`} onPress={() => removePitStop(index)} />
+                      </View>
+                    )}
+                  />
+                  <Pressable onPress={addPitStop} className="items-center rounded-md border border-white/10 py-2.5">
+                    <Text className="text-sm font-medium text-foreground">+ Add Pit Stop</Text>
+                  </Pressable>
+                </>
+              )}
             </>
           ) : (
             <>
               <Text className="text-xs text-muted">
-                Compare up to {MAX_SCENARIOS} candidate pit laps side by side. Each scenario shares the
-                same random race conditions (safety cars, lap-time variance), so any difference between
+                Compare up to {MAX_SCENARIOS} candidate pit laps, or staying out to the flag, side by
+                side. Each scenario shares the same random race conditions (safety cars, lap-time variance), so any difference between
                 them reflects the pit-lap decision alone, not chance.
               </Text>
               {/* A row per scenario was too wide for a phone (web puts lap,
@@ -519,27 +563,33 @@ export default function SimulatorScreen() {
                   />
                   <View className="flex-1 gap-2">
                     <View className="flex-row items-center gap-2">
-                      <TextInput
-                        value={String(row.lap)}
-                        onChangeText={(text) => updateScenario(index, { lap: Number(text) || 0 })}
-                        keyboardType="number-pad"
-                        accessibilityLabel={`Scenario ${index + 1} pit lap`}
-                        className={`${inputClassName} w-20`}
-                      />
+                      {!row.noFurtherStop && (
+                        <TextInput
+                          value={String(row.lap)}
+                          onChangeText={(text) => updateScenario(index, { lap: Number(text) || 0 })}
+                          keyboardType="number-pad"
+                          accessibilityLabel={`Scenario ${index + 1} pit lap`}
+                          className={`${inputClassName} w-20`}
+                        />
+                      )}
                       <TextInput
                         value={row.label}
                         onChangeText={(text) => updateScenario(index, { label: text })}
-                        placeholder={`Pit lap ${row.lap}`}
+                        placeholder={row.noFurtherStop ? "No further stop" : `Pit lap ${row.lap}`}
                         placeholderTextColor="#555"
                         accessibilityLabel={`Scenario ${index + 1} label`}
                         className={`${inputClassName} flex-1`}
                       />
                       <RemoveButton label={`Remove scenario ${index + 1}`} onPress={() => removeScenario(index)} />
                     </View>
-                    <CompoundPicker
-                      value={row.compound}
-                      onChange={(value) => updateScenario(index, { compound: value })}
-                    />
+                    {row.noFurtherStop ? (
+                      <Text className="text-xs text-muted">No stop, {currentCompound} to the flag</Text>
+                    ) : (
+                      <CompoundPicker
+                        value={row.compound}
+                        onChange={(value) => updateScenario(index, { compound: value })}
+                      />
+                    )}
                   </View>
                 </View>
               ))}
@@ -552,6 +602,14 @@ export default function SimulatorScreen() {
                 <Text className="text-sm font-medium text-foreground">
                   + Add Scenario ({scenarios.length}/{MAX_SCENARIOS})
                 </Text>
+              </Pressable>
+              <Pressable
+                onPress={addNoFurtherStopScenario}
+                disabled={noFurtherStopDisabled}
+                className="items-center rounded-md border border-white/10 py-2.5"
+                style={{ opacity: noFurtherStopDisabled ? DISABLED_OPACITY : 1 }}
+              >
+                <Text className="text-sm font-medium text-foreground">+ Add No Further Stop</Text>
               </Pressable>
             </>
           )}
@@ -681,7 +739,7 @@ export default function SimulatorScreen() {
               <View className="flex-1 gap-1">
                 <View className="flex-row items-baseline justify-between gap-2">
                   <Text numberOfLines={1} className="flex-1 text-sm font-semibold text-foreground">
-                    {strategyLabel(strategy, index)}
+                    {formatStrategyName(strategy, index)}
                   </Text>
                   <Text
                     className="font-mono text-base font-semibold"
@@ -723,7 +781,7 @@ export default function SimulatorScreen() {
               {strategies.map((strategy, index) => (
                 <PlanExplanationCard
                   key={index}
-                  planLabel={strategy.label ?? `Plan ${index + 1}`}
+                  planLabel={strategy.label ?? (strategy.no_further_stop ? "No further stop" : `Plan ${index + 1}`)}
                   strategy={strategy}
                 />
               ))}

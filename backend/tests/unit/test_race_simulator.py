@@ -20,14 +20,20 @@ from backend.services.ml import tire_deg_model
 from backend.services.ml.pit_predictor import FEATURE_COLUMNS as PIT_FEATURE_COLUMNS
 from backend.services.ml.pit_predictor import _build_model
 from backend.services.ml.race_simulator import (
+    COMPOUND_ENCODING,
     SC_BUNCHED_GAP_SECONDS,
     SC_LAP_TIME_MULTIPLIER,
+    SC_PIT_LOSS_FACTOR,
     DriverPositionDistribution,
     DriverRaceState,
     RaceSimulationInput,
     RaceSimulationResult,
     _advance_lap,
+    _autonomous_pit_flags,
+    _compound_after_stop,
+    _schedule_own_stops,
     _tire_deg_predictions,
+    dry_compound_for_stop,
     simulate_race,
 )
 from backend.services.ml.safety_car_model import SafetyCarModel
@@ -120,13 +126,13 @@ def sc_model() -> SafetyCarModel:
 def _tire_deg_predictions_inputs(
     race_state: RaceSimulationInput, n_sims: int = 2
 ) -> dict[str, Any]:
-    n_drivers = len(race_state.drivers)
     return {
         "race_state": race_state,
-        "compound_groups": {COMPOUND: np.arange(n_drivers)},
-        "compound_encoded_by_driver": np.array(
-            [d.compound_encoded for d in race_state.drivers], dtype=np.int64
+        "compound_code": np.tile(
+            np.array([d.compound_encoded for d in race_state.drivers], dtype=np.int64),
+            (n_sims, 1),
         ),
+        "compound_names": {COMPOUND_ENCODED: COMPOUND},
         "lap_number": race_state.current_lap + 1,
         "tyre_age": np.tile(
             np.array([d.tyre_age_laps for d in race_state.drivers], dtype=np.int64),
@@ -228,12 +234,11 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
     )
     lap_number = race_state.current_lap + 1
     fuel_load_penalty = 1.5
-    compound_groups = {COMPOUND: np.arange(n_drivers)}
 
     predicted_delta, predicted_life_remaining = _tire_deg_predictions(
         race_state=race_state,
-        compound_groups=compound_groups,
-        compound_encoded_by_driver=compound_encoded_by_driver,
+        compound_code=np.tile(compound_encoded_by_driver, (n_sims, 1)),
+        compound_names={COMPOUND_ENCODED: COMPOUND},
         tire_deg_pipelines={COMPOUND: pipeline},
         lap_number=lap_number,
         tyre_age=tyre_age,
@@ -243,8 +248,9 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
 
     # Ground truth: the pre-memoization approach — build the full
     # (n_sims * n_drivers)-row feature matrix with no deduplication at all
-    # and predict on every row directly.
-    tyre_age_flat = tyre_age.ravel().astype(np.int64)
+    # and predict on every row directly. Ages are settled first, as the
+    # simulator feeds them since Day 6d (tire_deg_model.settled_tyre_ages).
+    tyre_age_flat = np.maximum(tyre_age.ravel(), tire_deg_model.SETTLED_TYRE_AGE).astype(np.int64)
     compound_encoded_flat = np.tile(compound_encoded_by_driver, n_sims)
     driver_id_encoded_flat = np.tile(driver_id_encoded, n_sims)
     naive_features = np.column_stack(
@@ -270,7 +276,7 @@ def test_tire_deg_predictions_dedup_matches_naive_predictions(
 
     # Sanity check this test actually exercises deduplication, not a
     # degenerate all-unique or all-identical case.
-    n_unique_tyre_ages = len(np.unique(tyre_age))
+    n_unique_tyre_ages = len(np.unique(tyre_age_flat))
     assert 1 < n_unique_tyre_ages < tyre_age.size
 
     np.testing.assert_array_equal(predicted_delta, naive_delta)
@@ -411,7 +417,7 @@ def test_advance_lap_sc_keeps_the_running_order() -> None:
     gap = SC_BUNCHED_GAP_SECONDS
     # Order before the lap: driver 1, 2, 0, 3. Driver 2 pits under the SC.
     assert cumulative_time[0, 1] == pytest.approx(1030.0)
-    assert cumulative_time[0, 2] == pytest.approx(1030.0 + gap + 22.0)
+    assert cumulative_time[0, 2] == pytest.approx(1030.0 + gap + 22.0 * SC_PIT_LOSS_FACTOR)
     assert cumulative_time[0, 0] == pytest.approx(1030.0 + 2 * gap)
     assert cumulative_time[0, 3] == pytest.approx(1030.0 + 3 * gap)
     assert tyre_age[0, 2] == 0
@@ -639,6 +645,154 @@ def test_sc_lap_time_derived_from_field_median_baseline(
         assert finish_time == pytest.approx(
             expected_finish_time + rank * SC_BUNCHED_GAP_SECONDS, abs=1e-6
         )
+
+
+# --- stops already made, and a plan as the whole plan (Day 6d, 2026-10-11) ---
+
+
+@pytest.mark.unit
+def test_autonomous_pit_flags_keep_out_a_car_that_met_the_rule_while_its_tyre_lasts() -> None:
+    scores = np.full((1, 4), 0.9)
+    tyre_age = np.full((1, 4), 10, dtype=np.int64)
+    rule_met = np.array([[False, True, True, True]])
+    life = np.array([[5.0, 20.0, 5.0, 20.0]])
+    tyre_age[0, 3] = 2  # too soon after a stop, whatever the rule says
+
+    flags = _autonomous_pit_flags(scores, tyre_age, rule_met, life, laps_to_race_end=10)
+
+    # Rule not met: the pit model decides. Met, tyre lasts the 10 laps: out.
+    # Met, tyre won't last: the pit model decides.
+    assert flags.tolist() == [[True, False, True, False]]
+
+
+@pytest.mark.unit
+def test_a_tyre_at_the_life_cap_counts_as_lasting_however_many_laps_are_left() -> None:
+    """predicted_life_remaining stops at MAX_LOOKAHEAD_LAPS: with more laps
+    than that to go, a tyre at the cap still counts as lasting (Canada from lap
+    24 has 44 laps left), one below it doesn't."""
+    scores = np.full((1, 2), 0.9)
+    tyre_age = np.full((1, 2), 10, dtype=np.int64)
+    rule_met = np.array([[True, True]])
+    life = np.array([[float(MAX_LOOKAHEAD_LAPS), MAX_LOOKAHEAD_LAPS - 1.0]])
+
+    flags = _autonomous_pit_flags(scores, tyre_age, rule_met, life, laps_to_race_end=44)
+
+    assert flags.tolist() == [[False, True]]
+
+
+@pytest.mark.unit
+def test_compound_after_stop_follows_laps_left_and_the_two_compound_rule() -> None:
+    hard, medium, soft, inter = (
+        COMPOUND_ENCODING[c] for c in ("HARD", "MEDIUM", "SOFT", "INTERMEDIATE")
+    )
+    on = np.array([medium, hard, hard, inter])
+    met = np.array([True, True, False, False])
+
+    # 30 laps left: HARD, unless the car is on HARD and still needs a second
+    # dry compound; a wet compound stays.
+    assert _compound_after_stop(on, met, 30).tolist() == [hard, hard, medium, inter]
+    assert _compound_after_stop(on, met, 20).tolist() == [medium, medium, medium, inter]
+    assert _compound_after_stop(on, met, 5).tolist() == [soft, soft, soft, inter]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("current", "rule_met", "laps_left", "fitted"),
+    [
+        ("MEDIUM", True, 30, "HARD"),
+        ("HARD", False, 30, "MEDIUM"),  # needs a second dry compound
+        ("HARD", True, 30, "HARD"),
+        ("SOFT", True, 20, "MEDIUM"),
+        ("MEDIUM", False, 20, "HARD"),
+        ("MEDIUM", True, 10, "SOFT"),
+        ("SOFT", False, 10, "MEDIUM"),
+    ],
+)
+def test_dry_compound_for_stop_follows_the_table(
+    current: str, rule_met: bool, laps_left: int, fitted: str
+) -> None:
+    assert dry_compound_for_stop(current, rule_met, laps_left) == fitted
+
+
+@pytest.mark.unit
+def test_schedule_own_stops_spreads_a_decision_over_the_3_lap_window() -> None:
+    """Columns: decided now with delay 0, 2, and 2 with 1 lap left (capped to
+    1); not decided; already scheduled for this lap; already scheduled later,
+    decided again (ignored)."""
+    decided = np.array([[True, True, True, False, False, True]])
+    planned = np.array([[0, 0, 0, 0, 30, 32]], dtype=np.int64)
+    delay = np.array([[0, 2, 2, 1, 0, 0]], dtype=np.int64)
+
+    stops, remaining = _schedule_own_stops(decided, planned, delay, 30, laps_to_race_end=2)
+    assert stops.tolist() == [[True, False, False, False, True, False]]
+    assert remaining.tolist() == [[0, 32, 32, 0, 0, 32]]
+
+    _, capped = _schedule_own_stops(decided, planned, delay, 30, laps_to_race_end=1)
+    assert capped.tolist() == [[0, 31, 31, 0, 0, 32]]
+
+
+def _always_pit_model() -> MagicMock:
+    def _predict_proba(features: np.ndarray) -> np.ndarray:
+        return np.tile([0.05, 0.95], (features.shape[0], 1))
+
+    model = MagicMock()
+    model.predict_proba.side_effect = _predict_proba
+    return model
+
+
+def assert_one_stop_spread_over(projected: list[tuple[int, float]], laps: list[int]) -> None:
+    """One stop per run, falling on each of these laps in some runs."""
+    assert [lap for lap, _ in projected] == laps
+    assert sum(probability for _, probability in projected) == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_a_forced_plan_is_the_whole_plan(
+    race_state: RaceSimulationInput, tire_deg_pipelines: dict[str, Any], sc_model: SafetyCarModel
+) -> None:
+    """With a pit model that always wants a stop: a driver with a plan stops on
+    its laps only, an empty plan means no stop, and an unplanned car is left to
+    the model (tyre age 5-8 at lap 45, so it decides on lap 46 and stops once
+    within the 3-lap window, laps 46-48)."""
+    planned, no_stop, free = (d.driver_id for d in race_state.drivers[:3])
+
+    result = simulate_race(
+        race_state,
+        tire_deg_pipelines,
+        _always_pit_model(),
+        sc_model,
+        n_simulations=50,
+        rng_seed=5,
+        forced_pit_laps={planned: {47: ("HARD", 0)}, no_stop: {}},
+    )
+    pits = {d.driver_id: d.projected_pit_laps for d in result.driver_distributions}
+
+    assert pits[planned] == [(47, 1.0)]
+    assert pits[no_stop] == []
+    assert_one_stop_spread_over(pits[free], [46, 47, 48])
+
+
+@pytest.mark.unit
+@pytest.mark.slow
+def test_a_car_that_met_the_two_compound_rule_runs_to_the_flag_on_a_lasting_tyre(
+    race_state: RaceSimulationInput, tire_deg_pipelines: dict[str, Any], sc_model: SafetyCarModel
+) -> None:
+    """The synthetic tyre model's deltas stay far below the degradation
+    threshold, so every tyre lasts the 3 remaining laps: a car that has met the
+    rule never stops, one that hasn't stops as the pit model says."""
+    met = DriverRaceState(**{**race_state.drivers[0].__dict__, "two_compound_rule_met": True})
+    state = RaceSimulationInput(
+        **{**race_state.__dict__, "drivers": [met, *race_state.drivers[1:]]}
+    )
+
+    result = simulate_race(
+        state, tire_deg_pipelines, _always_pit_model(), sc_model, n_simulations=50, rng_seed=5
+    )
+    pits = {d.driver_id: d.projected_pit_laps for d in result.driver_distributions}
+
+    assert pits[met.driver_id] == []
+    assert_one_stop_spread_over(pits[race_state.drivers[1].driver_id], [46, 47, 48])
 
 
 # --- projected_pit_laps / finish_ahead_probability (What-If Simulator

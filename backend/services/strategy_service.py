@@ -109,7 +109,13 @@ from backend.services.cache_service import cache_get, cacheable
 from backend.services.ml import explainability as explainability
 from backend.services.ml import pit_predictor as pit_predictor
 from backend.services.ml import tire_deg_model
-from backend.services.ml.race_simulator import LAP_TIME_NOISE_STD_SECONDS, PIT_STOP_SECONDS
+from backend.services.ml.race_simulator import (
+    COMPOUND_ENCODING,
+    LAP_TIME_NOISE_STD_SECONDS,
+    PIT_STOP_SECONDS,
+    SC_PIT_LOSS_FACTOR,
+    dry_compound_for_stop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +138,7 @@ _COMPOUND_TO_MODEL_SUFFIX = {
     "WET": "wet",
 }
 _MODEL_VERSION_TAG = "production"
-_COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
+_COMPOUND_ENCODING = COMPOUND_ENCODING
 # Same set as prediction_worker.py's identical constant — used only for the
 # safety_car_model.probability_within wet_track argument, in
 # get_pit_window_with_explanation's pit_predictor SHAP context.
@@ -140,10 +146,10 @@ _WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 PIT_WINDOW_LOOKAHEAD_LAPS = 15
 # Under a safety car the field is slow, so a stop costs roughly half the usual
-# time; under a virtual safety car, a little more. Assumed, like
-# race_simulator's SC constants (no pit-loss measurements exist in the data).
-# Applied to a stop on the lap after one that ran under the neutralisation.
-SC_PIT_LOSS_FACTOR = 0.5
+# time (race_simulator.SC_PIT_LOSS_FACTOR, which the simulator applies too);
+# under a virtual safety car, a little more. Assumed, like race_simulator's SC
+# constants (no pit-loss measurements exist in the data). Applied to a stop on
+# the lap after one that ran under the neutralisation.
 VSC_PIT_LOSS_FACTOR = 0.65
 # FastF1 track status codes (lap_data.track_status concatenates every code
 # seen during the lap): 4 safety car; 6 VSC deployed, 7 VSC ending.
@@ -993,8 +999,11 @@ async def build_pit_recommendation(
 
     For each candidate pit lap in [current_lap+1, current_lap+PIT_WINDOW_LOOKAHEAD_LAPS]
     (capped at the estimated race end), projects the stint-to-pit-lap delta on the
-    current compound plus PIT_STOP_SECONDS plus the best of _STINT2_CANDIDATE_COMPOUNDS'
-    stint-from-pit-lap-to-race-end delta — same model as before this function's
+    current compound plus PIT_STOP_SECONDS plus the stint-from-pit-lap-to-race-end
+    delta on the compound most cars fit with that many laps left
+    (race_simulator.dry_compound_for_stop; until Day 6d, 2026-10-11, the
+    fastest projected of _STINT2_CANDIDATE_COMPOUNDS — see
+    compute_pit_recommendation) — same model as before this function's
     rewrite, just computed differently:
 
     - **Batched, not looped.** The original implementation called
@@ -1212,9 +1221,26 @@ def compute_pit_recommendation(
     compound_names = list(stint2_delta_by_compound.keys())
     stint2_matrix = np.column_stack([stint2_delta_by_compound[c] for c in compound_names])
 
-    best_stint2_idx = np.argmin(stint2_matrix, axis=1)
-    best_stint2_delta = stint2_matrix[np.arange(n_candidates), best_stint2_idx]
-    winning_compound = [compound_names[i] for i in best_stint2_idx]
+    # Each stop fits what most cars fit with that many laps left
+    # (race_simulator.dry_compound_for_stop, from 3,917 real dry stops), not the
+    # compound the tyre models project fastest: they misjudge the compounds'
+    # pace against each other, by an amount that changes by season and race,
+    # so their choice matched the real one in 40 of 122 stops on the curated
+    # replays (the table, 60), and per-race calibration of their pace made it
+    # worse (Day 6d CP7). The models still decide when to stop, and whether
+    # to. A compound with no loaded model falls back to the fastest projected.
+    winning_compound = [
+        dry_compound_for_stop(state["compound"], obligation is None, int(laps_left))
+        for laps_left in laps_remaining
+    ]
+    fastest = np.argmin(stint2_matrix, axis=1)
+    winning_compound = [
+        choice if choice in stint2_delta_by_compound else compound_names[int(fastest[i])]
+        for i, choice in enumerate(winning_compound)
+    ]
+    best_stint2_delta = np.array(
+        [stint2_delta_by_compound[c][i] for i, c in enumerate(winning_compound)]
+    )
 
     # A stop on the next lap is cheaper if this lap ran under a safety car or
     # VSC (pit_loss_after_lap); every later stop pays the full pit loss.

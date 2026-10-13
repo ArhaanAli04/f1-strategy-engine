@@ -9,6 +9,7 @@ _resolve_position_context, unrelated to _build_race_state) is covered indirectly
 strategy_service's equivalent tests.
 """
 
+import dataclasses
 import json
 import uuid
 from types import SimpleNamespace
@@ -33,6 +34,14 @@ def _stub_driver_codes(monkeypatch: pytest.MonkeyPatch) -> None:
     """No driver codes: tests queue their own db.execute results, and an empty
     table keeps the old UUID-keyed lookup they were written against."""
     monkeypatch.setattr(strategy_service, "load_driver_codes", AsyncMock(return_value={}))
+
+
+def _compounds_result(rows: list[tuple[Any, str]] | None = None) -> MagicMock:
+    """_build_race_state's compounds query result: (driver_id, compound) pairs
+    each car has run through current_lap (none by default)."""
+    result = MagicMock()
+    result.all.return_value = rows or []
+    return result
 
 
 def _position_rows_result(rows: list[tuple[Any, Any, Any]]) -> MagicMock:
@@ -114,6 +123,10 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
         (driver_a_id, 4321.5, 91.2),
         (driver_b_id, 4310.0, 90.5),
     ]
+    # A has run two dry compounds (two-compound rule met), B only one.
+    compounds_result = _compounds_result(
+        [(driver_a_id, "MEDIUM"), (driver_a_id, "HARD"), (driver_b_id, "HARD")]
+    )
 
     captured_queries: list[Any] = []
 
@@ -127,6 +140,8 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
             return position_result
         if len(captured_queries) == 4:
             return cumulative_time_result
+        if len(captured_queries) == 5:
+            return compounds_result
         raise AssertionError(f"unexpected extra db.execute call: {query}")
 
     mock_db_session.execute.side_effect = _execute_side_effect
@@ -153,8 +168,9 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     # selected in the same query — see item 4's Checkpoint 2) regardless of
     # field size — the N+1 fix this test guards: 4 total db.execute() calls
     # (context, latest_laps, position, cumulative_time), never one more per
-    # driver, and no extra query added for the baseline either.
-    assert len(captured_queries) == 4
+    # driver, and no extra query added for the baseline either. The 5th is
+    # the whole field's compounds (Day 6d), also one query for any field size.
+    assert len(captured_queries) == 5
 
     cumulative_time_query = captured_queries[3]
     compiled = str(cumulative_time_query.compile(compile_kwargs={"literal_binds": True}))
@@ -173,6 +189,12 @@ async def test_build_race_state_batches_cumulative_time_into_one_query(
     assert driver_a_state.cumulative_race_time_seconds == 4321.5
     assert driver_b_state.cumulative_race_time_seconds == 4310.0
     assert driver_a_state.baseline_lap_time_seconds == pytest.approx(91.2)
+    requester_state = next(
+        d for d in race_state.drivers if d.driver_id == str(requesting_driver_id)
+    )
+    assert driver_a_state.two_compound_rule_met is True
+    assert driver_b_state.two_compound_rule_met is False
+    assert requester_state.two_compound_rule_met is False  # SOFT only, from the request
     assert driver_b_state.baseline_lap_time_seconds == pytest.approx(90.5)
 
 
@@ -358,7 +380,8 @@ def test_compute_recommendation_fields_two_compound_rule_forces_a_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Only MEDIUM run so far in a dry race: the same models would say stay
-    out, but the stored recommendation is a stop onto another compound."""
+    out, but the stored recommendation is a stop onto another compound (which
+    one comes from race_simulator.dry_compound_for_stop's table)."""
     # SHAP can't explain the stand-in models, and the new stint's explanation
     # isn't what this test is about.
     monkeypatch.setattr(
@@ -380,8 +403,7 @@ def test_compute_recommendation_fields_two_compound_rule_forces_a_stop(
     )
 
     assert fields["no_further_stop"] is False
-    assert fields["recommended_pit_lap"] == 11
-    assert fields["recommended_compound"] == "SOFT"
+    assert fields["recommended_compound"] in ("SOFT", "HARD")
 
 
 @pytest.mark.unit
@@ -449,6 +471,7 @@ async def test_build_race_state_starting_position_uses_current_lap_not_final_pos
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
 
     await fakeredis.set(
@@ -524,6 +547,7 @@ async def test_build_race_state_leaves_out_retired_cars(
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
     await fakeredis.set(
         prediction_worker._weather_key(season, round_number),
@@ -584,6 +608,7 @@ async def test_build_race_state_takes_rival_tyres_at_current_lap(
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
     await fakeredis.set(
         prediction_worker._weather_key(season, round_number),
@@ -639,6 +664,7 @@ async def test_build_race_state_position_query_filters_by_session_id(
 
     cumulative_time_result = MagicMock()
     cumulative_time_result.all.return_value = [(driver_id, 0.0, 88.0)]
+    compounds_result = _compounds_result()
 
     captured_queries: list[Any] = []
 
@@ -652,6 +678,8 @@ async def test_build_race_state_position_query_filters_by_session_id(
             return position_result
         if len(captured_queries) == 4:
             return cumulative_time_result
+        if len(captured_queries) == 5:
+            return compounds_result
         raise AssertionError(f"unexpected extra db.execute call: {query}")
 
     mock_db_session.execute.side_effect = _execute_side_effect
@@ -887,6 +915,7 @@ async def test_build_race_state_prefers_session_elapsed_seconds_over_sum_fallbac
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
 
     await fakeredis.set(
@@ -976,6 +1005,7 @@ async def test_build_race_state_missing_baseline_falls_back_to_field_median(
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
 
     await fakeredis.set(
@@ -1036,6 +1066,7 @@ async def test_build_race_state_baseline_zero_when_field_has_none(
         latest_laps_result,
         position_result,
         cumulative_time_result,
+        _compounds_result(),
     ]
 
     await fakeredis.set(
@@ -1836,7 +1867,8 @@ def test_drivers_overtaken_enriched_with_finish_ahead_and_rival_pit_projection()
     assert entry["driver_id"] == rival.driver_id
     assert entry["finish_ahead_probability"] == pytest.approx(0.27)
     assert entry["rival_projected_pit_lap"] == 34
-    assert entry["rival_pit_probability"] == pytest.approx(0.71)
+    # The chance of stopping at all: the shares sum past 1 and are capped.
+    assert entry["rival_pit_probability"] == pytest.approx(1.0)
 
 
 @pytest.mark.unit
@@ -1948,7 +1980,102 @@ def test_peak_projected_pit_lap_ties_resolve_to_earliest_lap() -> None:
         finish_time_p95_seconds=5010.0,
         projected_pit_laps=[(20, 0.5), (25, 0.5)],
     )
-    assert prediction_worker._peak_projected_pit_lap(distribution) == (20, 0.5)
+    assert prediction_worker._peak_projected_pit_lap(distribution) == (20, 1.0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("projected", "expected"),
+    [
+        # Stops in 19% of runs: hidden.
+        ([(30, 0.1), (31, 0.09)], (None, None)),
+        # 20%: shown, the earliest of the tied laps.
+        ([(30, 0.1), (31, 0.1)], (30, 0.2)),
+        # One stop spread over the 3-lap window: every run stops.
+        ([(30, 0.3), (31, 0.4), (32, 0.3)], (31, 1.0)),
+    ],
+)
+def test_peak_projected_pit_lap_gives_the_chance_of_stopping_at_all(
+    projected: list[tuple[int, float]], expected: tuple[int | None, float | None]
+) -> None:
+    """The lap is the most likely one; the chance is the share of runs with a
+    stop, shown only from _MIN_SHOWN_RIVAL_PIT_PROBABILITY (20%)."""
+    distribution = race_simulator.DriverPositionDistribution(
+        driver_id="d1",
+        position_probabilities={1: 1.0},
+        mean_position=1.0,
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+        projected_pit_laps=projected,
+    )
+    lap, chance = prediction_worker._peak_projected_pit_lap(distribution)
+    assert lap == expected[0]
+    assert chance == (None if expected[1] is None else pytest.approx(expected[1]))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("pit_laps", "compounds", "no_further_stop", "expected_forced"),
+    [
+        ([], [], False, None),
+        ([], [], True, {}),
+        ([30], ["HARD"], False, {30: ("HARD", 0)}),
+    ],
+)
+def test_run_one_scenario_forces_the_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    pit_laps: list[int],
+    compounds: list[str],
+    no_further_stop: bool,
+    expected_forced: dict[int, tuple[str, int]] | None,
+) -> None:
+    """An empty plan leaves the stops to the simulation; "no further stop" is an
+    empty forced schedule (the whole plan: no stops); a plan forces its laps."""
+    template, race_state = _requester_and_race_state("MEDIUM", 10, 20, 53)
+    requester = dataclasses.replace(template, driver_id=str(uuid.uuid4()))
+    race_state = dataclasses.replace(race_state, drivers=[requester])
+    requester_distribution = race_simulator.DriverPositionDistribution(
+        driver_id=requester.driver_id,
+        position_probabilities={requester.starting_position: 1.0},
+        mean_position=float(requester.starting_position),
+        mean_finish_time_seconds=5000.0,
+        finish_time_p5_seconds=4990.0,
+        finish_time_p95_seconds=5010.0,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_simulate_race(*args: Any, **kwargs: Any) -> race_simulator.RaceSimulationResult:
+        captured.update(kwargs)
+        return race_simulator.RaceSimulationResult(
+            n_simulations=1, driver_distributions=[requester_distribution]
+        )
+
+    monkeypatch.setattr(race_simulator, "simulate_race", fake_simulate_race)
+
+    outcome = prediction_worker._run_one_scenario(
+        race_state,
+        requester,
+        uuid.UUID(requester.driver_id),
+        tire_deg_pipelines={},
+        pit_model=None,
+        sc_model=None,
+        maps_cache={},
+        pit_laps=pit_laps,
+        compounds=compounds,
+        no_further_stop=no_further_stop,
+        total_laps=53,
+        remaining_laps=33,
+        label=None,
+        rng_seed=None,
+    )
+
+    forced = captured["forced_pit_laps"]
+    if expected_forced is None:
+        assert forced is None
+    else:
+        assert forced == {requester.driver_id: expected_forced}
+    assert outcome["no_further_stop"] is no_further_stop
 
 
 # --- _resolve_position_context: live standings are the primary source for a
