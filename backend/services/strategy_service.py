@@ -112,6 +112,7 @@ from backend.services.ml import tire_deg_model
 from backend.services.ml.race_simulator import (
     COMPOUND_ENCODING,
     LAP_TIME_NOISE_STD_SECONDS,
+    MIN_LAPS_BETWEEN_PITS,
     PIT_STOP_SECONDS,
     SC_PIT_LOSS_FACTOR,
     dry_compound_for_stop,
@@ -1150,10 +1151,17 @@ def compute_pit_recommendation(
     obligation = dry_compound_obligation(state.get("compounds_used"))
 
     max_pit_lap = min(state["lap_number"] + PIT_WINDOW_LOOKAHEAD_LAPS, state["total_laps"])
-    pit_laps = np.arange(state["lap_number"] + 1, max_pit_lap + 1)
-    n_candidates = len(pit_laps)
-    if n_candidates == 0:
+    if max_pit_lap <= state["lap_number"]:
         return []
+    # No stop within MIN_LAPS_BETWEEN_PITS laps of the driver's last one, the
+    # simulator's rule too (Day 6d replay audit, 2026-10-17: British GP 2026,
+    # PER on 1-lap-old SOFTs under the safety car was told to stop again next
+    # lap, the SOFT model's late-race curve being noisy and the stop cheap).
+    first_pit_lap = state["lap_number"] + max(
+        1, MIN_LAPS_BETWEEN_PITS - int(state["tyre_age_laps"])
+    )
+    pit_laps = np.arange(first_pit_lap, max_pit_lap + 1)
+    n_candidates = len(pit_laps)
 
     # --- Stint 1 to the flag: one predict() call over every remaining lap on
     # the current tyre, cumulative sum. Its first n_candidates entries are
@@ -1180,8 +1188,26 @@ def compute_pit_recommendation(
         ]
     )
     stint1_to_flag = np.cumsum(current_pipeline.predict(features1))
-    stint1_delta = stint1_to_flag[:n_candidates]
+    first_offset = first_pit_lap - (state["lap_number"] + 1)
+    stint1_delta = stint1_to_flag[first_offset : first_offset + n_candidates]
     no_stop_delta = float(stint1_to_flag[-1])
+
+    if n_candidates == 0:
+        # No stop is allowed before the flag: staying out is the answer,
+        # unless the two-compound rule still requires a stop.
+        if obligation is not None:
+            return []
+        return [
+            {
+                "pit_lap": int(state["total_laps"]),
+                "window_start": int(state["total_laps"]),
+                "window_end": int(state["total_laps"]),
+                "projected_total_delta_seconds": no_stop_delta,
+                "recommended_compound": str(state["compound"]),
+                "confidence_score": 1.0,
+                "no_further_stop": True,
+            }
+        ]
 
     # --- Stint 2: one predict() call PER CANDIDATE COMPOUND (see
     # _stint2_batch_deltas), each covering all n_candidates pit laps at once.
@@ -1245,7 +1271,8 @@ def compute_pit_recommendation(
     # A stop on the next lap is cheaper if this lap ran under a safety car or
     # VSC (pit_loss_after_lap); every later stop pays the full pit loss.
     pit_loss = np.full(n_candidates, PIT_STOP_SECONDS)
-    pit_loss[0] = pit_loss_after_lap(state.get("track_status"))
+    if first_pit_lap == state["lap_number"] + 1:
+        pit_loss[0] = pit_loss_after_lap(state.get("track_status"))
     total_delta = stint1_delta + pit_loss + best_stint2_delta
 
     # Every option: the n_candidates stops, then "no further stop" (index
@@ -1269,7 +1296,7 @@ def compute_pit_recommendation(
     # over every remaining lap. No per-sample model calls — pure numpy
     # sampling + argmin, same vectorization style as
     # _undercut_overcut_probability's own Monte Carlo. ---
-    stint1_laps_by_candidate = np.arange(1, n_candidates + 1, dtype=np.float64)
+    stint1_laps_by_candidate = (pit_laps - state["lap_number"]).astype(np.float64)
     winning_mae = np.array(
         [mae_by_compound.get(c, DEFAULT_HOLDOUT_MAE_SECONDS) for c in winning_compound]
     )
@@ -2108,6 +2135,32 @@ async def _live_gap_deficit(
     return now_gap - next_gap
 
 
+def _undercut_applies(now_state: dict[str, Any], next_state: dict[str, Any]) -> bool:
+    """Whether an undercut between these two cars can happen at all.
+
+    The projection has both cars stop within two laps and then race
+    UNDERCUT_PROJECTION_LAPS laps. It can't apply when the race ends inside
+    that window, or when either car stopped within the last
+    MIN_LAPS_BETWEEN_PITS laps (no car stops again that soon; the simulator
+    uses the same rule). Before Day 6d's replay audit (2026-10-17) such cases
+    still got a probability: 100% undercuts with a lap left under the British
+    GP 2026 safety car, and a 51% "undercut" for LEC (Belgian GP 2026 lap 22)
+    on 2-lap-old tyres.
+
+    Args:
+        now_state, next_state: _current_state of the car that would stop now
+            and of the car that would stop a lap later, as of the same lap.
+    Returns:
+        False when no stop can gain anything here.
+    """
+    laps_left = int(now_state["total_laps"]) - int(now_state["lap_number"])
+    return (
+        laps_left >= UNDERCUT_PROJECTION_LAPS
+        and int(now_state["tyre_age_laps"]) >= MIN_LAPS_BETWEEN_PITS
+        and int(next_state["tyre_age_laps"]) >= MIN_LAPS_BETWEEN_PITS
+    )
+
+
 async def _undercut_overcut_probability(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2155,6 +2208,7 @@ async def _undercut_overcut_probability(
     )
     now_state = await _current_state(db, session_id, pitting_now_driver_id, as_of_lap)
     next_state = await _current_state(db, session_id, pitting_next_lap_driver_id, as_of_lap)
+    undercut_possible = _undercut_applies(now_state, next_state)
 
     # Positive deficit => pitting_now_driver_id currently trails pitting_next_lap_driver_id.
     live_deficit = await _live_gap_deficit(
@@ -2176,6 +2230,15 @@ async def _undercut_overcut_probability(
             db, session_id, pitting_next_lap_driver_id, next_state["lap_number"]
         )
         deficit = now_time - next_time
+
+    if not undercut_possible:
+        # No stop can gain anything here (see _undercut_applies): the pitting
+        # car doesn't come out ahead, and the gap stays as it is.
+        return {
+            "probability_pit_now_gains_position": 0.0,
+            "projected_gap_seconds": float(-deficit),
+            "n_laps_projected": 0,
+        }
 
     now_pipeline = _pipeline_for_compound(models, now_state["compound"])
     next_pipeline = _pipeline_for_compound(models, next_state["compound"])

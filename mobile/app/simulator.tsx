@@ -772,6 +772,10 @@ export default function SimulatorScreen() {
                 Full probability breakdown from the same 1000-simulation Monte Carlo run — the
                 risk/reward profile behind each plan&apos;s headline position change above.
               </Text>
+              <Text className="text-xs text-muted">
+                Known limit: the tyre model underestimates how much pace long stints lose, so plans
+                with fewer stops can look better than they are.
+              </Text>
               <PositionDistributionChart strategies={strategies} startingPosition={startingPosition} />
             </View>
           )}
