@@ -66,7 +66,7 @@ _MODEL_VERSION_TAG = "production"
 # duplicated here (used inside the synchronous _run_inference) rather than
 # imported, independent of the strategy_service import below used for the
 # undercut/overcut calls, which do need a real cross-module call.
-_COMPOUND_ENCODING = {"HARD": 0, "INTERMEDIATE": 1, "MEDIUM": 2, "SOFT": 3, "WET": 4}
+_COMPOUND_ENCODING = race_simulator.COMPOUND_ENCODING
 _WET_COMPOUNDS = frozenset({"INTERMEDIATE", "WET"})
 
 # Simplified fresh-vs-worn-tyre pace-recovery estimate for the Simulator UI's
@@ -1515,6 +1515,23 @@ async def _build_race_state(
     # case below) does this collapse to 0.0 for everyone, which is
     # ranking-neutral — identical to the pre-baseline behaviour — rather
     # than favouring any one driver.
+    # Compounds each car has run through current_lap, for the two-compound
+    # rule (DriverRaceState.two_compound_rule_met; Day 6d, 2026-10-11). One
+    # query for the whole field.
+    compounds_query = (
+        select(LapData.driver_id, LapData.compound)
+        .where(LapData.session_id == session_id, LapData.lap_number <= current_lap)
+        .distinct()
+    )
+    compounds_by_driver: dict[uuid.UUID, set[str]] = {}
+    for compound_driver_id, used_compound in (await db.execute(compounds_query)).all():
+        compounds_by_driver.setdefault(compound_driver_id, set()).add(str(used_compound).upper())
+    compounds_by_driver.setdefault(requesting_driver_id, set()).add(current_compound)
+
+    def rule_met(driver_id: uuid.UUID) -> bool:
+        used = compounds_by_driver.get(driver_id, set())
+        return bool(used) and strategy_service.dry_compound_obligation(used) is None
+
     field_baseline_values = list(baseline_lap_time_by_driver.values())
     field_median_baseline = (
         float(np.median(field_baseline_values)) if field_baseline_values else 0.0
@@ -1572,6 +1589,7 @@ async def _build_race_state(
                 driver_id_encoded=tire_deg_model.resolve_driver_code(driver_maps, driver_id_str),
                 cumulative_race_time_seconds=cumulative_time,
                 baseline_lap_time_seconds=baseline_lap_time,
+                two_compound_rule_met=rule_met(lap.driver_id),
             )
         )
 
@@ -1601,6 +1619,7 @@ async def _build_race_state(
                 driver_id_encoded=tire_deg_model.resolve_driver_code(current_maps, driver_id_str),
                 cumulative_race_time_seconds=0.0,
                 baseline_lap_time_seconds=field_median_baseline,
+                two_compound_rule_met=rule_met(requesting_driver_id),
             )
         )
 
@@ -1762,19 +1781,28 @@ def _project_pit_stop_degradation(
     return fresh_tyre_gain_per_lap, total_recoverable_seconds
 
 
+# A rival's projected stop is shown only when it stops in at least this share
+# of runs (owner's choice, Day 6d, 2026-10-11): a few percent reads as a
+# prediction although the rival almost certainly stays out.
+_MIN_SHOWN_RIVAL_PIT_PROBABILITY = 0.2
+
+
 def _peak_projected_pit_lap(
     distribution: race_simulator.DriverPositionDistribution | None,
 ) -> tuple[int | None, float | None]:
-    """The single most likely pit lap for a driver, from their own projected_pit_laps.
+    """A driver's most likely pit lap and the chance they stop at all.
 
     Summarizes race_simulator.DriverPositionDistribution.projected_pit_laps (a
-    full per-lap probability list across the simulated remainder) down to one
-    (lap, probability) pair for display in a drivers_overtaken row — see
-    _build_plan_explanation. Both the lap AND its probability are returned
-    together (never just the lap) so a caller can judge confidence rather than
-    the peak lap alone implying more certainty than the distribution actually
-    has. Ties resolve to the EARLIEST lap: Python's max() keeps the first-seen
-    maximum, and projected_pit_laps is already sorted by lap ascending.
+    full per-lap probability list across the simulated remainder) for a
+    drivers_overtaken row (see _build_plan_explanation): "pits in 100% of
+    simulations, most likely lap 26". The chance is the sum of the per-lap
+    shares, capped at 1: since Day 6d (2026-10-11) a stop is spread over the
+    pit model's 3-lap window (race_simulator._schedule_own_stops), so the
+    peak lap's own share (about a third) understated a rival who stops in
+    every run. A run with two stops counts twice before the cap, which is rare
+    in a race's remaining laps. Ties for the lap resolve to the EARLIEST lap:
+    Python's max() keeps the first-seen maximum, and projected_pit_laps is
+    already sorted by lap ascending.
 
     Args:
         distribution: That driver's DriverPositionDistribution from this
@@ -1784,13 +1812,17 @@ def _peak_projected_pit_lap(
             handled defensively since it's a separate lookup, not a direct
             reference).
     Returns:
-        (lap, probability) of the highest pit-probability lap, or (None, None)
-        if distribution is None or no lap has any nonzero pit probability.
+        (most likely pit lap, chance of stopping at all), or (None, None) if
+        distribution is None or that chance is below
+        _MIN_SHOWN_RIVAL_PIT_PROBABILITY.
     """
     if distribution is None or not distribution.projected_pit_laps:
         return None, None
-    lap, probability = max(distribution.projected_pit_laps, key=lambda entry: entry[1])
-    return lap, probability
+    stop_chance = min(1.0, sum(share for _, share in distribution.projected_pit_laps))
+    if stop_chance < _MIN_SHOWN_RIVAL_PIT_PROBABILITY:
+        return None, None
+    lap, _ = max(distribution.projected_pit_laps, key=lambda entry: entry[1])
+    return lap, stop_chance
 
 
 # A rival counts as having swapped places with the requester when it happens
@@ -1954,6 +1986,7 @@ def _run_one_scenario(
     maps_cache: dict[str, tire_deg_model.CategoricalEncodingMaps | None],
     pit_laps: list[int],
     compounds: list[str],
+    no_further_stop: bool,
     total_laps: int,
     remaining_laps: int,
     label: str | None,
@@ -1982,7 +2015,11 @@ def _run_one_scenario(
             comparison (What-If Simulator rebuild part (a), see
             docs/internal/core-feature-rebuild-whatif-simulator.md §7).
         pit_laps, compounds: This scenario's forced pit plan — may be empty
-            (that scenario's pit timing is left fully model-driven).
+            (that scenario's pit timing is left fully model-driven, unless
+            no_further_stop is set).
+        no_further_stop: The driver runs to the flag on the current tyre: an
+            empty forced schedule, which simulate_race reads as "no stops"
+            (a forced plan is the whole plan).
         total_laps, remaining_laps: Request-level race-length context,
             identical across every scenario in one request.
         label: This scenario's optional display label (ScenarioPlan.label),
@@ -2006,7 +2043,7 @@ def _run_one_scenario(
         SimulatedRaceOutcome-shaped dict.
     """
     forced_pit_laps: dict[str, dict[int, tuple[str, int]]] | None = None
-    if pit_laps:
+    if pit_laps or no_further_stop:
         schedule = {
             lap: (compound, _COMPOUND_ENCODING.get(compound, _COMPOUND_ENCODING["MEDIUM"]))
             for lap, compound in zip(pit_laps, compounds, strict=True)
@@ -2049,6 +2086,7 @@ def _run_one_scenario(
     return {
         "pit_laps": pit_laps,
         "compounds": compounds,
+        "no_further_stop": no_further_stop,
         "label": label,
         "predicted_finish_time": requesting_distribution.mean_finish_time_seconds,
         "position_gain_loss": position_gain_loss,
@@ -2166,6 +2204,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                 maps_cache,
                 pit_laps=[int(lap) for lap in scenario.get("pit_laps", [])],
                 compounds=[str(c).upper() for c in scenario.get("compounds", [])],
+                no_further_stop=bool(scenario.get("no_further_stop", False)),
                 total_laps=total_laps,
                 remaining_laps=remaining_laps,
                 label=scenario.get("label"),
@@ -2185,6 +2224,7 @@ async def _run_simulation(payload: dict[str, Any]) -> dict[str, Any]:
                 maps_cache,
                 pit_laps=pit_laps,
                 compounds=compounds,
+                no_further_stop=bool(payload.get("no_further_stop", False)),
                 total_laps=total_laps,
                 remaining_laps=remaining_laps,
                 label=None,

@@ -14,7 +14,9 @@ stopped matching web. `types/simulate.ts`, `api/strategy.ts` and
 `types/index.ts` and `types/telemetry.ts` (`DriverGap`'s nullable gaps,
 `laps_behind` and `compound`), plus the new `types/demo.ts` and
 `api/demo.ts`, in Day 6b-mobile CP1 (2026-10-09). Every file in this table
-now matches web byte for byte.
+now matches web byte for byte; `types/simulate.ts` and `utils/formatters.ts`
+were re-copied again on 2026-10-11 (Day 6d: `no_further_stop`,
+`formatStrategyName`).
 
 | mobile/src path | web/ source |
 |---|---|
@@ -223,6 +225,14 @@ source. Re-diff, don't blind-overwrite, if the web source changes.
     and its range (web's table, four columns, didn't fit); then
     `PositionDistributionChart` and a labelled `PlanExplanationCard` per
     strategy.
+  - **"No further stop" (Day 6d, 2026-10-11), as web:** a switch in Single
+    Plan (hides the pit-stop rows, sends `no_further_stop`), and "+ Add No
+    Further Stop" in Compare (one such scenario at most, its compound wheel
+    replaced by "No stop, X to the flag"). Unlabelled results are named with
+    `formatStrategyName` (`utils/formatters.ts`, copied from web; it replaced
+    `PositionDistributionChart`'s own `strategyLabel`). `PlanExplanationCard`
+    says "No pit stop" for such a plan, and its rival line reads "pits in N%
+    of simulations, most likely lap L".
   - **Not on mobile:** CSV export (desktop only) and drag-drop.
   - **NativeWind:** the disabled buttons dim through a plain `opacity` style;
     the `disabled:` variant isn't used elsewhere in mobile, so it may not

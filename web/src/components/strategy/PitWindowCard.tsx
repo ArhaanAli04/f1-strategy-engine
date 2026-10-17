@@ -116,6 +116,16 @@ export function PitWindowCard({ sessionId, driverId, compact, className }: PitWi
             Unconfirmed estimate — not yet bounded by a real pit-window search.
           </p>
         )}
+        {/* Since Day 6d (2026-10-11) the compound is the one most teams fit
+            with that many laps left (2018-2025 stops), not a model output:
+            the tyre models misjudge the compounds' pace against each other.
+            The models still decide whether and when to stop. */}
+        {!view.noFurtherStop && view.recommendedCompound && (
+          <p className="text-[10px] text-muted-foreground">
+            {view.recommendedCompound} is what most teams fit with that many laps left; the models
+            decide when to stop.
+          </p>
+        )}
         {view.explanation && (
           <p className="text-sm text-muted-foreground">{view.explanation.narrative}</p>
         )}

@@ -613,14 +613,30 @@ Update this section at the start of each day's session:
 ```
 Phase:    8
 Day:      Demo deployment plan (docs/internal/demo-deployment-plan-2026.md):
-          Days 1-6c done; last session 2026-10-10.
-Status:   Day 6c complete (CP1-CP8): the pit-window engine offers "no further
+          Days 1-6d done (Day 6d 2026-10-11/12, CP1-CP8).
+Status:   Day 6d complete: Strategy Simulator testing. A harness
+          (backend/scripts/evaluate_simulator.py) measures the Monte Carlo
+          against the 3 curated races. Phantom stops 9.8 -> about 2 (a car
+          that met the two-compound rule only stops when its tyre won't
+          last); a forced plan is the whole plan; "No further stop" in the
+          Simulator (web, desktop, mobile); rivals stop within the pit
+          model's 3-lap window and fit a compound by laps left; rival rows
+          give the chance of stopping at all, hidden under 20%; settled tyre
+          ages and the safety-car pit loss in race_simulator. The pit-window
+          engine picks the compound from what teams fit with that many laps
+          left (compound match 33% -> 45%, in-lap within 2 laps 49% -> 57%);
+          the card says so. Known-answer scenario check
+          (check_simulator_scenarios.py, 12 of 13 pass; the 1-stop bias is a
+          recorded known limit) and a replay prediction audit with two fixes
+          (undercut panel, pit window). Replays recomputed locally and on
+          Supabase (2026-10-17). Unit suite 966, web 84.
+          Day 6c complete (CP1-CP8): the pit-window engine offers "no further
           stop", follows the two-compound rule, settles fresh-tyre ages,
           cheapens a stop after a safety-car/VSC lap and shows a +/-2-lap
           window; the replay tower places pit-stop time in the pit lane.
-          Stop/no-stop agreement with real races 49% -> 71%. Local replays
-          recomputed; the Supabase recompute waits for the merge to main
-          (migration) and owner approval. Unit suite 923, web 79.
+          Stop/no-stop agreement with real races 49% -> 71%. Replays
+          recomputed locally and on Supabase (2026-10-11). Unit suite 923,
+          web 79.
           Day 6b-mobile complete and checked on the owner's iPhone (CP1-CP5):
           mobile's copies match web again, every race screen follows a running
           Demo Replay, the Live tab has a replay selector, the strategy panels
@@ -632,15 +648,14 @@ Status:   Day 6c complete (CP1-CP8): the pit-window engine offers "no further
           fixed (retired cars in the field, rivals on last-lap tyres, safety-car
           laps erasing the order, explanation list). Committing is the
           owner's.
-Next:     After the merge: recompute the curated replays on Supabase (owner
-          approval) and run the validator there. Then Day 6d, Simulator
-          testing (scenario harness against the curated races; ANT's phantom
-          second stop; negligible rival stops shown; "No further stop" in the
-          Simulator; MEDIUM under-recommended; raw fresh-tyre ages and the
-          safety-car pit loss in race_simulator). Then Day 7, Fly deploy,
-          starting with its "Mobile pre-release pass" (npm audit triage,
-          haptics switch, react-native-worklets with the chosen mobile
-          option).
+Next:     Day 7, Fly deploy, starting with its "Mobile pre-release pass"
+          (npm audit triage, haptics switch). Mobile after the deploy: option
+          A, EAS Update opened in Expo Go (owner's choice 2026-10-17; free,
+          adds expo-updates; steps in the plan doc's "Mobile after the
+          deploy"), so react-native-worklets needs no change. Known limits left by Day 6d (plan doc): MEDIUM
+          still under-recommended (2026 teams run it on long stints more than
+          2018-2025 did), simulated stops a few laps early (pit model
+          calibration); both come from models with no season input.
 Blockers: Mobile tested on one iPhone in Expo Go only; Android not yet run
           (mobile/README.md). Production is Fly.io (decided Day 24); its
           deploy is demo plan Day 7, and VITE_API_URL_PROD and ALLOWED_ORIGINS
@@ -1251,9 +1266,9 @@ happen), or was found already fixed and moved into ### Notes below instead.
   - **Worked around at inference, 2026-10-10 (demo deployment Day 6c):**
     every stint projection (pit window, undercut/overcut, the Simulator's
     plan explanation) feeds tyre ages of at least
-    `tire_deg_model.SETTLED_TYRE_AGE` (3) via `settled_tyre_ages`. The models
-    are unchanged; `race_simulator`'s per-lap loop still feeds raw ages
-    (Day 6d).
+    `tire_deg_model.SETTLED_TYRE_AGE` (3) via `settled_tyre_ages`, and since
+    Day 6d (2026-10-11) so does `race_simulator`'s per-lap loop (the pit model
+    still gets the raw age, as in its training). The models are unchanged.
 
 - **[✅ done 2026-09-11 — full writeup: `docs/internal/tire-deg-model-quality-and-
   rival-pit-behavior.md`] `predicted_life_remaining` pegged at
@@ -1385,8 +1400,11 @@ happen), or was found already fixed and moved into ### Notes below instead.
   behavior for an unauthenticated connection, not a defect. Revisit only if
   F1TV Auth (see checklist above) is ever set up.
 
-- **[deferred] extract_circuit_outlines.py must still be run manually
-  against Supabase.** `backend/scripts/extract_circuit_outlines.py`'s and
+- **[✅ done, confirmed 2026-10-16] extract_circuit_outlines.py on
+  Supabase.** A read-only query found `circuits.map_geometry` populated for
+  all 24 circuits on production Supabase, the same as local, including the
+  three curated races' (Spa, Gilles Villeneuve, Silverstone). Original entry:
+  `backend/scripts/extract_circuit_outlines.py`'s and
   `seed_circuit_outlines.py`'s own docstrings still read "run locally
   first... then set DATABASE_URL to SUPABASE_DATABASE_URL and re-run
   against production" as an instruction, not a completed step — no
@@ -1762,7 +1780,7 @@ happen), or was found already fixed and moved into ### Notes below instead.
   or genuine live message timing/interleaving quirks, all only exercisable
   against F1's real feed. Re-run against a genuine live race once one occurs.
 
-- **[✅ done 2026-10-10, demo deployment Day 6c; Supabase recompute pending]
+- **[✅ done 2026-10-10, demo deployment Day 6c; Supabase recomputed 2026-10-11]
   The pit-window recommendation engine gave recommendations that contradicted
   real strategy and the F1 rules.** See the Notes entry "Pit-window
   recommendation engine reworked". Found 2026-10-04 in the Day 6b visual
@@ -1782,8 +1800,8 @@ happen), or was found already fixed and moved into ### Notes below instead.
 
   Full write-up, evidence, causes and proposed work:
   `docs/internal/demo-deployment-plan-2026.md`, "Day 6c". Replay data was
-  recomputed locally 2026-10-10; Supabase is recomputed after the merge to
-  `main` (whose migrate job adds the new column), with owner approval.
+  recomputed locally 2026-10-10 and on Supabase 2026-10-11, after `cd.yml`
+  migrated it (`8dee9ea8d237`).
 - **[✅ fixed in playback, Day 6b and Day 6c CP7] The timing tower lagged
   the circuit map around pit stops.** Found 2026-10-02 in the Day 6 visual
   check (Belgian GP replay, VER's lap-17 pit).
@@ -1844,6 +1862,75 @@ prevent silent breaks during pip install --upgrade.
 
 ### Notes
 
+**Strategy Simulator tested against real races, and the pit window's compound
+(✅ done 2026-10-11/12, demo deployment Day 6d, CP1-CP8; full write-up in the
+plan doc's "Day 6d"):**
+- **Harness:** `backend/scripts/evaluate_simulator.py` (read-only, run in the
+  worker container, ~3.5 min) starts `simulate_race` at 35/55/75% of each
+  curated race on the field `_build_race_state` builds, 1000 runs, seed 6,
+  with every car's real stops forced and with nothing forced; it reports
+  finishing-rank error, expected/phantom/missed stops and first-stop timing
+  (early / on the lap / late).
+- **`race_simulator`:**
+  - a car that has met the two-compound rule (`DriverRaceState.
+    two_compound_rule_met`, from `prediction_worker._build_race_state`, or a
+    simulated stop) only stops on its own when its tyre won't last to the
+    flag (`_autonomous_pit_flags`). Phantom stops 9.8 -> about 2;
+  - a forced plan is the whole plan; an empty schedule means no stop;
+  - a model decision schedules the stop on that lap or one of the next two,
+    per run (`_schedule_own_stops`: `pit_predictor`'s label is "a stop within
+    3 laps");
+  - a car's own stop fits `dry_compound_for_stop`'s compound (most common
+    fitted at 3,917 dry stops 2018-2025, by laps left); compounds are per
+    (sim, driver);
+  - settled tyre ages for the tyre models; a stop on a safety-car lap costs
+    `SC_PIT_LOSS_FACTOR` (0.5, shared with `strategy_service`).
+- **API/clients:** `no_further_stop` on `SimulateStrategyRequest`/
+  `ScenarioPlan` (echoed on `SimulatedRaceOutcome`): "No further stop" in
+  Single Plan and Compare on web, desktop and mobile. A rival row's
+  `rival_pit_probability` is now the chance it stops at all, shown from 20%
+  ("pits in 100% of simulations, most likely lap 26").
+- **Pit-window engine:** the stint-2 compound is `dry_compound_for_stop`'s,
+  not the fastest the tyre models project: they misjudge the compounds' pace
+  against each other, differently each season (2025, held out: MEDIUM 0.16
+  s/lap slower than it ran). Per-race calibration of that pace was tried twice
+  and made things worse (reverted). On the curated replays: compound match
+  33% -> 45%, in-lap within 2 laps and inside the window 49% -> 57%,
+  stop/no-stop agreement unchanged at 71%. The card says the compound is what
+  most teams fit with that many laps left. Replays recomputed locally
+  (2026-10-11) and on Supabase (2026-10-12): identical recommendations.
+- **Known limits:** MEDIUM still under-recommended (16 against 60 real; in
+  2026 teams ran MEDIUM on long stints more than 2018-2025 did); simulated
+  first stops mostly early (pit model calibration, see the tyre-model
+  write-up's CP5).
+- **Known limit, found 2026-10-14 by `backend/scripts/check_simulator_scenarios.py`**
+  (13 known-answer scenarios, read-only, worker container ~10 min; every
+  other car on its real strategy; 12 pass): in a real 2-stop race (Austria
+  2025, top four MEDIUM-HARD-MEDIUM) the Simulator rates a 1-stop 13-15 s
+  faster than NOR's winning 2-stop. The tyre models under-predict how much
+  pace long stints lose in seasons they never saw (2025 held out: SOFT about
+  +0.7 s/lap by age 12-18, MEDIUM +0.8-0.95 by age 30; on 2018-2024, their
+  training seasons, at most +0.18), so fewer stops look better, fresh tyres
+  gain little and undercuts barely work. A wear correction learned from 2025
+  halved the error but didn't flip it and made 2026 slightly worse; not
+  adopted. The Simulator's results say so ("Known limit: ..."). The fix that
+  holds is retraining on recent seasons, blocked by the weekly retrain getting
+  no current-season laps (Deferred Wiring). Full write-up: plan doc, "Day 6d",
+  known-answer scenarios and the wear-correction experiment.
+- **Replay prediction audit and fixes (2026-10-16/17):** every stored
+  prediction of the 3 curated replays checked against that lap's race state
+  (positions, gaps, both cars' tyres, track status, laps left). Two fixes in
+  `strategy_service`: an undercut/overcut scores 0 when the race ends inside
+  its 5-lap window or either car stopped within the last 5 laps
+  (`_undercut_applies`; it showed 100% undercuts with a lap left under the
+  British safety car), and the pit window offers no stop within 5 laps of the
+  driver's last one (`race_simulator.MIN_LAPS_BETWEEN_PITS`; PER was told to
+  stop again a lap after fitting SOFTs). Replays recomputed locally and on
+  Supabase (2026-10-17): every recommendation field and pit probability
+  identical between the two.
+- **Verified:** unit suite 950, integration 14, web 84; ruff, mypy
+  `--strict`, `tsc` on all three clients.
+
 **Pit-window recommendation engine reworked (✅ done 2026-10-10, demo
 deployment Day 6c, CP1-CP8; full write-up in the plan doc's "Day 6c"):**
 - **"No further stop"** is a candidate like any stop (run to the flag on the
@@ -1872,7 +1959,10 @@ deployment Day 6c, CP1-CP8; full write-up in the plan doc's "Day 6c"):**
   window 33% -> 49%, two-compound rule broken 60% -> 0%, mean confidence
   0.50 -> 0.74; compound match 38% -> 33% (MEDIUM under-recommended, Day 6d).
 - **Data:** recomputed locally (579 predictions, 401 "no further stop",
-  validator passes). Supabase: after the merge to `main`, with owner approval.
+  validator passes) and on Supabase on 2026-10-11 (validator passes; every
+  recommendation field and pit probability identical to local; confidence and
+  undercut differ slightly, being unseeded Monte Carlo, so Belgian has 18
+  stored alerts against 15 locally, from scores on the 0.5 line).
   No model was retrained and training uses none of this, so the weekly
   retrain doesn't interact with it.
 - **Verified:** unit suite 923 passed, web 79; ruff, mypy `--strict`, `tsc`

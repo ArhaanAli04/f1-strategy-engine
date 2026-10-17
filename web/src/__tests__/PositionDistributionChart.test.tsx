@@ -31,6 +31,7 @@ function buildStrategy(overrides: Partial<SimulatedRaceOutcome> = {}): Simulated
   return {
     pit_laps: [25],
     compounds: ["HARD"],
+    no_further_stop: false,
     label: null,
     predicted_finish_time: 5000,
     position_gain_loss: 0,
@@ -81,6 +82,18 @@ describe("PositionDistributionChart", () => {
     render(<PositionDistributionChart strategies={strategies} startingPosition={6} />)
 
     expect(screen.getByTestId("bar")).toHaveAttribute("data-name", "Plan 1 (L22, L41)")
+  })
+
+  it("names an unlabelled plan with no stops by what it was", () => {
+    const strategies = [
+      buildStrategy({ pit_laps: [], compounds: [], no_further_stop: true }),
+      buildStrategy({ pit_laps: [], compounds: [] }),
+    ]
+    render(<PositionDistributionChart strategies={strategies} startingPosition={6} />)
+
+    const bars = screen.getAllByTestId("bar")
+    expect(bars[0]).toHaveAttribute("data-name", "No further stop")
+    expect(bars[1]).toHaveAttribute("data-name", "Simulation decides")
   })
 
   it("shows a legend only for 2+ series, never for a single strategy", () => {

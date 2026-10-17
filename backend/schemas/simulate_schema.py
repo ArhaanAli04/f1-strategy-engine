@@ -42,6 +42,19 @@ def _validate_plan_compounds(pit_laps: list[int], compounds: list[str]) -> None:
         raise ValueError(f"Unknown compound(s): {sorted(unknown)}")
 
 
+def _validate_no_further_stop(no_further_stop: bool, pit_laps: list[int]) -> None:
+    """A "no further stop" plan has no pit laps.
+
+    Args:
+        no_further_stop: The plan's no_further_stop flag.
+        pit_laps: The plan's forced pit laps.
+    Raises:
+        ValueError: no_further_stop is set together with pit laps.
+    """
+    if no_further_stop and pit_laps:
+        raise ValueError("no_further_stop cannot be combined with pit_laps")
+
+
 class ScenarioPlan(BaseModel):
     """One candidate pit plan within a multi-scenario compare request.
 
@@ -66,11 +79,14 @@ class ScenarioPlan(BaseModel):
 
     pit_laps: list[int] = []
     compounds: list[str] = []
+    # See SimulateStrategyRequest.no_further_stop.
+    no_further_stop: bool = False
     label: str | None = None
 
     @model_validator(mode="after")
     def _validate_compounds(self) -> "ScenarioPlan":
         _validate_plan_compounds(self.pit_laps, self.compounds)
+        _validate_no_further_stop(self.no_further_stop, self.pit_laps)
         return self
 
 
@@ -99,6 +115,10 @@ class SimulateStrategyRequest(BaseModel):
     # Compound to switch to after the pit stop at the same-index entry in
     # pit_laps — must be the same length as pit_laps when pit_laps is non-empty.
     compounds: list[str] = []
+    # True: the driver runs to the flag on the current tyre (the simulation
+    # makes no stop for them). False with empty pit_laps: the simulation
+    # decides this driver's stops, like any other car's. Day 6d, 2026-10-11.
+    no_further_stop: bool = False
     # None (default): single-plan request, exactly as before this field
     # existed — pit_laps/compounds above describe the one plan to simulate.
     # Non-None: multi-scenario compare (Checkpoint 3) — pit_laps/compounds
@@ -116,13 +136,14 @@ class SimulateStrategyRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pit_plan(self) -> "SimulateStrategyRequest":
-        if self.scenarios is not None and (self.pit_laps or self.compounds):
+        if self.scenarios is not None and (self.pit_laps or self.compounds or self.no_further_stop):
             raise ValueError(
-                "Set either pit_laps/compounds (a single plan) or scenarios "
-                "(multi-scenario compare), not both."
+                "Set either pit_laps/compounds/no_further_stop (a single plan) or "
+                "scenarios (multi-scenario compare), not both."
             )
 
         _validate_plan_compounds(self.pit_laps, self.compounds)
+        _validate_no_further_stop(self.no_further_stop, self.pit_laps)
 
         # A forced pit lap outside the simulated horizon was previously
         # silently ignored — race_simulator.simulate_race only ever checks
@@ -191,15 +212,14 @@ class OvertakingDriver(BaseModel):
     finish_ahead_probability: float | None = None
     # This rival's own single most likely pit lap, from race_simulator.
     # DriverPositionDistribution.projected_pit_laps (that rival's per-lap pit
-    # probability across all simulations, summarized to its peak). None means
-    # no lap in the simulated remainder had any meaningful pit probability for
-    # this rival — not necessarily "never pits," just not concentrated enough
-    # to name one lap.
+    # probability across all simulations, summarized to its peak). None when
+    # the rival stops in under 20% of runs (see rival_pit_probability).
     rival_projected_pit_lap: int | None = None
-    # The pit probability AT rival_projected_pit_lap — always present together
-    # with rival_projected_pit_lap (both None or both set), so a reader can
-    # judge how confident that projection actually is rather than treating the
-    # named lap as a certainty.
+    # The share of runs in which this rival stops at all in the simulated
+    # remainder (since Day 6d, 2026-10-11; before, the share AT
+    # rival_projected_pit_lap, which understated a stop spread over the pit
+    # model's 3-lap window). Always present together with
+    # rival_projected_pit_lap (both None or both set).
     rival_pit_probability: float | None = None
 
 
@@ -239,6 +259,8 @@ class PositionProbability(BaseModel):
 class SimulatedRaceOutcome(BaseModel):
     pit_laps: list[int]
     compounds: list[str]
+    # The plan's no_further_stop, echoed so a client can label the result.
+    no_further_stop: bool = False
     # Passed through verbatim from the matching ScenarioPlan.label in a
     # multi-scenario compare request; None for the single-plan path (no
     # scenario to carry a label from — unchanged from before this field
