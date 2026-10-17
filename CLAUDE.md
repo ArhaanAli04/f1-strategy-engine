@@ -625,8 +625,11 @@ Status:   Day 6d complete: Strategy Simulator testing. A harness
           ages and the safety-car pit loss in race_simulator. The pit-window
           engine picks the compound from what teams fit with that many laps
           left (compound match 33% -> 45%, in-lap within 2 laps 49% -> 57%);
-          the card says so. Replays recomputed locally and on Supabase
-          (2026-10-12). Unit suite 950, web 84.
+          the card says so. Known-answer scenario check
+          (check_simulator_scenarios.py, 12 of 13 pass; the 1-stop bias is a
+          recorded known limit) and a replay prediction audit with two fixes
+          (undercut panel, pit window). Replays recomputed locally and on
+          Supabase (2026-10-17). Unit suite 966, web 84.
           Day 6c complete (CP1-CP8): the pit-window engine offers "no further
           stop", follows the two-compound rule, settles fresh-tyre ages,
           cheapens a stop after a safety-car/VSC lap and shows a +/-2-lap
@@ -646,8 +649,10 @@ Status:   Day 6d complete: Strategy Simulator testing. A harness
           laps erasing the order, explanation list). Committing is the
           owner's.
 Next:     Day 7, Fly deploy, starting with its "Mobile pre-release pass"
-          (npm audit triage, haptics switch, react-native-worklets with the
-          chosen mobile option). Known limits left by Day 6d (plan doc): MEDIUM
+          (npm audit triage, haptics switch). Mobile after the deploy: option
+          A, EAS Update opened in Expo Go (owner's choice 2026-10-17; free,
+          adds expo-updates; steps in the plan doc's "Mobile after the
+          deploy"), so react-native-worklets needs no change. Known limits left by Day 6d (plan doc): MEDIUM
           still under-recommended (2026 teams run it on long stints more than
           2018-2025 did), simulated stops a few laps early (pit model
           calibration); both come from models with no season input.
@@ -1395,8 +1400,11 @@ happen), or was found already fixed and moved into ### Notes below instead.
   behavior for an unauthenticated connection, not a defect. Revisit only if
   F1TV Auth (see checklist above) is ever set up.
 
-- **[deferred] extract_circuit_outlines.py must still be run manually
-  against Supabase.** `backend/scripts/extract_circuit_outlines.py`'s and
+- **[✅ done, confirmed 2026-10-16] extract_circuit_outlines.py on
+  Supabase.** A read-only query found `circuits.map_geometry` populated for
+  all 24 circuits on production Supabase, the same as local, including the
+  three curated races' (Spa, Gilles Villeneuve, Silverstone). Original entry:
+  `backend/scripts/extract_circuit_outlines.py`'s and
   `seed_circuit_outlines.py`'s own docstrings still read "run locally
   first... then set DATABASE_URL to SUPABASE_DATABASE_URL and re-run
   against production" as an instruction, not a completed step — no
@@ -1895,6 +1903,31 @@ plan doc's "Day 6d"):**
   2026 teams ran MEDIUM on long stints more than 2018-2025 did); simulated
   first stops mostly early (pit model calibration, see the tyre-model
   write-up's CP5).
+- **Known limit, found 2026-10-14 by `backend/scripts/check_simulator_scenarios.py`**
+  (13 known-answer scenarios, read-only, worker container ~10 min; every
+  other car on its real strategy; 12 pass): in a real 2-stop race (Austria
+  2025, top four MEDIUM-HARD-MEDIUM) the Simulator rates a 1-stop 13-15 s
+  faster than NOR's winning 2-stop. The tyre models under-predict how much
+  pace long stints lose in seasons they never saw (2025 held out: SOFT about
+  +0.7 s/lap by age 12-18, MEDIUM +0.8-0.95 by age 30; on 2018-2024, their
+  training seasons, at most +0.18), so fewer stops look better, fresh tyres
+  gain little and undercuts barely work. A wear correction learned from 2025
+  halved the error but didn't flip it and made 2026 slightly worse; not
+  adopted. The Simulator's results say so ("Known limit: ..."). The fix that
+  holds is retraining on recent seasons, blocked by the weekly retrain getting
+  no current-season laps (Deferred Wiring). Full write-up: plan doc, "Day 6d",
+  known-answer scenarios and the wear-correction experiment.
+- **Replay prediction audit and fixes (2026-10-16/17):** every stored
+  prediction of the 3 curated replays checked against that lap's race state
+  (positions, gaps, both cars' tyres, track status, laps left). Two fixes in
+  `strategy_service`: an undercut/overcut scores 0 when the race ends inside
+  its 5-lap window or either car stopped within the last 5 laps
+  (`_undercut_applies`; it showed 100% undercuts with a lap left under the
+  British safety car), and the pit window offers no stop within 5 laps of the
+  driver's last one (`race_simulator.MIN_LAPS_BETWEEN_PITS`; PER was told to
+  stop again a lap after fitting SOFTs). Replays recomputed locally and on
+  Supabase (2026-10-17): every recommendation field and pit probability
+  identical between the two.
 - **Verified:** unit suite 950, integration 14, web 84; ruff, mypy
   `--strict`, `tsc` on all three clients.
 

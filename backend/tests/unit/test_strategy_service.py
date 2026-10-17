@@ -687,6 +687,41 @@ def test_compute_pit_recommendation_ignores_the_fresh_tyre_spike() -> None:
 
 
 @pytest.mark.unit
+def test_compute_pit_recommendation_offers_no_stop_within_5_laps_of_the_last() -> None:
+    """On 1-lap-old tyres at lap 10, the earliest stop offered is lap 14 (tyre
+    age 5), however attractive an earlier one looks: MEDIUMs losing 3 s a lap
+    make an immediate stop look best."""
+    models = {
+        "tire_deg_soft.pkl": _constant_delta_pipeline(-0.5),
+        "tire_deg_medium.pkl": _constant_delta_pipeline(3.0),
+        "tire_deg_hard.pkl": _constant_delta_pipeline(0.5),
+    }
+    state = {**_state(["MEDIUM", "SOFT"], total_laps=24), "tyre_age_laps": 1}
+
+    candidates = strategy_service.compute_pit_recommendation(models, {}, {}, uuid.uuid4(), state)
+
+    stops = [c for c in candidates if not c["no_further_stop"]]
+    assert stops
+    assert min(c["pit_lap"] for c in stops) == 14
+    assert candidates[0]["window_start"] >= 14
+
+
+@pytest.mark.unit
+def test_compute_pit_recommendation_stays_out_when_no_stop_fits_before_the_flag() -> None:
+    """Lap 48 of 52 on 1-lap-old tyres: the first allowed stop would be lap 52,
+    the last; lap 51 of 52 leaves none at all, so the only answer is no stop."""
+    state = {**_state(["MEDIUM", "SOFT"], total_laps=52), "lap_number": 51, "tyre_age_laps": 1}
+
+    candidates = strategy_service.compute_pit_recommendation(
+        _constant_delta_models(), {}, {}, uuid.uuid4(), state
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["no_further_stop"] is True
+    assert candidates[0]["pit_lap"] == 52
+
+
+@pytest.mark.unit
 def test_compute_pit_recommendation_fits_what_teams_fit_not_the_fastest_projection() -> None:
     """Day 6d: HARD is projected fastest at every stop, but a stop with under
     15 laps left fits SOFT, as most real stops do (race_simulator.
@@ -935,7 +970,9 @@ async def test_undercut_returns_positive_when_gap_favourable(
     target_driver_id = uuid.uuid4()
     circuit_id = uuid.uuid4()
 
-    now_lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=1, position=2)
+    # Tyre age 6, not 1: an undercut doesn't apply to a car that stopped
+    # within the last 5 laps (_undercut_applies, tested below).
+    now_lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=6, position=2)
     next_lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=30, position=1)
     mock_db_session.execute.side_effect = [
         *_current_state_side_effects(now_lap, total_laps=50, circuit_id=circuit_id),
@@ -956,6 +993,53 @@ async def test_undercut_returns_positive_when_gap_favourable(
     assert result["probability_pit_now_gains_position"] > 0.5
     assert result["projected_gap_seconds"] > 0
     assert result["recommended_action"] == "PIT NOW"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lap", "total", "now_age", "next_age", "applies"),
+    [
+        (20, 50, 10, 20, True),
+        (46, 50, 10, 20, False),  # 4 laps left: the race ends inside the window
+        (45, 50, 10, 20, True),  # exactly 5 left
+        (20, 50, 2, 20, False),  # the car that would stop has just stopped
+        (20, 50, 10, 3, False),  # the rival has just stopped
+        (20, 50, 5, 5, True),
+    ],
+)
+def test_undercut_applies(lap: int, total: int, now_age: int, next_age: int, applies: bool) -> None:
+    now_state = {"lap_number": lap, "total_laps": total, "tyre_age_laps": now_age}
+    next_state = {"lap_number": lap, "total_laps": total, "tyre_age_laps": next_age}
+    assert strategy_service._undercut_applies(now_state, next_state) is applies
+
+
+@pytest.mark.unit
+async def test_undercut_is_zero_when_it_cannot_apply(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3 laps left: no probability is projected, and the gap stays as it is
+    (the car that would stop is 2 s behind)."""
+    circuit_id = uuid.uuid4()
+    now_lap = _fake_lap(lap_number=47, compound="MEDIUM", tyre_age_laps=10, position=2)
+    next_lap = _fake_lap(lap_number=47, compound="MEDIUM", tyre_age_laps=30, position=1)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(now_lap, total_laps=50, circuit_id=circuit_id),
+        *_current_state_side_effects(next_lap, total_laps=50, circuit_id=circuit_id),
+        _elapsed_result(1802.0),
+        _elapsed_result(1800.0),
+    ]
+    pipeline = _fit_slope_pipeline(slope=0.5, seed=2)
+    monkeypatch.setattr(strategy_service, "_load_models", lambda: {"tire_deg_medium.pkl": pipeline})
+
+    undercut = await strategy_service.get_undercut_score(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert undercut["probability_pit_now_gains_position"] == 0.0
+    assert undercut["projected_gap_seconds"] == pytest.approx(-2.0)
+    assert undercut["recommended_action"] == "STAY OUT"
 
 
 @pytest.mark.unit
