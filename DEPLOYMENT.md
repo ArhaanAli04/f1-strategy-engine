@@ -242,10 +242,11 @@ docker compose -f infra/docker/docker-compose.yml down
 
 ## Demo Videos
 
-No demo videos have been recorded yet. Screenshots and short clips of each
-feature will live in [docs/features.md](docs/features.md), which lists
-exactly what to capture. Until then, the quickest way to see the system
-working is to run it locally and start a **Demo Replay** from the race page.
+Screenshots of all three clients (web, desktop and mobile) are in
+[docs/features.md](docs/features.md). Short GIFs of the circuit map and a
+Demo Replay haven't been recorded yet. Until then, the quickest way to see the
+system working is to run it locally and start a **Demo Replay** from the race
+page.
 
 ---
 
@@ -430,7 +431,7 @@ cd mobile && npx expo start           # open the dev build on emulator/device
 **Web app / Desktop app:**
 - Use OBS Studio (free) or Windows Game Bar (Win+G) to record the screen
 - Start a **Demo Replay** from the race page so every panel has live, moving data
-- For short GIFs, ScreenToGif (free) works well; see the screenshot checklist in [docs/features.md](docs/features.md)
+- For short GIFs, ScreenToGif (free) works well. Save them into `docs/assets/features/` with the `web-`, `desktop-` or `mobile-` prefix the screenshots there use
 
 **Mobile app:**
 - Android emulator: the emulator's own screen-record button, or `adb shell screenrecord`
