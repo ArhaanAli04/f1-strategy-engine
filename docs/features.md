@@ -28,7 +28,7 @@ For the machine-learning models behind the predictions, see [ml-models.md](ml-mo
 
 ## 1. Race page: timing tower, circuit map and lap data
 
-<img src="assets/features/race-page.png" alt="Race page with timing tower, circuit map and strategy panels" width="900">
+<img src="assets/features/web-race-page.png" alt="Race page with timing tower, circuit map and strategy panels" width="900">
 
 The main race view. It follows a live race while one is running and falls back
 to the most recent completed race otherwise.
@@ -49,8 +49,6 @@ to the most recent completed race otherwise.
   threats (sections 2 and 3), plus a "strategy wall" with a compact pit-window
   card for every driver in the field.
 
-<img src="assets/features/circuit-map.gif" alt="Driver dots moving around the circuit map" width="700">
-
 **How it works:** lap completions reach the browser over a WebSocket. The
 backend fans each event out once per session, so extra viewers don't add
 database or cache load. Circuit outlines come from FastF1 position data, stored
@@ -66,7 +64,7 @@ unaffected.
 
 ## 2. Pit-window recommendations
 
-<img src="assets/features/pit-window.png" alt="Pit window card showing lap range, confidence and compound" width="420">
+<img src="assets/features/web-pit-window.png" alt="Pit window card showing lap range, confidence and compound" width="420">
 
 For any driver: when to pit, onto which tyre, and how confident the model is.
 
@@ -96,7 +94,7 @@ driver instructions or damage.
 
 ## 3. Undercut and overcut threats
 
-<img src="assets/features/undercut-threats.png" alt="Undercut threat panel with opportunity and threat bars" width="420">
+<img src="assets/features/web-undercut-threats.png" alt="Undercut threat panel with opportunity and threat bars" width="420">
 
 For the selected driver, two numbers about the cars directly around them:
 
@@ -122,8 +120,6 @@ calibrated gap-based probability. Treat the current number as a guide, not a ver
 
 ## 4. Alerts
 
-<img src="assets/features/alerts.png" alt="Alerts page listing undercut threat alerts" width="700">
-
 A notification is raised when a driver comes under a strong undercut threat
 during a race.
 
@@ -133,7 +129,7 @@ during a race.
 - A **notification settings** panel to choose which alert types and which drivers
   you care about. Drivers are grouped by team, with select-all per team.
 
-<img src="assets/features/alert-settings.png" alt="Alert subscription settings grouped by team" width="500">
+<img src="assets/features/web-alert-settings.png" alt="Alert subscription settings grouped by team" width="500">
 
 **How it works:** each time a prediction is saved, the backend re-checks every
 pair of adjacent cars. Alerts that cross the threshold are stored and pushed to
@@ -150,7 +146,7 @@ built but untested on a real device.
 
 ## 5. What-If Strategy Simulator
 
-<img src="assets/features/simulator-compare.png" alt="Simulator comparing three pit-lap scenarios" width="900">
+<img src="assets/features/web-simulator-compare.png" alt="Simulator comparing three pit-lap scenarios" width="900">
 
 Ask "what happens if I pit on lap 30 instead of 33?" and get an answer as a range
 of outcomes, not a single guess.
@@ -164,6 +160,10 @@ of outcomes, not a single guess.
     compound). Leave it empty to let the model decide.
   - **Compare Scenarios:** up to 4 candidate pit laps side by side, each with
     its own compound and optional label.
+  - In either mode, **No further stop** runs the driver to the flag on their
+    current tyres, to compare against stopping again.
+
+<img src="assets/features/web-simulator-no-stop.png" alt="Simulator comparing no further stop against a lap-38 stop, with the finishing-position distribution" width="700">
 
 **What you get back**
 - Predicted positions gained or lost, predicted finish time and its likely
@@ -177,7 +177,10 @@ of outcomes, not a single guess.
   - which rivals you would need to pass, the chance you finish ahead of each
     one, and roughly when each rival is expected to pit themselves
 
-<img src="assets/features/simulator-explanation.png" alt="Plan explanation card with rivals and probabilities" width="600">
+<p>
+  <img src="assets/features/web-simulator-explanation.png" alt="Plan explanation card with rivals and probabilities" width="600">
+  <img src="assets/features/mobile-simulator-2.jpg" alt="The same plan explanation on the mobile app" width="240">
+</p>
 
 **How it works**
 - Each run simulates the rest of the race **1,000 times** (Monte Carlo) in a
@@ -201,7 +204,7 @@ of outcomes, not a single guess.
 
 ## 6. Driver analytics
 
-<img src="assets/features/driver-page.png" alt="Driver page with style radar, sector comparison and lap times" width="900">
+<img src="assets/features/web-driver-page.png" alt="Driver page with style radar, sector comparison and lap times" width="900">
 
 A page per driver.
 
@@ -231,8 +234,6 @@ braking or cornering technique.
 ---
 
 ## 7. Demo Replay
-
-<img src="assets/features/demo-replay.gif" alt="Starting a demo replay and watching the race page update" width="800">
 
 There isn't always a race on. Demo Replay plays back a real race through the
 **full live pipeline**, so every feature above updates lap by lap exactly as it
@@ -287,7 +288,7 @@ prediction jobs it creates.
 
 ## 9. Dashboard and landing page
 
-<img src="assets/features/dashboard.png" alt="Dashboard with upcoming race, recent alerts and driver roster" width="900">
+<img src="assets/features/web-dashboard.png" alt="Dashboard with upcoming race, recent alerts and driver roster" width="900">
 
 **Dashboard** (after signing in):
 - The next race with its circuit outline and a countdown.
@@ -295,7 +296,7 @@ prediction jobs it creates.
 - Shortcuts to the race page, simulator and driver analytics.
 - The full driver roster with team colours.
 
-<img src="assets/features/landing.png" alt="Public landing page" width="900">
+<img src="assets/features/web-landing.png" alt="Public landing page" width="900">
 
 **Landing page** (public, no account needed): an overview of the product with
 sample tiles that use the same components as the real app. Tiles are clearly
@@ -305,10 +306,14 @@ labelled as sample data, since live predictions need an account.
 
 ## 10. Desktop app
 
-<img src="assets/features/desktop-overlay.png" alt="Desktop overlay window on top of a race stream" width="700">
+<img src="assets/features/desktop-main.png" alt="Desktop app dashboard with the live circuit map and quick access cards" width="900">
 
 A native Windows app built with Tauri: about a 5 MB install, versus roughly
-150 MB for a typical Electron app.
+150 MB for a typical Electron app. It has the web app's pages (dashboard, live
+race, simulator, driver analytics, alerts, settings) in a native window with a
+sidebar.
+
+<img src="assets/features/desktop-live-race.png" alt="Desktop live race page with timing tower, circuit map, pit window and undercut threats" width="900">
 
 **What's different from the web app**
 - **Always-on-top overlay:** a small window showing the top five and their tyres.
@@ -327,52 +332,26 @@ Windows SmartScreen shows a warning on first run (see the
 ## 11. Mobile app
 
 <p>
-  <img src="assets/features/mobile-home.png" alt="Mobile home tab" width="240">
-  <img src="assets/features/mobile-live.png" alt="Mobile live tab with circuit map" width="240">
-  <img src="assets/features/mobile-strategy.png" alt="Mobile strategy tab" width="240">
+  <img src="assets/features/mobile-home.jpg" alt="Mobile home tab" width="240">
+  <img src="assets/features/mobile-live.jpg" alt="Mobile live tab with circuit map" width="240">
+  <img src="assets/features/mobile-strategy.jpg" alt="Mobile strategy tab" width="240">
+</p>
+<p>
+  <img src="assets/features/mobile-simulator.jpg" alt="Mobile strategy simulator" width="240">
+  <img src="assets/features/mobile-alerts.jpg" alt="Mobile alerts tab" width="240">
+  <img src="assets/features/mobile-driver.jpg" alt="Mobile driver detail page" width="240">
 </p>
 
 A React Native (Expo) app for iOS and Android.
 
-**What you see:** tabs for Home, Live (timing tower and animated circuit map),
-Strategy, Drivers and Alerts, plus the simulator and settings.
+**What you see:** tabs for Home, Live (animated circuit map with a timing, lap
+times and sectors switch), Strategy, Drivers and Alerts, plus the simulator
+(opened from the Strategy tab) and settings. Driver detail has the same three
+charts as web: the style radar, sector comparison and lap times.
 
 **Limitations**
-- A few screens are simplified compared to web; for example, the driver detail
-  page has no charts yet.
+- A few things are simplified compared to web: no CSV export or drag-and-drop
+  in the simulator, and the timing tower doesn't animate row changes.
+- Tested on an iPhone in Expo Go; Android hasn't been run yet.
 - Push notifications are built but haven't been tested on a physical device.
 - Not published to an app store.
-
----
-
-## Screenshot checklist
-
-The images above don't exist yet. Save each file into `docs/assets/features/`
-with exactly the name below, then delete this section.
-
-Start a Demo Replay first (Belgian GP works well) so the race page, pit windows
-and threats all have live data.
-
-| File | Capture | Format |
-|---|---|---|
-| `race-page.png` | Full race page during a replay, a driver selected | PNG, ~1600px wide |
-| `circuit-map.gif` | Circuit map with dots moving, 5–8 seconds | GIF, under 5 MB |
-| `pit-window.png` | Pit Window card for the selected driver | PNG, cropped |
-| `undercut-threats.png` | Undercut Threats panel with both bars filled | PNG, cropped |
-| `alerts.png` | Alerts page with several alerts | PNG |
-| `alert-settings.png` | Settings → Notifications panel | PNG, cropped |
-| `simulator-compare.png` | Simulator in Compare Scenarios mode with 3 results and the distribution chart | PNG, ~1600px wide |
-| `simulator-explanation.png` | One plan explanation card with rivals listed | PNG, cropped |
-| `driver-page.png` | A driver page with the style radar loaded | PNG |
-| `demo-replay.gif` | Clicking a replay and the page starting to update | GIF, under 5 MB |
-| `dashboard.png` | Dashboard | PNG |
-| `landing.png` | Public landing page | PNG |
-| `desktop-overlay.png` | Desktop overlay window over a race stream or the main app | PNG |
-| `mobile-home.png`, `mobile-live.png`, `mobile-strategy.png` | Three phone screens (emulator is fine) | PNG, portrait |
-
-Tips:
-- Capture PNGs at about 1600px wide; the `width` attributes above scale them down.
-- To record a GIF on Windows, use ScreenToGif (free).
-- For anything longer than a few seconds, upload an MP4 by dragging it into a
-  GitHub issue or PR comment and link the URL it gives you, rather than
-  committing large files.

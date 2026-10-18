@@ -6,6 +6,12 @@ system's own WebView instead of bundling Chromium, so the installer is about
 a system tray icon, native notifications and CSV export of simulator results
 (see [docs/features.md](../docs/features.md#10-desktop-app)).
 
+<img src="../docs/assets/features/desktop-main.png" alt="Desktop app dashboard with the live circuit map and quick access cards" width="900">
+
+The Live Race page, opened from the Dashboard's quick access cards:
+
+<img src="../docs/assets/features/desktop-live-race.png" alt="Desktop live race page with timing tower, circuit map, pit window and undercut threats" width="900">
+
 ## Installing
 
 Download the installer from the repo's GitHub Releases. It isn't code-signed
