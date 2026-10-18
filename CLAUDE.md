@@ -648,7 +648,10 @@ Status:   Day 6d complete: Strategy Simulator testing. A harness
           fixed (retired cars in the field, rivals on last-lap tyres, safety-car
           laps erasing the order, explanation list). Committing is the
           owner's.
-Next:     Day 7, Fly deploy, starting with its "Mobile pre-release pass"
+Next:     Before Day 7: web, desktop and mobile screenshots are placed in the
+          docs (2026-10-18); still open: web-alerts.png and the two web GIFs
+          (plan doc's "Before Day 7: screenshots and GIFs"), and LinkedIn
+          posts. Then Day 7, Fly deploy, starting with its "Mobile pre-release pass"
           (npm audit triage, haptics switch). Mobile after the deploy: option
           A, EAS Update opened in Expo Go (owner's choice 2026-10-17; free,
           adds expo-updates; steps in the plan doc's "Mobile after the

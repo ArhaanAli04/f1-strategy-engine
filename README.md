@@ -17,7 +17,7 @@ feed. It exists as a from-scratch build-in-public project to work through a
 production-shaped stack — async FastAPI, Celery, Kubernetes, real ML — end to
 end rather than as a pre-existing tool.
 
-<img src="docs/assets/features/race-page.png" alt="Race page: live timing tower, circuit map, lap charts and strategy panels" width="900">
+<img src="docs/assets/features/web-race-page.png" alt="Race page: live timing tower, circuit map, lap charts and strategy panels" width="900">
 
 ## Features
 
@@ -37,6 +37,22 @@ end rather than as a pre-existing tool.
   live ingestion on its own.
 - **Three clients:** web (React), Windows desktop with an always-on-top overlay
   (Tauri), and mobile (Expo).
+
+### Three clients, one backend
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/features.md#1-race-page-timing-tower-circuit-map-and-lap-data"><img src="docs/assets/features/web-dashboard.png" alt="Web dashboard" width="420"></a><br><a href="docs/features.md#1-race-page-timing-tower-circuit-map-and-lap-data"><b>Web</b></a></td>
+    <td align="center"><a href="docs/features.md#10-desktop-app"><img src="docs/assets/features/desktop-main.png" alt="Windows desktop app" width="420"></a><br><a href="docs/features.md#10-desktop-app"><b>Desktop</b></a></td>
+    <td align="center"><a href="docs/features.md#11-mobile-app"><img src="docs/assets/features/mobile-live.jpg" alt="Mobile live tab on an iPhone" width="160"></a><br><a href="docs/features.md#11-mobile-app"><b>Mobile</b></a></td>
+  </tr>
+</table>
+
+Click a client to see its screenshots. Setup guides: [desktop](desktop/README.md), [mobile](mobile/README.md).
+
+### What-If Strategy Simulator
+
+<img src="docs/assets/features/web-simulator-compare.png" alt="Simulator comparing pit-lap scenarios with the finishing-position distribution" width="700">
 
 **See [docs/features.md](docs/features.md) for the full tour with screenshots.**
 

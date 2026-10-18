@@ -8,6 +8,14 @@ Store/Play Store release. For the developer-facing web/mobile sync protocol
 [`src/README.md`](./src/README.md) instead — this file is about running the
 app, that one is about how it's built.
 
+<p>
+  <img src="../docs/assets/features/mobile-home.jpg" alt="Mobile home tab" width="200">
+  <img src="../docs/assets/features/mobile-live.jpg" alt="Mobile live tab with circuit map" width="200">
+  <img src="../docs/assets/features/mobile-simulator.jpg" alt="Mobile strategy simulator" width="200">
+</p>
+
+More screens: [docs/features.md](../docs/features.md#11-mobile-app).
+
 ---
 
 ## 1. On your iPhone with Expo Go (free, used since 2026-10-06)
