@@ -192,6 +192,10 @@ export interface PitRecommendationView {
   // Run the current tyre to the flag rather than stop again (Day 6c): pitLap
   // is then the last lap and recommendedCompound the current one.
   noFurtherStop: boolean
+  // The driver has no race left (PitWindowResponse.race_finished): nothing to
+  // plan. Only the /pit-window source sends it; a stored per-lap prediction is
+  // always for a lap with race left.
+  raceFinished: boolean
 }
 
 function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommendationView | null {
@@ -207,6 +211,7 @@ function viewFromPitWindow(window: PitWindowResponse | undefined): PitRecommenda
     asOfLapNumber: null,
     isFallbackEstimate: false,
     noFurtherStop: window.no_further_stop,
+    raceFinished: window.race_finished ?? false,
   }
 }
 
@@ -229,6 +234,7 @@ function viewFromHistoryEntry(
     asOfLapNumber: entry.lap_number,
     isFallbackEstimate: !hasRecommendation,
     noFurtherStop: hasRecommendation && entry.no_further_stop,
+    raceFinished: false,
   }
 }
 

@@ -59,6 +59,10 @@ export interface PitWindowResponse {
   // 2026-10-10). pit_lap is then the race's last lap and recommended_compound
   // the current one; show "No further stop", not a lap.
   no_further_stop: boolean
+  // The driver has no race left: the race is completed, or they have run its
+  // last lap (2026-10-23). The response is then this one entry; show "Race
+  // finished". Optional: a backend from before that date doesn't send it.
+  race_finished?: boolean
 }
 
 export interface UndercutThreatResponse {
@@ -67,6 +71,10 @@ export interface UndercutThreatResponse {
   projected_gap_seconds: number
   n_laps_projected: number
   recommended_action: string
+  // Set when either car has stopped racing (2026-10-23): nothing is
+  // projected, so show that car as retired instead of a probability.
+  // Optional: a backend from before that date doesn't send it.
+  retired_driver_id?: string | null
 }
 
 export interface CompetitorStrategyEntry {

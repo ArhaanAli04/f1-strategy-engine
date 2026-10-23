@@ -11,8 +11,9 @@ interface PitWindowCardProps {
 // As web's formatHeadline: the window band when there is one, else the
 // single lap, with "~" when that lap is only pit_predictor's estimate.
 // "No further stop" (Day 6c) has no lap to show: the engine recommends
-// running the current tyre to the flag.
+// running the current tyre to the flag. A finished race has nothing to plan.
 function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLabel: string): string {
+  if (view.raceFinished) return windowLabel === "L" ? "Finished" : "Race finished"
   if (view.noFurtherStop) return windowLabel === "L" ? "No stop" : "No further stop"
   if (view.windowStart !== null && view.windowEnd !== null) {
     return `${windowLabel}${view.windowStart}–${view.windowEnd}`
@@ -23,6 +24,7 @@ function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLab
 
 // As web's formatCompactCaption, for a card that has a prediction.
 function formatCompactCaption(view: PitRecommendationView): string {
+  if (view.raceFinished) return "No laps left to plan a stop"
   const parts = [
     view.confidenceScore !== null ? `${Math.round(view.confidenceScore * 100)}% confidence` : null,
     view.asOfLapNumber !== null ? `as of lap ${view.asOfLapNumber}` : null,
@@ -84,7 +86,9 @@ export function PitWindowCard({ sessionId, driverId, compact }: PitWindowCardPro
       </View>
       <Text className="text-2xl font-bold text-foreground">{formatHeadline(view, "Lap ", "Lap ")}</Text>
       <Text className="text-sm text-muted">
-        {view.noFurtherStop
+        {view.raceFinished
+          ? "No laps left to plan a stop for."
+          : view.noFurtherStop
           ? `Stay out on ${view.recommendedCompound ?? "the current tyre"} to the flag`
           : `${view.isFallbackEstimate ? "Estimated" : "Recommended"}: Lap ${view.pitLap}${
               view.recommendedCompound ? ` — ${view.recommendedCompound}` : ""

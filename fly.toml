@@ -1,50 +1,75 @@
-# Fly.io deployment — Day 40. Single app, three process groups (web/worker/
-# beat) sharing one build, per CLAUDE.md's Deployment Strategy. See
-# docs/runbook.md's "Fly.io deployment" section for the full deploy
-# procedure, secrets list, and the race-weekend scaling workflow.
+# Fly.io deployment (demo deployment Day 7; design in
+# docs/internal/demo-deployment-plan-2026.md, deploy steps in docs/runbook.md's
+# "Fly.io deployment" section). One app, two process groups sharing one build:
 #
-# Architecture decision (Day 40 research): a single Fly app with a
-# [processes] block, not three separate apps — Dockerfile.backend and
-# Dockerfile.worker are identical except their CMD (confirmed
-# infra/docker/), and Fly's [processes] entries fully override the image's
-# CMD per group, so one build here serves all three. One `fly secrets set`
-# then populates every process group, instead of duplicating secrets 3x.
+#   web     always on. FastAPI (REST + WebSocket). A Demo Replay runs here as a
+#           replay_playback.py subprocess that plays back predictions
+#           precompute_replay.py stored (DEMO_PLAYBACK_MODE), so replays need no
+#           worker and no ML on the hot path.
+#   worker  stopped until needed. POST /strategy/{id}/simulate queues the task
+#           and asks Fly's Machines API to start this machine
+#           (FLY_WORKER_AUTOSTART, backend/core/fly_machines.py); the worker
+#           stops itself after WORKER_IDLE_EXIT_MINUTES with no task
+#           (backend/workers/idle_shutdown.py: a warm shutdown, exit code 0, so
+#           the on-failure restart policy leaves it stopped).
 #
-# Scaling: `web` is always-on (min_machines_running = 1, auto_stop_machines
-# = "off") — the ~88s XGBoost/LightGBM/SHAP import cold start (see
-# CLAUDE.md's Kubernetes startupProbe note) makes Fly's auto-stop a bad fit
-# for an interactively-browsed process; the whole site (dashboard, driver
-# stats, historical races) rides on `web` alone per the Day 40 worker-
-# dependency audit. `worker`/`beat` default to 0 machines after first
-# deploy (see docs/runbook.md) and are scaled up only for race weekends via
-# infra/fly/scale-race-weekend.sh — everything that needs them (live
-# WebSocket timing tower, POST /strategy/simulate, auto race detection)
-# degrades visibly rather than silently when they're down (see
-# web/src/hooks/useLiveTelemetry.ts's staleConnection and
-# useStrategy.ts's useSimulationResult timedOut).
+# There is no beat process: production doesn't ingest live races
+# (AUTO_RACE_DETECTION_ENABLED=false), and beat's 5-minute task would keep
+# restarting the worker's idle clock so it never stopped. Live ingestion,
+# auto race detection and the worker-based replay run in the local
+# docker-compose stack only.
+#
+# Secrets (database, Redis, AWS keys, SECRET_KEY, SENTRY_DSN, FLY_API_TOKEN,
+# ALLOWED_ORIGINS, metrics credentials) are set with `fly secrets set`, never
+# here; the runbook lists them.
 
 app = "f1-strategy"
-primary_region = "sin" # closest Fly region to Supabase/Upstash + AWS ap-south-1 — adjust if `fly launch`/latency testing suggests otherwise
+# Amsterdam: Fly's 1.0x price tier and close to the Upstash database in Europe.
+# Redis is hit on every request (rate limiter, cache) and Postgres rarely (long
+# cache TTLs below), so being near Redis matters more than being near Supabase
+# (Mumbai, ~118 ms away).
+primary_region = "ams"
 
 [build]
   dockerfile = "infra/docker/Dockerfile.worker" # identical to Dockerfile.backend except CMD, which [processes] overrides anyway
 
 [processes]
   web = "uvicorn backend.main:app --host 0.0.0.0 --port 8000"
-  worker = "celery -A backend.workers.celery_app worker --loglevel=info --pool=solo -Q telemetry_queue,prediction_queue,alert_queue"
-  beat = "celery -A backend.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule"
+  # A single worker that only exists for the length of a simulation needs none
+  # of Celery's cluster chatter: heartbeats, gossip and mingle only add
+  # Upstash commands and startup time.
+  worker = "celery -A backend.workers.celery_app worker --loglevel=info --pool=solo -Q telemetry_queue,prediction_queue,alert_queue --without-heartbeat --without-gossip --without-mingle"
 
-# Only `web` takes inbound traffic — worker/beat have no [[services]] block,
-# so they're never candidates for the proxy's autostop/autostart logic at
-# all (that logic is per-service, see Day 40 research), and are scaled
-# purely by machine count via `fly scale count`.
+# Settings, not secrets. Fly's [env] can't be scoped to one process group, so
+# both groups get all of them; each is read only by the process that uses it.
+[env]
+  ENVIRONMENT = "production"
+  AWS_REGION = "ap-south-1"
+  AWS_BUCKET_NAME = "f1-strategy-models"
+  DEMO_PLAYBACK_MODE = "true"
+  AUTO_RACE_DETECTION_ENABLED = "false"
+  RECORD_RAW_FEED = "false"
+  SIM_DAILY_SCENARIOS_PER_USER = "5"
+  SIM_DAILY_SCENARIOS_GLOBAL = "15"
+  FLY_WORKER_AUTOSTART = "true"
+  WORKER_IDLE_EXIT_MINUTES = "10"
+  # Production data never changes between deploys, so the race page's strategy
+  # answers for a completed race are cached a day and the driver-style fit a
+  # week (both are ML computed on the web machine). Run warm_strategy_cache.py
+  # after each deploy.
+  COMPLETED_SESSION_STRATEGY_TTL_SECONDS = "86400"
+  DRIVER_STYLE_FIT_TTL_SECONDS = "604800"
+
+# Only `web` takes inbound traffic. `worker` has no [[services]] block, so
+# Fly's proxy never starts or stops it; the web process does, through the
+# Machines API.
 [[services]]
   internal_port = 8000
   protocol = "tcp"
   processes = ["web"]
 
-  # Always-on: see the module comment above for why auto-stop is rejected
-  # for this specific cold-start profile.
+  # Always on: a stopped web machine would put a multi-minute cold start (the
+  # ML imports on a throttled shared vCPU) in front of the first visitor.
   auto_stop_machines = "off"
   auto_start_machines = true
   min_machines_running = 1
@@ -58,11 +83,13 @@ primary_region = "sin" # closest Fly region to Supabase/Upstash + AWS ap-south-1
     port = 443
     handlers = ["tls", "http"]
 
-  # grace_period matches CLAUDE.md's K8s startupProbe budget (30x10s=300s),
-  # empirically timed Day 22 for this exact ML-import cold start — reused
-  # here rather than re-guessed.
+  # grace_period stays at the local Kubernetes startupProbe's 300 s budget: the
+  # ~15 CPU-seconds of imports measured locally (Day 6) run at 6.25% of a core
+  # once a new shared machine's 5 s burst credit is spent. Day 7 measures the
+  # real figure. interval is 60 s because each check is a request the
+  # always-on machine serves all day.
   [[services.http_checks]]
-    interval = "10s"
+    interval = "60s"
     timeout = "5s"
     grace_period = "300s"
     method = "GET"
@@ -74,12 +101,18 @@ primary_region = "sin" # closest Fly region to Supabase/Upstash + AWS ap-south-1
   size = "shared-cpu-1x"
   memory = "1024mb"
 
+# performance-1x, not shared: the worker's boot (~12 CPU-seconds of ML imports
+# measured on Day 6) and then the simulation itself (10-50 s of full CPU) would
+# crawl at a shared vCPU's 6.25% of a core once its burst credit is spent. It
+# runs only while simulations are in use, so the higher hourly price barely
+# shows. 2 GB is performance-1x's smallest size.
 [[vm]]
   processes = ["worker"]
-  size = "shared-cpu-1x"
-  memory = "1024mb" # matches infra/helm-chart/values.yaml's proven 1Gi limit, not just its 512Mi request — see Day 40 sizing research
+  size = "performance-1x"
+  memory = "2048mb"
 
-[[vm]]
-  processes = ["beat"]
-  size = "shared-cpu-1x"
-  memory = "512mb" # beat finalizes the same Celery app as worker (include=[...] imports xgboost/lightgbm/shap at module level) even though it never runs inference — see Day 40 research
+# The worker's idle exit is a clean exit (code 0); on-failure restarts it
+# only after a crash, so an idle exit leaves the machine stopped.
+[[restart]]
+  policy = "on-failure"
+  processes = ["worker"]
