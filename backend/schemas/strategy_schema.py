@@ -90,6 +90,11 @@ class PitWindowResponse(BaseModel):
     # 2026-10-10). pit_lap is then the race's last lap and recommended_compound
     # the current one; clients show "No further stop". Additive, default False.
     no_further_stop: bool = False
+    # The driver has no race left: the race is completed, or they have run its
+    # last lap (2026-10-23). The response is then this one entry, at their last
+    # lap on their current tyre with no_further_stop set, so a client that
+    # doesn't know the field shows "No further stop". Additive, default False.
+    race_finished: bool = False
 
 
 class UndercutThreatResponse(BaseModel):
@@ -98,6 +103,12 @@ class UndercutThreatResponse(BaseModel):
     projected_gap_seconds: float
     n_laps_projected: int
     recommended_action: str
+    # Set when either car has stopped racing (strategy_service.still_racing):
+    # no undercut is possible, so nothing is projected (probability 0, gap 0,
+    # "STAY OUT"). Before 2026-10-23 a retired car was projected from its last
+    # lap (Belgian GP 2026: STR, out on lap 25, "100%, +1987 s" against ALO).
+    # Additive, default None.
+    retired_driver_id: uuid.UUID | None = None
 
 
 class CompetitorStrategyEntry(BaseModel):

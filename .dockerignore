@@ -1,0 +1,15 @@
+# Allowlist: both Dockerfiles copy only pyproject.toml, README.md and backend/.
+# Everything else stays out of the build context, which is the repo root for
+# docker compose and `fly deploy` alike: without this, `fly deploy` uploads
+# ~10 GB (desktop/, mobile/, .venv) plus .env, models/ and recordings/ to
+# Fly's builder.
+*
+!pyproject.toml
+!README.md
+!backend/
+
+**/__pycache__
+**/*.pyc
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache

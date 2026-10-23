@@ -32,6 +32,7 @@ function buildView(overrides: Partial<PitRecommendationView> = {}): PitRecommend
     asOfLapNumber: null,
     isFallbackEstimate: false,
     noFurtherStop: false,
+    raceFinished: false,
   }
   return { ...defaults, ...overrides }
 }
@@ -109,6 +110,38 @@ describe("PitWindowCard", () => {
     render(<PitWindowCard sessionId="session-1" driverId="driver-1" compact />)
 
     expect(screen.getByText("No stop")).toBeInTheDocument()
+  })
+
+  const finished = {
+    raceFinished: true,
+    noFurtherStop: true,
+    pitLap: 44,
+    windowStart: 44,
+    windowEnd: 44,
+    recommendedCompound: "HARD",
+    confidenceScore: null,
+  }
+
+  it("says the race is finished instead of a stop when the driver has no race left", () => {
+    mockView(buildView(finished))
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" />)
+
+    expect(screen.getByText("Race finished")).toBeInTheDocument()
+    expect(screen.getByText("No laps left to plan a stop for.")).toBeInTheDocument()
+    expect(screen.queryByText("No further stop")).not.toBeInTheDocument()
+    expect(screen.queryByText(/to the flag/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/confidence/)).not.toBeInTheDocument()
+  })
+
+  it("says finished on the compact card, not 'No prediction yet'", () => {
+    mockView(buildView(finished))
+
+    render(<PitWindowCard sessionId="session-1" driverId="driver-1" compact />)
+
+    expect(screen.getByText("Finished")).toBeInTheDocument()
+    expect(screen.getByText("No laps left to plan a stop")).toBeInTheDocument()
+    expect(screen.queryByText("No prediction yet")).not.toBeInTheDocument()
   })
 
   it("omits the pit_predictor caption when pitProbability is unavailable", () => {

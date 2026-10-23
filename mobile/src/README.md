@@ -81,7 +81,9 @@ shapes, etc).
 | `components/driver/DriverStandingsCard.tsx` | Drivers tab: a fixed-height card (about 7 rows) whose rows scroll inside it: position, team logo, name, points. Matched to our roster by driver code; a row opens the driver page. |
 | `utils/driverNames.ts` | `displayDriverName`: "Max VERSTAPPEN" (given name, surname in capitals; "Kimi" for ANT, the owner's choice). Live tower and standings card. |
 | `utils/rowLogoSizes.ts` | Team logo sizes for list rows (Red Bull, Haas, Alpine 36 px, Ferrari 30, others 24), so rows stay one height. Live tower and standings card. |
-| `utils/haptics.ts` | The app's haptics (`expo-haptics`): `selectionTick`, `confirm`, `threshold`, `success`, `warning`, `error`. Screens never import `expo-haptics` directly, so a Settings off switch can be added here. |
+| `utils/haptics.ts` | The app's haptics (`expo-haptics`): `selectionTick`, `confirm`, `threshold`, `success`, `warning`, `error`. Screens never import `expo-haptics` directly; each call does nothing while Settings' "Haptic feedback" is off. |
+| `stores/preferencesStore.ts` | Device-only preferences, saved on the phone (zustand `persist` over AsyncStorage, key `f1-preferences`): `hapticsEnabled`, default on (2026-10-20). |
+| `components/settings/AppPreferencesSection.tsx` | Settings' fourth section, "App": the "Haptic feedback" switch. Applies at once, no Save button. Web and desktop have no equivalent. |
 
 **NativeWind gotcha (found 2026-10-07):** a class that no other file uses may
 not be applied on the device at all. `ml-4`/`ml-6` between the tower's GAP and

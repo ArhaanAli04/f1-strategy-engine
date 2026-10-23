@@ -39,6 +39,13 @@ COPY backend/ ./backend/
 # to open database file" on a root-owned volume mount.
 RUN mkdir -p /tmp/fastf1_cache && chown f1:f1 /tmp/fastf1_cache
 
+# MODEL_CACHE_DIR's default, where every process downloads the models from
+# S3. Created here as f1's so a root process (`fly ssh console` connects as
+# root unless given -u) can't create it first: a root-owned dir left the web
+# process unable to download the models, and every strategy endpoint 500'd
+# (Fly, 2026-10-22).
+RUN mkdir -p /tmp/f1_models && chown f1:f1 /tmp/f1_models
+
 # Numba's compiled code ships in the image instead of being rebuilt on every
 # boot (see backend/scripts/warm_numba_cache.py; same setup as
 # Dockerfile.backend). NUMBA_CPU_NAME=generic makes the cache valid on any

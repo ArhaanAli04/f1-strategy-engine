@@ -120,6 +120,13 @@ def _current_state_side_effects(
     ]
 
 
+def _race_status_result(status: str) -> MagicMock:
+    """The db.execute() result strategy_service._race_status reads."""
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = status
+    return result
+
+
 def _compounds_result(compounds: list[str]) -> MagicMock:
     """The db.execute() result strategy_service.compounds_used reads."""
     result = MagicMock()
@@ -1566,13 +1573,14 @@ async def test_get_pit_window_with_explanation_attaches_explanation_to_top_candi
     target_ahead_id = uuid.uuid4()
     circuit_id = uuid.uuid4()
     lap = _fake_lap(lap_number=10, compound="MEDIUM", tyre_age_laps=10, position=3)
-    # Only build_pit_recommendation's own _current_state call plus this
-    # function's own second _current_state call touch the DB directly now —
+    # Only this function's own _current_state and race-status reads plus
+    # build_pit_recommendation's own calls touch the DB directly —
     # _resolve_field_neighbors and get_undercut_score are monkeypatched below,
     # so their own db.execute() calls never happen in this test.
     mock_db_session.execute.side_effect = [
-        *_pit_window_side_effects(lap, total_laps=50, circuit_id=circuit_id),
         *_current_state_side_effects(lap, total_laps=50, circuit_id=circuit_id),
+        _race_status_result("in_progress"),
+        *_pit_window_side_effects(lap, total_laps=50, circuit_id=circuit_id),
     ]
 
     pipeline = _fit_slope_pipeline(slope=0.2, seed=10)
@@ -1636,6 +1644,152 @@ async def test_get_pit_window_with_explanation_attaches_explanation_to_top_candi
     assert not any(fact.label == "Overcut risk (car behind)" for fact in explanation.facts)
     if len(responses) > 1:
         assert responses[1].explanation is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("last_lap", "race_status"),
+    [
+        (44, "completed"),  # ran the full distance
+        (42, "completed"),  # finished two laps down (ALO, Belgian GP 2026)
+        (25, "completed"),  # retired (STR): a finished race is over for everyone
+        (44, "in_progress"),  # live race, the driver has just run its last lap
+    ],
+)
+async def test_pit_window_is_race_finished_when_the_driver_has_no_race_left(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    last_lap: int,
+    race_status: str,
+) -> None:
+    """Before 2026-10-23 a finished race answered [] for every full-distance
+    finisher, which every client showed as "No prediction yet"."""
+    lap = _fake_lap(lap_number=last_lap, compound="HARD", tyre_age_laps=20, position=5)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=44, circuit_id=uuid.uuid4()),
+        _race_status_result(race_status),
+    ]
+    build = AsyncMock()
+    monkeypatch.setattr(strategy_service, "build_pit_recommendation", build)
+
+    responses = await strategy_service.get_pit_window_with_explanation(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert len(responses) == 1
+    window = responses[0]
+    assert window.race_finished
+    assert window.no_further_stop
+    assert (window.pit_lap, window.window_start, window.window_end) == (last_lap,) * 3
+    assert window.recommended_compound == "HARD"
+    assert window.confidence_score is None
+    build.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_pit_window_mid_race_still_computes(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lap = _fake_lap(lap_number=20, compound="MEDIUM", tyre_age_laps=20, position=5)
+    mock_db_session.execute.side_effect = [
+        *_current_state_side_effects(lap, total_laps=44, circuit_id=uuid.uuid4()),
+        _race_status_result("in_progress"),
+    ]
+    build = AsyncMock(return_value=[])
+    monkeypatch.setattr(strategy_service, "build_pit_recommendation", build)
+
+    responses = await strategy_service.get_pit_window_with_explanation(
+        fakeredis, mock_db_session, SEASON, ROUND_NUMBER, uuid.uuid4(), uuid.uuid4()
+    )
+
+    assert responses == []
+    build.assert_awaited_once()
+
+
+def _undercut_field() -> dict[str, SimpleNamespace]:
+    """Belgian GP 2026's end, by latest lap: two finishers, one lapped finisher,
+    and STR, out on lap 25."""
+    return {
+        "HAM": _lap(44, 5600.0),
+        "PIA": _lap(44, 5602.0),
+        "ALO": _lap(42, 5640.0),
+        "STR": _lap(25, 3300.0),
+    }
+
+
+async def _undercut_for(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    field: dict[str, SimpleNamespace],
+    driver: str,
+    target: str,
+) -> tuple[Any, AsyncMock]:
+    async def _fake_resolve(db: Any, sid: uuid.UUID) -> tuple[int, int]:
+        return SEASON, ROUND_NUMBER
+
+    monkeypatch.setattr(strategy_service, "resolve_season_round", _fake_resolve)
+    score = AsyncMock(
+        return_value={
+            "target_driver_id": str(field[target].driver_id),
+            "recommended_action": "STAY OUT",
+            "probability_pit_now_gains_position": 0.1,
+            "projected_gap_seconds": -3.0,
+            "n_laps_projected": 5,
+        }
+    )
+    monkeypatch.setattr(strategy_service, "get_undercut_score", score)
+    mock_db_session.execute.side_effect = [_scalars_all_result(list(field.values()))]
+
+    response = await strategy_service.get_undercut_for_session(
+        fakeredis, mock_db_session, uuid.uuid4(), field[driver].driver_id, field[target].driver_id
+    )
+    return response, score
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("driver", "target"), [("ALO", "STR"), ("STR", "ALO")])
+async def test_undercut_with_a_retired_car_is_not_projected(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    driver: str,
+    target: str,
+) -> None:
+    """Belgian GP 2026: STR, out on lap 25, was the timing tower's car behind
+    ALO, and the undercut came out "100%, +1987 s, PIT NOW"."""
+    field = _undercut_field()
+
+    response, score = await _undercut_for(
+        mock_db_session, fakeredis, monkeypatch, field, driver, target
+    )
+
+    assert response.retired_driver_id == field["STR"].driver_id
+    assert response.target_driver_id == field[target].driver_id
+    assert response.probability_pit_now_gains_position == 0.0
+    assert response.projected_gap_seconds == 0.0
+    assert response.n_laps_projected == 0
+    assert response.recommended_action == "STAY OUT"
+    score.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_undercut_between_running_cars_is_projected(
+    mock_db_session: AsyncMock,
+    fakeredis: fakeredis_lib.FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lapped finisher (ALO) is still a running car."""
+    response, score = await _undercut_for(
+        mock_db_session, fakeredis, monkeypatch, _undercut_field(), "PIA", "ALO"
+    )
+
+    assert response.retired_driver_id is None
+    assert response.probability_pit_now_gains_position == 0.1
+    score.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -2129,6 +2283,7 @@ async def test_session_wrappers_resolve_season_round_then_delegate(
         }
     )
     monkeypatch.setattr(strategy_service, "get_undercut_score", undercut_mock)
+    monkeypatch.setattr(strategy_service, "_retired_driver", AsyncMock(return_value=None))
     undercut_response = await strategy_service.get_undercut_for_session(
         fakeredis, mock_db_session, session_id, driver_id, target_driver_id
     )

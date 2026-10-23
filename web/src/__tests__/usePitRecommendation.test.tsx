@@ -135,6 +135,7 @@ describe("usePitRecommendation", () => {
       asOfLapNumber: 24,
       isFallbackEstimate: false,
       noFurtherStop: false,
+      raceFinished: false,
     })
   })
 
@@ -223,6 +224,7 @@ describe("usePitRecommendation", () => {
       asOfLapNumber: null,
       isFallbackEstimate: false,
       noFurtherStop: false,
+      raceFinished: false,
     })
   })
 
@@ -232,6 +234,26 @@ describe("usePitRecommendation", () => {
     const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
 
     expect(result.current.view?.noFurtherStop).toBe(true)
+  })
+
+  it("carries race_finished through from the REST /pit-window source", () => {
+    pitWindowResult = {
+      data: [buildPitWindow({ no_further_stop: true, race_finished: true })],
+      isLoading: false,
+    }
+
+    const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
+
+    expect(result.current.view?.raceFinished).toBe(true)
+  })
+
+  it("reads a response without race_finished (older backend) as not finished", () => {
+    const { race_finished: _omitted, ...olderBackend } = buildPitWindow()
+    pitWindowResult = { data: [olderBackend], isLoading: false }
+
+    const { result } = renderHook(() => usePitRecommendation("session-1", "driver-1"))
+
+    expect(result.current.view?.raceFinished).toBe(false)
   })
 
   it("returns a null view when the REST source has no candidates", () => {

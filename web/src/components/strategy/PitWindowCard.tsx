@@ -22,8 +22,9 @@ interface PitWindowCardProps {
 // can't be more precise than a plain visual flag (no race-length context
 // exists client-side to sanity-check the number itself).
 // "No further stop" (Day 6c) has no lap to show: the engine recommends
-// running the current tyre to the flag.
+// running the current tyre to the flag. A finished race has nothing to plan.
 function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLabel: string): string {
+  if (view.raceFinished) return windowLabel === "L" ? "Finished" : "Race finished"
   if (view.noFurtherStop) return windowLabel === "L" ? "No stop" : "No further stop"
   if (view.windowStart !== null && view.windowEnd !== null) {
     return `${windowLabel}${view.windowStart}–${view.windowEnd}`
@@ -34,6 +35,7 @@ function formatHeadline(view: PitRecommendationView, windowLabel: string, lapLab
 
 function formatCompactCaption(view: PitRecommendationView | null): string {
   if (!view) return "No prediction yet"
+  if (view.raceFinished) return "No laps left to plan a stop"
   const parts = [
     view.confidenceScore !== null ? `${Math.round(view.confidenceScore * 100)}% confidence` : null,
     view.asOfLapNumber !== null ? `as of lap ${view.asOfLapNumber}` : null,
@@ -102,7 +104,9 @@ export function PitWindowCard({ sessionId, driverId, compact, className }: PitWi
           )}
         </div>
         <p className="text-sm text-muted-foreground">
-          {view.noFurtherStop ? (
+          {view.raceFinished ? (
+            <>No laps left to plan a stop for.</>
+          ) : view.noFurtherStop ? (
             <>Stay out on {view.recommendedCompound ?? "the current tyre"} to the flag</>
           ) : (
             <>

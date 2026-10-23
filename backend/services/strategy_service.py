@@ -1911,6 +1911,45 @@ def build_pit_recommendation_explanation(
     )
 
 
+async def _race_status(db: AsyncSession, session_id: uuid.UUID) -> str | None:
+    """The status of the race a session belongs to ("completed", "scheduled", ...).
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+    Returns:
+        Race.status, or None for an unknown session.
+    """
+    query = (
+        select(Race.status)
+        .join(SessionModel, SessionModel.race_id == Race.id)
+        .where(SessionModel.id == session_id)
+    )
+    status: str | None = (await db.execute(query)).scalar_one_or_none()
+    return status
+
+
+def _race_finished_window(state: dict[str, Any]) -> PitWindowResponse:
+    """The pit-window answer for a driver with no race left: no further stop.
+
+    Args:
+        state: The driver's _current_state.
+    Returns:
+        One PitWindowResponse at the driver's last lap on their current tyre,
+        with race_finished and no_further_stop set and nothing projected.
+    """
+    last_lap = int(state["lap_number"])
+    return PitWindowResponse(
+        pit_lap=last_lap,
+        window_start=last_lap,
+        window_end=last_lap,
+        projected_total_delta_seconds=0.0,
+        recommended_compound=str(state["compound"]),
+        no_further_stop=True,
+        race_finished=True,
+    )
+
+
 async def get_pit_window_with_explanation(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -1949,13 +1988,26 @@ async def get_pit_window_with_explanation(
     Returns:
         Up to 3 PitWindowResponse, ascending by projected_total_delta_seconds;
         only the first (recommended) candidate carries explanation — empty
-        list if build_pit_recommendation itself returns no candidates.
+        list if build_pit_recommendation itself returns no candidates. When
+        the driver has no race left (the race is completed, or they have run
+        its last lap), the single race_finished entry _race_finished_window
+        builds, with nothing computed.
     Raises:
         NotFoundError: No lap_data exists yet for this driver/session — HTTP
             404 at the API layer (see build_pit_recommendation's docstring).
         ModelNotLoadedError: No tire degradation model loaded for the
             driver's current compound.
     """
+    state = await _current_state(db, session_id, driver_id)
+    # Without this a finished race answered with an empty list for every
+    # driver who ran the full distance, which clients showed as "No
+    # prediction yet" (production race page, 2026-10-23).
+    if (
+        await _race_status(db, session_id) == "completed"
+        or state["lap_number"] >= state["total_laps"]
+    ):
+        return [_race_finished_window(state)]
+
     candidates = await build_pit_recommendation(
         client, db, season, round_number, session_id, driver_id
     )
@@ -1963,7 +2015,6 @@ async def get_pit_window_with_explanation(
     if not responses:
         return responses
 
-    state = await _current_state(db, session_id, driver_id)
     models = _load_models()
     maps_cache = await encoding_maps_for_database(db, _load_encoding_maps(), [driver_id])
 
@@ -2663,6 +2714,51 @@ def still_racing(latest_laps: list[LapData], reference: LapData | None = None) -
     ]
 
 
+async def _latest_lap_per_driver(db: AsyncSession, session_id: uuid.UUID) -> list[LapData]:
+    """Each driver's latest lap_data row in a session.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+    Returns:
+        One row per driver with any lap in the session.
+    """
+    subq = (
+        select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
+        .where(LapData.session_id == session_id)
+        .group_by(LapData.driver_id)
+        .subquery()
+    )
+    join_condition = (LapData.driver_id == subq.c.driver_id) & (
+        LapData.lap_number == subq.c.max_lap
+    )
+    query = select(LapData).join(subq, join_condition).where(LapData.session_id == session_id)
+    return list((await db.execute(query)).scalars().all())
+
+
+async def _retired_driver(
+    db: AsyncSession, session_id: uuid.UUID, driver_ids: tuple[uuid.UUID, ...]
+) -> uuid.UUID | None:
+    """The first of these drivers who has stopped racing (see still_racing), if any.
+
+    Args:
+        db: Async DB session.
+        session_id: Session to read.
+        driver_ids: Drivers to check, in order.
+    Returns:
+        The first one with laps in the session that still_racing drops, or
+        None when all are running. A driver with no laps at all is left to
+        the caller (_current_state raises NotFoundError for it).
+    """
+    latest_laps = await _latest_lap_per_driver(db, session_id)
+    running = {lap.driver_id for lap in still_racing(latest_laps)}
+    with_laps = {lap.driver_id for lap in latest_laps}
+    for driver_id in driver_ids:
+        if driver_id in with_laps and driver_id not in running:
+            return driver_id
+    return None
+
+
 def _key_competitor_strategy(
     client: aioredis.Redis,  # type: ignore[type-arg]
     db: AsyncSession,
@@ -2698,17 +2794,7 @@ async def get_competitor_predicted_strategy(
     if pit_model is None:
         raise ModelNotLoadedError("pit_predictor model not loaded")
 
-    subq = (
-        select(LapData.driver_id, func.max(LapData.lap_number).label("max_lap"))
-        .where(LapData.session_id == session_id)
-        .group_by(LapData.driver_id)
-        .subquery()
-    )
-    join_condition = (LapData.driver_id == subq.c.driver_id) & (
-        LapData.lap_number == subq.c.max_lap
-    )
-    query = select(LapData).join(subq, join_condition).where(LapData.session_id == session_id)
-    latest_laps = still_racing(list((await db.execute(query)).scalars().all()))
+    latest_laps = still_racing(await _latest_lap_per_driver(db, session_id))
     if not latest_laps:
         return []
 
@@ -2966,12 +3052,27 @@ async def get_undercut_for_session(
     Args: see get_undercut_score — season/round_number are resolved here
         rather than caller-supplied.
     Returns:
-        UndercutThreatResponse wrapping get_undercut_score's result.
+        UndercutThreatResponse wrapping get_undercut_score's result; when
+        either car has stopped racing, nothing projected and
+        retired_driver_id set instead.
     Raises:
         NotFoundError: No session, or no lap_data yet for either driver.
         ModelNotLoadedError: Required tire degradation model not loaded.
     """
     season, round_number = await resolve_season_round(db, session_id)
+    # Checked here, outside get_undercut_score's cache (a day for a completed
+    # race), so it applies to answers already cached. Clients pick the cars
+    # ahead and behind from the timing tower, which still lists retired cars.
+    retired_driver_id = await _retired_driver(db, session_id, (driver_id, target_driver_id))
+    if retired_driver_id is not None:
+        return UndercutThreatResponse(
+            target_driver_id=target_driver_id,
+            probability_pit_now_gains_position=0.0,
+            projected_gap_seconds=0.0,
+            n_laps_projected=0,
+            recommended_action="STAY OUT",
+            retired_driver_id=retired_driver_id,
+        )
     result = await get_undercut_score(
         client, db, season, round_number, session_id, driver_id, target_driver_id
     )
