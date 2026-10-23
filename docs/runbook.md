@@ -20,8 +20,8 @@ there never will be one; `infra/helm-chart/`/`infra/k8s/` remain local-only
 reference material, not something running in production. Every `-n
 production` command below is local-cluster procedure, not a real target —
 substitute `-n local` if you're actually running one of these today. Fly.io
-equivalents (deploy, rollback, scaling, secrets) are their own sections
-below, not a 1:1 mapping of the Kubernetes commands.
+equivalents (deploy, rollback, secrets) are their own sections below, not a
+1:1 mapping of the Kubernetes commands.
 
 ## Table of Contents
 
@@ -37,17 +37,16 @@ below, not a 1:1 mapping of the Kubernetes commands.
 - [Database rollback (Alembic)](#database-rollback-alembic)
 - [Model rollback (S3)](#model-rollback-s3)
 - [Promoting a candidate model to production](#promoting-a-candidate-model-to-production)
-- [Race day scaling procedure (Fly.io)](#race-day-scaling-procedure-flyio)
 - [Secret rotation procedure](#secret-rotation-procedure)
 
 ---
 
 ## Race day checklist
 
-Step-by-step, before a live race session. This is the pre-flight list — see
-[Race day scaling procedure](#race-day-scaling-procedure) below for the
-Kubernetes-specific pre-scaling steps once a real cluster target exists (it
-doesn't yet — see that section's own caveat).
+Step-by-step, before a live race session. This is for the **local stack**:
+production on Fly.io never ingests a live race (it plays back the three
+curated races, see [Fly.io deployment](#flyio-deployment)), so there is
+nothing to do there on race day.
 
 1. **Unpause the Supabase project**, if it's been idle. The free tier pauses
    a project after 7 days of inactivity — check the
@@ -293,60 +292,63 @@ To try playback locally:
 
 ## Fly.io deployment
 
-> **Strategy revised 2026-09-25.** Demo Replay means the worker must run all
-> the time, so the plan below changes before the first deploy: `beat` is
-> merged into the worker, both machines stay on, and the region may move off
-> `sin`. See [DEPLOYMENT.md's Fly.io section](../DEPLOYMENT.md#production-deployment--flyio-planned)
-> for the reasoning, the cost comparison and the full to-do list. The commands
-> below still describe the original three-process-group setup until those
-> changes land.
+One Fly app (`f1-strategy`, `fly.toml` at the repo root, region `ams`) with
+two process groups built from one image (design: `docs/internal/demo-deployment-plan-2026.md`;
+reasoning per setting: `fly.toml`'s comments):
 
-Single Fly app (`f1-strategy`, `fly.toml` at repo root) with three process
-groups sharing one build — `web` (FastAPI, always-on), `worker` (Celery,
-scaled to 0 except race weekends), `beat` (Celery Beat, same). See
-`fly.toml`'s own header comment for the architecture reasoning (single app
-vs. three, sizing, why `web` doesn't auto-stop) — this section is the
-day-to-day procedure, not the reasoning.
+| Group | Size | Runs | When |
+|---|---|---|---|
+| `web` | shared-cpu-1x, 1 GB | FastAPI (REST + WebSocket); Demo Replays as a `replay_playback.py` subprocess | Always on |
+| `worker` | performance-1x, 2 GB | Celery, for Strategy Simulator runs only | Started by the web process when a simulation is queued (`FLY_WORKER_AUTOSTART`); stops itself after 10 minutes with no task (`WORKER_IDLE_EXIT_MINUTES`) |
+
+There is no `beat`: production never ingests a live race, and beat's
+5-minute task would keep the worker from ever going idle. Live ingestion,
+auto race detection and the worker-based replay run in the local stack only.
+Nothing needs scaling by hand, on race day or otherwise.
+
+Non-secret settings (`ENVIRONMENT`, `DEMO_PLAYBACK_MODE`, the quotas, the
+cache TTLs, `AWS_REGION`/`AWS_BUCKET_NAME`, …) are in `fly.toml`'s `[env]`
+and change with a deploy. Secrets are set with `fly secrets set`.
 
 ### Prerequisites (one-time)
 
-1. Create a Fly.io account at [fly.io](https://fly.io) and install `flyctl`:
+1. Install `flyctl` and sign in:
    ```powershell
    powershell -c "iwr https://fly.io/install.ps1 -useb | iex"
+   fly auth login
    ```
-2. `fly auth login`
-3. `fly apps create f1-strategy` — claims the app name; does not deploy.
-   `fly.toml` already exists and is complete, so **do not** run `fly
-   launch` (its interactive flow can regenerate/overwrite `fly.toml`).
+2. `fly apps create f1-strategy`: claims the app name, deploys nothing.
+   **Don't** run `fly launch`: its interactive flow can overwrite `fly.toml`.
+3. An Upstash Redis database in Europe (Upstash console → Create database,
+   region `eu-west-1` or Frankfurt). It only holds cache and short-lived keys,
+   so nothing is copied from the old one. Use its `rediss://` URL (TLS).
 
 ### Secrets
 
-One `fly secrets set` call populates all three process groups (they share
-the app). Same conversion `infra/k8s/create-secrets.sh` already does for
-the local Kubernetes Secret — Supabase's transaction-mode pooler URL (port
-6543) becomes `DATABASE_URL`/`TIMESCALE_URL` with the `+asyncpg` scheme
-swap, Upstash's `rediss://` URL becomes `REDIS_URL` directly:
+One `fly secrets set` covers both process groups. Values never go into a
+file or a commit; type them in the terminal or paste from a password
+manager.
+
+| Secret | Value |
+|---|---|
+| `DATABASE_URL`, `TIMESCALE_URL` | `SUPABASE_DATABASE_URL` (transaction pooler, port 6543) with `postgresql://` changed to `postgresql+asyncpg://`; the same value for both |
+| `REDIS_URL` | the new Upstash database's `rediss://` URL |
+| `SECRET_KEY` | a fresh production key (`python -c "import secrets; print(secrets.token_hex(32))"`) |
+| `SENTRY_DSN` | from Sentry's project settings |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | the S3 IAM user's keys |
+| `FLY_API_TOKEN` | `fly tokens create deploy --app f1-strategy`; lets the web process start the worker machine |
+| `ALLOWED_ORIGINS` | the Vercel site's URL, e.g. `https://<project>.vercel.app` (comma-separated if several) |
+| `METRICS_USER`, `METRICS_PASSWORD` | real values, replacing the `metrics`/`metrics-dev` development defaults |
 
 ```bash
-fly secrets set --app f1-strategy \
-  DATABASE_URL="postgresql+asyncpg://...<SUPABASE_DATABASE_URL, scheme swapped>..." \
-  TIMESCALE_URL="postgresql+asyncpg://...<same as DATABASE_URL>..." \
-  REDIS_URL="<UPSTASH_REDIS_URL, rediss://...>" \
-  SECRET_KEY="<production SECRET_KEY>" \
-  SENTRY_DSN="<production SENTRY_DSN>" \
-  AWS_ACCESS_KEY_ID="<...>" \
-  AWS_SECRET_ACCESS_KEY="<...>" \
-  AWS_REGION="ap-south-1" \
-  AWS_BUCKET_NAME="f1-strategy-models" \
-  ALLOWED_ORIGINS="https://<real Vercel URL>.vercel.app" \
-  ENVIRONMENT="production"
+fly secrets set --app f1-strategy DATABASE_URL="..." TIMESCALE_URL="..." REDIS_URL="..." \
+  SECRET_KEY="..." SENTRY_DSN="..." AWS_ACCESS_KEY_ID="..." AWS_SECRET_ACCESS_KEY="..." \
+  FLY_API_TOKEN="..." ALLOWED_ORIGINS="..." METRICS_USER="..." METRICS_PASSWORD="..."
 ```
 
-`ALLOWED_ORIGINS` is set here directly, **not** as a GitHub Secret — CORS is
-a runtime concern of the deployed app, not a CI-time one. `SLACK_WEBHOOK_DEPLOY`
-is deliberately **not** set here — `backend/core/config.py` never reads it;
-it's a GitHub Actions-only secret for CI deploy notifications (see
-CLAUDE.md's GitHub Secrets Checklist).
+`SLACK_WEBHOOK_DEPLOY` is deliberately **not** set here: the app never reads
+it; it's a GitHub Actions secret for CI notifications (CLAUDE.md's GitHub
+Secrets Checklist).
 
 ### Deploy
 
@@ -354,28 +356,59 @@ CLAUDE.md's GitHub Secrets Checklist).
 fly deploy --app f1-strategy
 ```
 
-Builds from `infra/docker/Dockerfile.worker` (see `fly.toml`'s `[build]`)
-and starts one machine per process group (`web`, `worker`, `beat`) on first
-deploy.
+Builds `infra/docker/Dockerfile.worker` (the image bakes in Numba's compiled
+code, so boot doesn't compile) and creates or updates one machine per group.
+Migrations aren't run here: `cd.yml`'s `migrate` job applies them to
+Supabase on every merge to `main`.
 
 ### Verify
 
 ```bash
 curl https://f1-strategy.fly.dev/health
-# {"status":"ok","db":"ok","redis":"ok"}
+# {"status":"ok","db":"ok","redis":"ok"}   ("degraded" = Redis unreachable)
 
-fly logs --app f1-strategy -i <worker machine id>   # look for "celery@... ready."
-fly logs --app f1-strategy -i <beat machine id>     # look for the beat scheduler tick
+fly status --app f1-strategy
+fly machines list --app f1-strategy   # the worker machine's process group must be "worker"
+fly logs --app f1-strategy            # the worker logs "celery@... ready.", then stops itself after 10 idle minutes
 ```
 
-Then immediately scale `worker`/`beat` down to the resting state (see
-[Race day scaling procedure](#race-day-scaling-procedure-flyio) below) —
-the point of confirming they boot correctly right after deploy is to catch
-a broken image *before* the next race weekend, not to leave them running.
+### After every deploy: warm the race page's cache
+
+The race page's pit window, undercut panel and strategy wall are computed on
+the web machine on a cache miss and then cached for a day
+(`COMPLETED_SESSION_STRATEGY_TTL_SECONDS`). Warm them so the first visitor
+doesn't wait. The session is the race page's default, the newest completed
+race (`GET /api/v1/strategy/last-ingested-session` gives its id):
 
 ```bash
-make fly-race-down
+fly ssh console --app f1-strategy --process-group web -u f1 \
+  -C "python -m backend.scripts.warm_strategy_cache --session-id <session uuid>"
 ```
+
+Keep `-u f1` on every `fly ssh console` command that runs app code: the app
+runs as `f1`, and the console connects as root by default. Files root writes,
+such as the models it downloads, are then root's. On 2026-10-22, a warm run as
+root had created `/tmp/f1_models` before the web process did, so once the
+warmed answers expired the web process couldn't download the models and every
+strategy endpoint returned 500. Both Dockerfiles now create that folder as
+`f1`'s.
+
+### Day-to-day
+
+- **The Strategy Simulator's first run after a quiet spell** waits about a
+  minute while the worker machine starts; the page says so. If it times out,
+  see "The simulation engine didn't respond in time" under
+  [Common issues and fixes](#common-issues-and-fixes).
+- **Quotas:** 5 scenarios per account and 15 site-wide per UTC day
+  (`SIM_DAILY_SCENARIOS_*` in `fly.toml`). See the 429 row in Common issues.
+- **After a model is promoted or the prediction code changes,** refresh the
+  stored replay data ([Refreshing the Demo Replay data in production](#refreshing-the-demo-replay-data-in-production)).
+  The Simulator picks up new models at the worker's next start by itself.
+- **Rollback:** `fly releases --app f1-strategy --image` lists releases with
+  their images;
+  `fly deploy --app f1-strategy --image <image of a previous release>`
+  redeploys an older one. A migration rollback is separate (see
+  [Database rollback](#database-rollback-alembic)).
 
 ---
 
@@ -513,76 +546,6 @@ candidate after reviewing it:
 
 ---
 
-## Race day scaling procedure (Fly.io)
-
-> **Being retired.** This procedure belongs to the original hybrid plan
-> (worker and beat off between races). Under the revised plan the worker runs
-> all the time, so there is nothing to scale up or down on race day. See
-> [DEPLOYMENT.md's Fly.io section](../DEPLOYMENT.md#production-deployment--flyio-planned).
-
-`worker`/`beat` rest at 0 machines between races (see `fly.toml`'s module
-comment) — this is the cost-saving side of the hybrid deployment
-decision, not an incident response. `web` never needs scaling for this;
-it's always-on and everything it serves alone (dashboard, driver stats,
-historical races, pit-window/undercut/overview predictions — these run
-inline in `web` on a cache miss, not via Celery, per the
-worker-dependency audit) keeps working the whole time regardless.
-
-1. **30+ minutes before a session:** scale `worker`/`beat` up.
-
-   ```bash
-   make fly-race-up
-   # = ./infra/fly/scale-race-weekend.sh up
-   # = fly scale count worker=1 beat=1 --app f1-strategy --yes
-   ```
-
-2. **Confirm both came up healthy:**
-
-   ```bash
-   fly status --app f1-strategy
-   fly logs --app f1-strategy -i <worker machine id>   # "celery@... ready."
-   ```
-
-3. **Warm the cache** before the session starts, so the first wave of
-   viewers doesn't all hit a cold `/strategy/overview` computation
-   simultaneously (see CLAUDE.md's "Redis cache hit rate under burst
-   ramp-up" note):
-
-   ```bash
-   python backend/scripts/warm_strategy_cache.py --session-id <race session UUID>
-   ```
-
-4. **Watch Grafana** (Celery queue depth, cache hit rate, DB pool usage)
-   during the session. A single `--pool=solo` worker machine is the only
-   consumer for `telemetry_queue`/`prediction_queue`/`alert_queue` — if
-   queue depth climbs faster than it drains, scale worker count up further
-   (Fly bills per-second, so this is cheap for the duration of a session):
-
-   ```bash
-   fly scale count worker=<N> --app f1-strategy --yes
-   ```
-
-   Only ever run **one** `beat` machine — Fly has no declarative
-   single-instance guarantee for a process group (confirmed while
-   researching the Fly.io setup), so this is operator discipline, not something the platform
-   enforces. Never scale `beat` above 1.
-
-5. **Scale back down** after the session ends:
-
-   ```bash
-   make fly-race-down
-   # = fly scale count worker=0 beat=0 --app f1-strategy --yes
-   ```
-
-If you forget step 5, the cost impact is small (Fly's per-second billing
-means idle-but-running `worker`/`beat` cost roughly $9.24/month combined at
-the sizing in `fly.toml` — see `fly.toml`'s header comment) but not
-zero, and `beat` left running outside a race weekend just polls Ergast to
-no effect (see CLAUDE.md's Auto Race Detection section) rather than causing
-harm.
-
----
-
 ## Secret rotation procedure
 
 All secrets are GitHub Secrets (CI/CD) or environment variables sourced from
@@ -616,9 +579,12 @@ individual with access leaves the project.
    fly secrets set --app f1-strategy <NAME>="<new value>"
    ```
 
-   `fly secrets set` restarts every machine across all three process groups
-   (`web`/`worker`/`beat`) automatically to pick up the new value — no
-   separate roll step needed, unlike the Kubernetes path below.
+   `fly secrets set` rolls the app's machines (`web` and `worker`) to pick
+   up the new value, so no separate restart step is needed, unlike the
+   Kubernetes path below. `FLY_API_TOKEN` is rotated the same way after
+   `fly tokens create deploy --app f1-strategy`; revoke the old token with
+   `fly tokens revoke` once the Simulator has started the worker on the new
+   one.
 
    **Local Kubernetes Secret (local dev cluster only, not production)** —
    never commit the plaintext value to any YAML file. Sealed Secrets is

@@ -76,6 +76,12 @@ function ThreatRow({ label, otherDriverId, data, isLoading }: ThreatRowProps) {
       </div>
       {isLoading || !data ? (
         <LoadingSkeleton className="h-4 w-full" />
+      ) : data.retired_driver_id ? (
+        // The timing tower still lists a retired car, so it can be the
+        // neighbour; the backend projects nothing for it (2026-10-23).
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <DriverChip driverId={data.retired_driver_id} /> retired — no undercut
+        </p>
       ) : (
         <>
           <ProgressBar value={data.probability_pit_now_gains_position} />

@@ -2,26 +2,30 @@ import { useState } from "react"
 import { Pressable, ScrollView, Text, View } from "react-native"
 import { SafeAreaView } from "react-native-safe-area-context"
 import { AlertSubscriptionsSection } from "@/components/settings/AlertSubscriptionsSection"
+import { AppPreferencesSection } from "@/components/settings/AppPreferencesSection"
 import { PasswordSection } from "@/components/settings/PasswordSection"
 import { ProfileSection } from "@/components/settings/ProfileSection"
 
-type Section = "profile" | "password" | "notifications"
+type Section = "profile" | "password" | "notifications" | "app"
 
 const SECTIONS: { key: Section; label: string }[] = [
   { key: "profile", label: "Profile" },
   { key: "password", label: "Password" },
   { key: "notifications", label: "Notifications" },
+  { key: "app", label: "App" },
 ]
 
 // Web's SettingsModal uses a sidebar of three sections inside a Dialog —
 // mobile uses a horizontal pill row instead (a sidebar doesn't fit a phone
-// width), same three sections and same underlying data/mutations.
+// width), same three sections and same underlying data/mutations, plus a
+// mobile-only "App" section for device settings (haptics). The row wraps so a
+// narrow phone doesn't push the last pill off screen.
 export default function SettingsScreen() {
   const [section, setSection] = useState<Section>("profile")
 
   return (
     <SafeAreaView className="flex-1 bg-background" edges={["bottom"]}>
-      <View className="flex-row gap-2 border-b border-white/10 px-4 py-3">
+      <View className="flex-row flex-wrap gap-2 border-b border-white/10 px-4 py-3">
         {SECTIONS.map(({ key, label }) => (
           <Pressable
             key={key}
@@ -38,6 +42,7 @@ export default function SettingsScreen() {
         {section === "profile" && <ProfileSection />}
         {section === "password" && <PasswordSection />}
         {section === "notifications" && <AlertSubscriptionsSection />}
+        {section === "app" && <AppPreferencesSection />}
       </ScrollView>
     </SafeAreaView>
   )
